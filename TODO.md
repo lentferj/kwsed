@@ -129,23 +129,24 @@ but it has not been measured either.
 
 ---
 
-## 5b. The bank write has never reached the instrument
+## 5b. The bank write — DONE 2026-09-12
 
-**Status:** transport solved; the write itself still unperformed.
+**Status:** resolved against the hardware.
 
-python-rtmidi cannot send a message the size of a bank dump on ALSA -- 8 kB
-goes, 16 kB fails, a patch bank is 29828 bytes. `kws/alsa.py` sends it in
-256-byte sequencer events instead, and that is verified byte for byte
-through a virtual port: 29828 sent, 29828 read back, identical.
+A built patch bank was written to the Card and read back identical: 14910
+decoded bytes, no differences, all eight patches present. python-rtmidi
+cannot send a message that size on ALSA, so `kws/alsa.py` does it in
+256-byte sequencer events paced to the wire.
 
-**Blocked on:** running it. The sandbox this was developed in refuses to
-send to hardware, so no bank has been written to a real WS SR. Everything is
-in place: the card reads back empty at System Exclusive byte 3, its three
-dumps are saved as a template, and the builder produces files whose length,
-framing and checksum match the instrument's own.
+The first attempt is the part worth remembering. It reported success and
+stored a stream with 672 bytes missing from the middle -- every patch after
+the sixth shifted earlier by 336 bytes, the tail lost -- because the whole
+29828 bytes went out in 0.00 seconds and the interface dropped what it could
+not hold. Nothing errored. The read-back comparison caught it, which is the
+only reason it was noticed at all.
 
-Do it on a bank that does not matter -- a freshly formatted card -- and
-check the read-back verifies before trusting it with anything else.
+**Still to do:** the performance and wave-sequence banks have not been
+written, only patches. Same path, same fence.
 
 ---
 

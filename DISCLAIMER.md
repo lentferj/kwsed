@@ -67,10 +67,16 @@ destination read in full and backed up to a `.syx` before a byte goes out —
 if that read fails nothing is written at all — the names about to be
 replaced shown first, and the result verified by reading it back.
 
-**This write path has never been exercised against hardware.** The bytes it
-builds match the instrument's own dumps in length, framing and checksum, and
-round-trip through kwsed's own reader, but no bank has been written to a
-real WS SR. Try it on something disposable first.
+**Exercised against hardware on 2026-09-12.** A built patch bank was written
+to the Card and read back byte for byte identical -- 14910 decoded bytes, no
+differences. Still try it on something disposable first: it replaces a whole
+bank.
+
+The first attempt is worth knowing about. It reported success and quietly
+stored a stream with 672 bytes missing from the middle, because the send was
+not paced and MIDI has no flow control. **Only the read-back comparison
+caught it.** If you use this, do not skip that step or treat a mismatch as
+noise.
 
 It plays the instrument in one other place, and that place says so: `Enter`
 in the TUI and `kwscli select`.
