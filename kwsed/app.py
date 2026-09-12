@@ -304,7 +304,13 @@ class KwsedApp(App):
     CSS = """
     Screen { layers: base; }
     #panes { height: 1fr; }
-    #bank-table { width: 30; border-right: solid $panel; }
+    /* Sized to its content. A fixed width does not truncate the end
+       of a label -- the table scrolls sideways and clips the
+       *start*, so a bank reads as nonsense rather than as narrow. */
+    #bank-table {
+        width: auto; min-width: 20; max-width: 52;
+        border-right: solid $panel;
+    }
     #slot-table { width: 1fr; }
     DataTable { height: 1fr; }
     #detail { height: 3; padding: 0 1; border-top: solid $panel; }
@@ -359,13 +365,17 @@ class KwsedApp(App):
         self.title = "kwsed"
         table = self.query_one("#bank-table", DataTable)
         for label, key in (("bank", "bank"), ("kind", "kind"), ("n", "n"),
-                           ("", "rw")):
+                           ("", "rw"), ("♥", "fav")):
             table.add_column(label, key=key)
         for number, kind in self._pairs:
             entry = banks.bank(number)
+            marked = len(self._favorite_keys(entry.id, kind))
             table.add_row(entry.label, kind[:4],
                           str(banks.count_for(kind)),
                           "" if entry.writable else "ro",
+                          # blank rather than "0": a column of zeroes is
+                          # noise, and the eye wants the few that differ
+                          str(marked) if marked else "",
                           key=f"{number}:{kind}")
 
         slots = self.query_one("#slot-table", DataTable)
