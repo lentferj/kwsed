@@ -264,7 +264,7 @@ class WavestationBridge:
         """
         entry = banks.bank(bank)
         self._drain()
-        self._send(m.bulk_request(entry.number, self.channel))
+        self._send(m.bulk_request(entry.sysex, self.channel))
         deadline = time.time() + (
             DUMP_TIMEOUT if timeout is None else timeout)
         while time.time() < deadline:
@@ -309,7 +309,11 @@ class WavestationBridge:
             raise ValueError(f"channel {target} is outside 0-15")
         status = 0xB0 | target
         self._out.send_message([status, 0x00, 0x00])
-        self._out.send_message([status, 0x20, slot.bank.number])
+        # Which number a Bank Select wants -- the display
+        # position or the System Exclusive byte -- is NOT
+        # established. The wire byte is sent because every
+        # other place that names a bank uses it. See TODO 1.
+        self._out.send_message([status, 0x20, slot.bank.sysex])
         self._out.send_message([0xC0 | target, slot.number])
         time.sleep(SEND_GAP)
 
@@ -361,7 +365,7 @@ class WavestationBridge:
 
         # --- 2. back the destination up, or do not write at all ------------
         try:
-            before = self.read_raw(entry.number, function, timeout=timeout)
+            before = self.read_raw(entry.sysex, function, timeout=timeout)
         except Exception as exc:
             raise DeviceError(
                 f"could not read {entry.label} before writing it, so nothing "
@@ -379,7 +383,7 @@ class WavestationBridge:
 
         # --- 3. send -------------------------------------------------------
         self._drain()
-        self._send(m.frame_bulk(function, entry.number, data,
+        self._send(m.frame_bulk(function, entry.sysex, data,
                                 channel=self.channel))
 
         result = {"bank": entry.label, "kind": kind, "backup": saved,
@@ -389,14 +393,14 @@ class WavestationBridge:
 
         # --- 4. read back and compare --------------------------------------
         try:
-            after = self.read_raw(entry.number, function, timeout=timeout)
+            after = self.read_raw(entry.sysex, function, timeout=timeout)
         except Exception as exc:
             result["verified"] = False
             result["mismatch"] = (
                 f"the write was sent but {entry.label} could not be read "
                 f"back to check it ({exc}). Whether it took is unknown.")
             return result
-        sent = m.frame_bulk(function, entry.number, data,
+        sent = m.frame_bulk(function, entry.sysex, data,
                             channel=self.channel)
         result["verified"] = bytes(after) == bytes(sent)
         if not result["verified"]:

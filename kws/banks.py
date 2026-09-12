@@ -73,9 +73,23 @@ class Kind:
 
 @dataclass(frozen=True)
 class Bank:
-    """One bank, as System Exclusive numbers it."""
+    """One bank: what the instrument calls it, and the byte that names it.
 
-    number: int          #: 0-11, the byte a dump carries.
+    **These are two different numbers and conflating them was a real bug.**
+    The banks in the order a person sees them -- RAM 1-3, ROM 4-11, Card --
+    are not numbered 0-11 on the wire. The Card is System Exclusive bank
+    **3**, RAM 3 is **4**, and ROM 11 is **2**.
+
+    kwsed used the display position as the wire byte for its whole life, so
+    every "Card" it read was really ROM 10. That is why the card appeared
+    never to change when the card in the slot was swapped, power cycled and
+    reformatted: ROM does not change. Confirmed on hardware -- a freshly
+    formatted card reads back 35 of 35 unnamed patches at byte 3, while byte
+    11 holds a ROM bank's sounds.
+    """
+
+    number: int          #: 0-11, the position a person sees it in.
+    sysex: int           #: the byte a request and a dump actually carry.
     label: str           #: "RAM 1", "ROM 4", "Card".
     writable: bool
 
@@ -89,19 +103,33 @@ class Bank:
 #: bank bytes in the owner's factory dumps run 0-11, and Edisyn's
 #: Wavestation support lists the same twelve with the same four writable.
 BANKS: Tuple[Bank, ...] = (
-    Bank(0, "RAM 1", True),
-    Bank(1, "RAM 2", True),
-    Bank(2, "RAM 3", True),
-    Bank(3, "ROM 4", False),
-    Bank(4, "ROM 5", False),
-    Bank(5, "ROM 6", False),
-    Bank(6, "ROM 7", False),
-    Bank(7, "ROM 8", False),
-    Bank(8, "ROM 9", False),
-    Bank(9, "ROM 10", False),
-    Bank(10, "ROM 11", False),
-    Bank(11, "Card", True),
+    #    pos  wire  label      writable
+    Bank(0,   0,    "RAM 1",   True),
+    Bank(1,   1,    "RAM 2",   True),
+    Bank(2,   4,    "RAM 3",   True),
+    Bank(3,   5,    "ROM 4",   False),
+    Bank(4,   6,    "ROM 5",   False),
+    Bank(5,   7,    "ROM 6",   False),
+    Bank(6,   8,    "ROM 7",   False),
+    Bank(7,   9,    "ROM 8",   False),
+    Bank(8,   10,   "ROM 9",   False),
+    Bank(9,   11,   "ROM 10",  False),
+    Bank(10,  2,    "ROM 11",  False),
+    Bank(11,  3,    "Card",    True),
 )
+
+#: Wire byte -> bank, for reading a dump's own bank byte back into a bank.
+_BY_SYSEX: Dict[int, Bank] = {entry.sysex: entry for entry in BANKS}
+
+
+def by_sysex(byte: int) -> Bank:
+    """The bank a dump's bank byte refers to."""
+    try:
+        return _BY_SYSEX[byte]
+    except KeyError:
+        raise LookupError(
+            f"no bank carries the System Exclusive byte {byte}; the twelve "
+            f"use {sorted(_BY_SYSEX)}") from None
 
 _BY_NUMBER: Dict[int, Bank] = {entry.number: entry for entry in BANKS}
 _BY_ID: Dict[str, Bank] = {entry.id: entry for entry in BANKS}

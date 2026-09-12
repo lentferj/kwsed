@@ -106,14 +106,14 @@ class DemoDevice:
             # A byte with bit 7 set, so the nibble encoding is exercised.
             record[m.NAME_LEN] = 0x80 | (index & 0x7F)
             raw.extend(record)
-        payload = [entry.number] + list(m.to_nibbles(bytes(raw)))
+        payload = [entry.sysex] + list(m.to_nibbles(bytes(raw)))
         return m.frame(function, payload, channel=self.channel)
 
     # --- the operations kwsed uses -------------------------------------------
 
     def read_bank(self, bank, *, timeout: Optional[float] = None):
         entry = banks.bank(bank)
-        reply = self.handle(m.bulk_request(entry.number, self.channel))
+        reply = self.handle(m.bulk_request(entry.sysex, self.channel))
         packet = m.parse(reply)
         if packet is None or packet.is_error:
             raise RuntimeError("demo device refused its own request")

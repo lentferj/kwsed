@@ -146,7 +146,8 @@ Which settles three things:
 1. **Discovery works**, and the Identity Reply carries the global channel —
    the one number that cannot be guessed, because a request on any other
    channel is met with silence rather than an error.
-2. **The card slot is bank 11.** The user's card was read.
+2. ~~**The card slot is bank 11.**~~ **Wrong -- see section 10.** Byte 11
+   is ROM 10. The Card is System Exclusive byte **3**.
 3. **The reply, not the request, says what came back.** Both requests were
    for a bank; both were answered with *patches*, which is the unit's choice
    and not the request's. `read_bank()` therefore takes the bank and the
@@ -365,3 +366,77 @@ refused. `messages.frame_bulk` applies it.
 
 This is a good example of a fact that only a new use exposes. Nothing was
 wrong before; the code simply had never been asked the question.
+
+
+---
+
+## 10. The bank numbering: two different numbers, and a bug that lasted
+
+**The order a person sees the banks in is not the order the wire numbers
+them.** The instrument's twelve banks -- RAM 1-3, ROM 4-11, Card -- carry
+these System Exclusive bytes:
+
+| bank | RAM 1 | RAM 2 | RAM 3 | ROM 4 | ROM 5 | ROM 6 | ROM 7 | ROM 8 | ROM 9 | ROM 10 | ROM 11 | Card |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| byte | 0 | 1 | **4** | 5 | 6 | 7 | 8 | 9 | 10 | 11 | **2** | **3** |
+
+kwsed used the display position as the wire byte from its first commit. So
+`bank("CARD")` asked for byte 11, and byte 11 is ROM 10.
+
+### Why it took so long to notice
+
+Because nothing failed. Every read succeeded and returned a real bank full
+of real names -- just not the one asked for. The symptom was subtler and
+pointed the wrong way: **the card appeared never to change.** Swapping the
+Hcard to another bank did not change it; a power cycle did not change it;
+reformatting did not change it. Each of those correctly produced no change,
+because ROM does not change, and each time the conclusion drawn was about
+the card slot or the instrument's caching rather than about the number being
+asked for.
+
+Two plausible theories were built and tested on that false premise -- that
+the instrument caches the card's contents, and that Multi data might only be
+served in a particular mode -- and one of them consumed a power cycle of the
+user's time.
+
+### What settled it
+
+The owner formatted a fresh empty bank on the card and read the instrument's
+own display, which said `PERFORM CARD: 0 | UNNAMED`. So the front panel
+could see an empty card while kwsed's "Card" was full of sounds. Those two
+facts cannot both be about the same bank.
+
+Edisyn carries the mapping outright:
+
+```java
+edisynToWSBank = { 0, 1, 4, 5, 6, 7, 8, 9, 10, 11, 2, 3 };
+wsToEdisynBank = { 0, 1, 10, 11, 2, 3, 4, 5, 6, 7, 8, 9 };
+```
+
+Read against its bank list, the last entry -- the Card -- maps to byte 3.
+Confirmed immediately on hardware:
+
+```
+byte  3  ->  35/35 unnamed          the freshly formatted card
+byte 11  ->  Galaxis, Space Sailing ...   a ROM bank
+byte  4  ->  Init x 35              RAM 3
+byte  2  ->  Touch Tone, Deep Waves ...   ROM 11
+```
+
+### The lesson, which is not "read Edisyn more carefully"
+
+The mapping was in a file this project had already read for other facts. It
+was passed over because there was no reason to suspect the numbering needed
+a mapping at all -- the display order and the byte order agree for the first
+two banks, which is exactly enough to make the identity assumption look
+confirmed.
+
+The general form: **an assumption that is never stated is never checked.**
+`Bank.number` carried two meanings and nothing in the code or the tests had
+to say which. It is now two fields, `number` and `sysex`, and the tests pin
+every one of the twelve.
+
+### Still open
+
+Whether a **Bank Select** wants the display position or the wire byte is
+still not established, and it is now a sharper question than before. TODO 1.

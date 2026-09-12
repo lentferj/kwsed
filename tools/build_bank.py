@@ -119,7 +119,7 @@ def main(argv=None):
                                           * rec.PERFORMANCE_SIZE)),
         template_waveseq=(template.waveseq
                           or bytes(rec.WAVESEQ_BANK_SIZE)),
-        destination_bank=destination.number)
+        destination_bank=destination.sysex)
 
     channel = args.channel - 1
     written = []
@@ -129,7 +129,7 @@ def main(argv=None):
             ("seq", m.Function.ALL_WAVESEQ_DUMP, built.waveseq)):
         if payload is None:
             continue
-        frame = m.frame_bulk(function, destination.number, payload,
+        frame = m.frame_bulk(function, destination.sysex, payload,
                              channel=channel)
         path = f"{args.out}-{suffix}.syx"
         open(path, "wb").write(bytes(frame))

@@ -131,7 +131,9 @@ def parse_bulk(packet: m.Packet) -> BulkDump:
     if number is None:
         raise m.ProtocolError(
             f"{packet.function_name} carries no bank byte")
-    entry = banks.bank(number)
+    # The dump's bank byte is a wire byte, not a display
+    # position: byte 3 is the Card, not ROM 4.
+    entry = banks.by_sysex(number)
 
     data = packet.data()
     if len(data) % size:

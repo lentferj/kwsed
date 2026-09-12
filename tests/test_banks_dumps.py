@@ -79,7 +79,8 @@ class TestBulkDumps:
             m.Function.ALL_PATCH_DUMP, 11, banks.Kind.PATCH,
             dumps.PATCH_RECORD, 35))
         assert dump.count == 35
-        assert dump.bank.label == "Card"
+        assert dump.bank.label == "ROM 10", \
+            "System Exclusive byte 11 is ROM 10; the Card is byte 3"
 
     def test_names_survive_the_nibble_encoding(self):
         dump = dumps.parse_bulk(_bulk(
@@ -100,7 +101,43 @@ class TestBulkDumps:
         dump = dumps.parse_bulk(_bulk(
             m.Function.ALL_PATCH_DUMP, 7, banks.Kind.PATCH,
             dumps.PATCH_RECORD, 35))
-        assert dump.bank.number == 7
+        assert dump.bank.sysex == 7
+        assert dump.bank.label == "ROM 6"
+
+
+class TestTheBankNumbering:
+    """The display position and the wire byte are different numbers.
+
+    Getting this wrong is not loud: every read succeeds and returns a real
+    bank, just not the one asked for. kwsed read ROM 10 whenever it thought
+    it was reading the Card, for its whole life, and the symptom looked like
+    a card that never changed.
+    """
+
+    #: Confirmed on hardware 2026-09-12: a freshly formatted card reads back
+    #: 35 of 35 unnamed patches at byte 3, while byte 11 holds ROM sounds.
+    WIRE = {"RAM 1": 0, "RAM 2": 1, "RAM 3": 4, "ROM 4": 5, "ROM 5": 6,
+            "ROM 6": 7, "ROM 7": 8, "ROM 8": 9, "ROM 9": 10, "ROM 10": 11,
+            "ROM 11": 2, "Card": 3}
+
+    def test_every_bank_has_the_wire_byte_the_instrument_uses(self):
+        for entry in banks.BANKS:
+            assert entry.sysex == self.WIRE[entry.label], entry.label
+
+    def test_the_card_is_byte_three_not_eleven(self):
+        assert banks.bank("CARD").sysex == 3
+        assert banks.by_sysex(3).label == "Card"
+        assert banks.by_sysex(11).label == "ROM 10"
+
+    def test_position_and_wire_byte_are_not_the_same_mapping(self):
+        assert [b.number for b in banks.BANKS] != [b.sysex for b in banks.BANKS]
+
+    def test_every_wire_byte_is_used_exactly_once(self):
+        used = sorted(b.sysex for b in banks.BANKS)
+        assert used == list(range(12))
+
+    def test_the_writable_banks_keep_their_wire_bytes(self):
+        assert sorted(b.sysex for b in banks.writable_banks()) == [0, 1, 3, 4]
 
 
 class TestRefusals:

@@ -20,7 +20,10 @@ fitted):
   offsets.
 - **Bank dumps.** A bank request returned complete banks, decoded into 35
   patch names each, from RAM 1 and from the **Card** — confirming the card
-  slot is addressed as bank 11.
+  slot is addressed as System Exclusive bank **3**. (An earlier version of
+  this file said bank 11. That was wrong: byte 11 is ROM 10, and every
+  "card" reading kwsed took before 2026-09-12 was really that ROM bank. See
+  docs/RESOLUTION_NOTES.md section 10.)
 - **The record sizes**, 181 per performance and 426 per patch, which the
   dumps divide into exactly.
 
