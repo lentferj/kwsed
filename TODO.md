@@ -90,6 +90,40 @@ to their dumps at all.
 
 ---
 
+## 3c. Single-object reads are unreliable, and nobody knows why
+
+**Status:** open. It blocks single-patch *writes*, and nothing else.
+
+A whole-bank read works every time. A **single patch** read (`0x10` request,
+`0x40` reply) mostly does not:
+
+* the request alone draws nothing, even after twenty seconds;
+* sending any other message afterwards can shake the reply loose, and the
+  reply that arrives is the answer to an *earlier* request;
+* nudging the unit with an identity request worked once and then stopped.
+
+The replies themselves are correct when they come -- the bank and number
+bytes identify the slot that was asked for, and the patch data decodes. It
+is the delivery that is erratic.
+
+This is why `write_patch` exists but should not be relied on. It is fenced
+the same way a bank write is, and its first step is to read the slot it is
+about to replace, so an unreliable read means it refuses rather than writes
+blind. That is the correct behaviour and it is also, at the moment, the
+usual behaviour.
+
+**Blocked on:** understanding the delivery. Worth trying: whether the unit
+answers single-object requests only in a particular mode, and whether the
+sibling x5ded's priming trick -- a request that draws silence, sent first --
+has an equivalent here. **Do not** work around it by matching any patch
+dump that arrives: an answer to an abandoned request is indistinguishable
+from the right one, and that mistake already produced a read of Card 12 that
+returned the patch from Card 3.
+
+**Not blocked:** whole-bank writes, which are verified and work.
+
+---
+
 ## 4. The single-performance dump has never been requested from the unit
 
 **Status:** open.

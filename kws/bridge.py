@@ -60,6 +60,7 @@ from kws import backup
 from kws import banks
 from kws import dumps
 from kws import messages as m
+from kws import records
 
 __all__ = [
     "SEND_GAP",
@@ -306,6 +307,116 @@ class WavestationBridge:
             f"30 kB."
         )
 
+    def read_patch(self, bank, number: int, *,
+                   timeout: Optional[float] = None) -> bytes:
+        """One patch's 426 bytes. Read-only, and makes no sound."""
+        entry = banks.bank(bank)
+        self._drain()
+        self._send(m.single_patch_request(entry.sysex, number, self.channel))
+        deadline = time.time() + (DEFAULT_TIMEOUT if timeout is None
+                                  else timeout)
+        while time.time() < deadline:
+            message = self._in.get_message()
+            if message is None:
+                time.sleep(0.002)
+                continue
+            packet = m.parse(message[0])
+            if packet is None or packet.channel != self.channel:
+                continue
+            if packet.is_error:
+                raise DeviceRefused(packet.function)
+            if packet.function != m.Function.SINGLE_PATCH_DUMP:
+                continue
+            # Match the bank and number the reply describes, not merely
+            # that it is a patch dump. A late answer to a request that has
+            # already timed out is otherwise indistinguishable from the
+            # answer to this one -- which is how a read of Card 12 came
+            # back holding the patch from Card 3, and a read of RAM 1 20
+            # came back holding one from the Card.
+            raw = bytes(message[0])
+            if len(raw) < 7 or raw[5] != entry.sysex or raw[6] != number:
+                continue
+            return packet.data()[:records.PATCH_SIZE]
+        raise TimeoutError(
+            f"no patch came back for {entry.label} {number}. A reply for a "
+            f"different slot does not count, so this can also mean the unit "
+            f"is still answering an earlier request.")
+
+    def write_patch(self, bank, number: int, data: bytes, *,
+                    backup_dir: str, verify: bool = True,
+                    timeout: Optional[float] = None) -> dict:
+        """Replace **one patch**. Destructive, and fenced like a bank write.
+
+        Two messages, because one is not enough: a single patch dump lands
+        in the edit buffer, and a separate write command commits it to the
+        slot. Korg's appendix documents both. Edisyn sends the pair and
+        records that it does not work -- its write command passes the
+        function code and the bank where the bank and the number belong.
+
+        Far smaller than a bank write: 426 bytes and one slot, rather than
+        35 slots and 30 kB. The fence is the same anyway, because the thing
+        that makes a write safe is the backup and the read-back, not the
+        size.
+        """
+        entry = banks.bank(bank)
+        if not entry.writable:
+            raise DeviceError(
+                f"{entry.label} is ROM and cannot be written.")
+        if not 0 <= number < banks.PATCHES_PER_BANK:
+            raise ValueError(
+                f"a bank holds {banks.PATCHES_PER_BANK} patches, so "
+                f"{number} is not one of them")
+        if len(data) != records.PATCH_SIZE:
+            raise ValueError(
+                f"a patch is {records.PATCH_SIZE} bytes; got {len(data)}")
+
+        try:
+            before = self.read_patch(entry.number, number, timeout=timeout)
+        except Exception as exc:
+            raise DeviceError(
+                f"could not read {entry.label} patch {number} before "
+                f"writing it, so nothing was sent ({exc})."
+            ) from exc
+        saved = backup.save(
+            m.single_patch_dump(entry.sysex, number, before,
+                                channel=self.channel),
+            backup_dir, bank_label=_patch_backup_name(entry.label, number),
+            kind="patch", names=[m.decode_name(before)],
+            channel=self.channel)
+
+        self._drain()
+        self._send(m.single_patch_dump(entry.sysex, number, data,
+                                       channel=self.channel))
+        self._send(m.patch_write_command(entry.sysex, number, self.channel))
+
+        result = {"bank": entry.label, "number": number, "backup": saved,
+                  "status": None, "verified": None, "mismatch": None}
+        deadline = time.time() + 2.0
+        while time.time() < deadline:
+            message = self._in.get_message()
+            if message is None:
+                time.sleep(0.002)
+                continue
+            packet = m.parse(message[0])
+            if packet is None:
+                continue
+            if packet.function in (m.Function.WRITE_COMPLETED,
+                                   m.Function.WRITE_ERROR):
+                result["status"] = packet.function_name
+                break
+        if not verify:
+            return result
+        try:
+            after = self.read_patch(entry.number, number, timeout=timeout)
+        except Exception as exc:
+            result["verified"] = False
+            result["mismatch"] = f"could not read it back ({exc})"
+            return result
+        result["verified"] = bytes(after) == bytes(data)
+        if not result["verified"]:
+            result["mismatch"] = _first_difference(bytes(data), bytes(after))
+        return result
+
     def read_multi(self, *, timeout: Optional[float] = None) -> bytes:
         """The Multisets, as the raw 0x62 message. Read-only, makes no sound.
 
@@ -494,3 +605,7 @@ def _first_difference(sent: bytes, got: bytes) -> str:
 
 def _multi_request(channel: int) -> bytes:
     return m.frame(m.Function.MULTI_REQUEST, [], channel=channel)
+
+
+def _patch_backup_name(bank_label: str, number: int) -> str:
+    return f"{bank_label}-patch{number:02d}"

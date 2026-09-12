@@ -79,6 +79,9 @@ __all__ = [
     "frame_bulk",
     "bulk_request",
     "bank_request",
+    "single_patch_request",
+    "single_patch_dump",
+    "patch_write_command",
     "REQUEST_FOR_DUMP",
     "object_request",
     "DATA_OFFSET",
@@ -126,6 +129,10 @@ class Function:
     PATCH_BANK_REQUEST = 0x1C        #: + bank -> ALL_PATCH_DUMP
     PERFORMANCE_BANK_REQUEST = 0x1D  #: + bank -> ALL_PERFORMANCE_DUMP
     WAVESEQ_BANK_REQUEST = 0x0C      #: + bank -> ALL_WAVESEQ_DUMP
+    SINGLE_PATCH_REQUEST = 0x10      #: + bank + number -> SINGLE_PATCH_DUMP
+    SINGLE_PERFORMANCE_REQUEST = 0x19  #: + bank + number
+    PATCH_WRITE = 0x11               #: + bank + number: commit the buffer
+    PERFORMANCE_WRITE = 0x1A         #: + bank + number: commit the buffer
     MULTI_REQUEST = 0x06             #: no argument -> 0x55, 0x5E and 0x62
     ALL_DATA_REQUEST = 0x0F          #: no argument -> ALL_DATA_DUMP
     SYSTEM_SETUP_REQUEST = 0x0E      #: no argument -> SYSTEM_SETUP_DUMP
@@ -133,6 +140,7 @@ class Function:
     OBJECT_REQUEST = 0x10        #: + bank + number
 
     # Dumps
+    SINGLE_PATCH_DUMP = 0x40     #: one patch: bank, number, 426 bytes
     PERFORMANCE_DUMP = 0x49      #: one performance: bank, number, 181 bytes
     ALL_PATCH_DUMP = 0x4C        #: one bank: 35 patches of 426
     ALL_PERFORMANCE_DUMP = 0x4D  #: one bank: 50 performances of 181
@@ -163,6 +171,9 @@ class Function:
         0x5E: "multi mode setup expanded dump",
         0x62: "multi mode setup SR expanded dump",
         0x06: "multi mode setup dump request",
+        0x40: "single patch dump",
+        0x11: "patch write command",
+        0x1A: "performance write command",
         0x21: "write completed",
         0x22: "write error",
         0x23: "data load completed",
@@ -191,6 +202,7 @@ DATA_OFFSET = {
     Function.ALL_PERFORMANCE_DUMP: 6,
     Function.ALL_WAVESEQ_DUMP: 6,
     Function.PERFORMANCE_DUMP: 7,
+    Function.SINGLE_PATCH_DUMP: 7,
     # The Multiset dump carries two bytes of its own before the data, where
     # the bank dumps carry one. Reading it at 6 yields 3778 bytes that still
     # look like data -- the names even decode -- so this is the difference
@@ -449,3 +461,33 @@ def bulk_request(bank: int, channel: int = 0) -> bytes:
 def object_request(bank: int, number: int, channel: int = 0) -> bytes:
     """Ask for one object. Read-only, makes no sound."""
     return frame(Function.OBJECT_REQUEST, [bank, number], channel=channel)
+
+
+def single_patch_request(bank: int, number: int, channel: int = 0) -> bytes:
+    """Ask for one patch. Read-only, makes no sound."""
+    return frame(Function.SINGLE_PATCH_REQUEST, [bank, number],
+                 channel=channel)
+
+
+def single_patch_dump(bank: int, number: int, data: Sequence[int], *,
+                      channel: int = 0) -> bytes:
+    """One patch, addressed to a slot. **Lands in the edit buffer.**
+
+    On its own this changes nothing in memory: Korg's appendix says a single
+    patch dump is placed in the edit buffer, and it takes a separate write
+    command to put it in the slot.
+    """
+    nibbles = list(to_nibbles(data))
+    return frame(Function.SINGLE_PATCH_DUMP,
+                 [bank, number] + nibbles + [checksum(nibbles)],
+                 channel=channel)
+
+
+def patch_write_command(bank: int, number: int, channel: int = 0) -> bytes:
+    """Commit the edit buffer to a patch slot. **Destructive.**
+
+    Edisyn sends this and notes that it does not work; its message passes
+    the function code and the bank where the bank and the number belong.
+    The documented form is bank then number.
+    """
+    return frame(Function.PATCH_WRITE, [bank, number], channel=channel)
