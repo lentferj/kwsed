@@ -87,7 +87,7 @@ class DemoDevice:
         if packet is None or packet.channel != self.channel:
             return None
         if packet.function != m.Function.BULK_REQUEST or not packet.payload:
-            return m.frame(m.Function.DATA_FORMAT_ERROR, channel=self.channel)
+            return m.frame(m.Function.DATA_LOAD_ERROR, channel=self.channel)
         return self._bank_dump(packet.payload[0])
 
     def _bank_dump(self, number: int) -> bytes:

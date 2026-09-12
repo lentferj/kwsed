@@ -50,7 +50,10 @@ kws/messages.py, kws/banks.py, kws/dumps.py
   The frame layout, model ID, function codes, bank list, nibble encoding and
   record sizes are transcribed as data, and in part derived, from:
 
-    Korg Wavestation SR Reference Guide / Player's Guide, KORG INC.
+    Korg Wavestation SR Reference Guide, KORG INC. -- in particular
+      appendix 4, "MIDI System Exclusive Format", which documents the
+      message types, the nibble encoding and the checksum. Published by
+      Korg for owners of the instrument and not redistributed here.
     System Exclusive dumps produced by the instrument itself
     Edisyn's Wavestation support, as facts only (see above)
 

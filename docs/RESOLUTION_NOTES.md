@@ -500,3 +500,52 @@ struct declaration.
 **No bank has been written to the instrument.** The transport is proven
 against a virtual port only; the write itself was blocked by this
 environment's sandbox, not by anything in the code. See TODO.
+
+
+---
+
+## 12. The manual turned up, and settled several guesses
+
+Korg publish the Wavestation SR Reference Guide, and its **appendix 4** is a
+full System Exclusive specification. It was downloaded from korg.com and put
+in the owner's `SYNTHS/WavestationSR/Manual/` folder. Everything below is now
+documented rather than inferred.
+
+### What it confirmed
+
+* **Nibble encoding**, low four bits first -- exactly as derived.
+* **The checksum**, the seven-bit sum of the nibble data.
+* **`0x1C` + bank** and **`0x1D` + bank** for the patch and performance bank
+  requests, and **`0x0C`** for wave sequences: all three as implemented.
+* **`0x7F` means space** in a name. That had been worked out from the card
+  images, where a patch called "Rich Syn Strings" stores `7F` between the
+  words; appendix 4 states it outright for parameter change messages.
+* The status replies **`0x21` write complete, `0x22` write error, `0x23`
+  data load complete, `0x24` data load error**. kwsed had these from Korg's
+  family convention and they were right. `0x26` is **not** in the
+  Wavestation's list -- that one came from the X5 family -- so it is no
+  longer named as a Wavestation code.
+
+### What it corrected
+
+**The Multi Mode Setup Dump Request is `0x06`**, not the `0x32` this project
+inferred and probed. The reasoning behind `0x32` was that a request sits
+0x30 below its dump, which four of the five visible pairs obeyed. The
+documented request codes are 0x06, 0x07, 0x08, 0x0C, 0x0E, 0x0F, 0x10, 0x19,
+0x1C, 0x1D -- there is no arithmetic relation to the dump codes at all, and
+the four that appeared to follow one were a coincidence of a small sample.
+
+Worth keeping as a lesson: a pattern that fits four of five cases is not a
+rule, and the fifth exception was explained away here rather than treated as
+the counter-example it was.
+
+### What it opens up
+
+* **`0x11` Patch Write Command** and **`0x1A` Performance Write Command**.
+  A single patch or performance dump lands in the edit buffer; these commit
+  it to a slot. That is the per-object write Edisyn's comment says does not
+  work -- its message is malformed, passing the function code and bank where
+  bank and number belong.
+* **`0x0F` All Data Request**, one message for everything.
+* **`0x5B` / `0x63` Multi Mode Setup Select**, which confirms 32 Multisets:
+  0-15 by the first, 16-31 by the SR expanded form.

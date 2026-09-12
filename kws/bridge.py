@@ -306,6 +306,39 @@ class WavestationBridge:
             f"30 kB."
         )
 
+    def read_multi(self, *, timeout: Optional[float] = None) -> bytes:
+        """The Multisets, as the raw 0x62 message. Read-only, makes no sound.
+
+        One request draws three replies -- 0x55, 0x5E and then 0x62 -- which
+        Korg's appendix 4 says always travel together. Only the last carries
+        all 32 Multisets with their 16 channels, so that is what comes back;
+        the other two are read and discarded so they cannot be mistaken for
+        the answer to the next request.
+
+        The request code is **0x06**, documented. kwsed inferred 0x32 first,
+        from the convention that a request sits 0x30 below its dump, and got
+        silence -- see docs/RESOLUTION_NOTES.md section 8.
+        """
+        self._drain()
+        self._send(_multi_request(self.channel))
+        deadline = time.time() + (DUMP_TIMEOUT if timeout is None else timeout)
+        while time.time() < deadline:
+            message = self._in.get_message()
+            if message is None:
+                time.sleep(0.003)
+                continue
+            packet = m.parse(message[0])
+            if packet is None or packet.channel != self.channel:
+                continue
+            if packet.is_error:
+                raise DeviceRefused(packet.function)
+            if packet.function == m.Function.MULTISET_DUMP:
+                return bytes(message[0])
+        raise TimeoutError(
+            "no Multiset dump came back. The request is 0x06 and takes no "
+            "argument; check the global channel and that System Exclusive "
+            "reception is enabled.")
+
     def read_bank_names(self, bank, *, timeout: Optional[float] = None
                         ) -> Tuple[str, Dict[int, str]]:
         """``(kind, {number: name})`` for one bank. Silent."""
@@ -457,3 +490,7 @@ def _first_difference(sent: bytes, got: bytes) -> str:
             return (f"byte {index} differs: sent {a:#04x}, read back "
                     f"{b:#04x}")
     return "no difference found, which contradicts the comparison"
+
+
+def _multi_request(channel: int) -> bytes:
+    return m.frame(m.Function.MULTI_REQUEST, [], channel=channel)

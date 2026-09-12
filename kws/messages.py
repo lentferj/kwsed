@@ -126,6 +126,9 @@ class Function:
     PATCH_BANK_REQUEST = 0x1C        #: + bank -> ALL_PATCH_DUMP
     PERFORMANCE_BANK_REQUEST = 0x1D  #: + bank -> ALL_PERFORMANCE_DUMP
     WAVESEQ_BANK_REQUEST = 0x0C      #: + bank -> ALL_WAVESEQ_DUMP
+    MULTI_REQUEST = 0x06             #: no argument -> 0x55, 0x5E and 0x62
+    ALL_DATA_REQUEST = 0x0F          #: no argument -> ALL_DATA_DUMP
+    SYSTEM_SETUP_REQUEST = 0x0E      #: no argument -> SYSTEM_SETUP_DUMP
     BULK_REQUEST = PATCH_BANK_REQUEST    #: the old name for the patch one
     OBJECT_REQUEST = 0x10        #: + bank + number
 
@@ -134,14 +137,18 @@ class Function:
     ALL_PATCH_DUMP = 0x4C        #: one bank: 35 patches of 426
     ALL_PERFORMANCE_DUMP = 0x4D  #: one bank: 50 performances of 181
     ALL_WAVESEQ_DUMP = 0x54      #: one bank: 32 sequences over a 501-step pool
-    MULTISET_DUMP = 0x62         #: all 32 Multisets
+    ALL_DATA_DUMP = 0x50         #: system, patches, performances, wave seqs
+    SYSTEM_SETUP_DUMP = 0x51
+    MULTI_SETUP_DUMP = 0x55      #: the three multi messages always travel
+    MULTI_SETUP_EXPANDED = 0x5E  #: together, in this order
+    MULTISET_DUMP = 0x62         #: ...and this one carries all 32 Multisets
 
-    # Status replies
+    # Status replies, as Korg's Reference Guide appendix 4 lists them.
     WRITE_COMPLETED = 0x21
     WRITE_ERROR = 0x22
     DATA_LOAD_COMPLETED = 0x23
+    #: Sent when a message arrives whose checksum failed.
     DATA_LOAD_ERROR = 0x24
-    DATA_FORMAT_ERROR = 0x26
 
     NAMES = {
         0x10: "object request",
@@ -150,14 +157,23 @@ class Function:
         0x4C: "all patch dump",
         0x4D: "all performance dump",
         0x54: "all wave sequence dump",
-        0x62: "multiset dump",
+        0x50: "all data dump",
+        0x51: "system setup dump",
+        0x55: "multi mode setup dump",
+        0x5E: "multi mode setup expanded dump",
+        0x62: "multi mode setup SR expanded dump",
+        0x06: "multi mode setup dump request",
         0x21: "write completed",
         0x22: "write error",
         0x23: "data load completed",
         0x24: "data load error",
-        0x26: "data format error",
+
     }
 
+    #: Korg's appendix lists write error and data load error. 0x26 is a
+    #: data format error on the X5 family and is kept here because a reply
+    #: that means trouble should not be mistaken for a dump, but this unit
+    #: has never sent one.
     ERRORS = frozenset({0x22, 0x24, 0x26})
 
     @classmethod
@@ -405,6 +421,7 @@ def identity_reply_fields(message: Sequence[int]) -> Optional[dict]:
 #: Which request asks for which dump.
 REQUEST_FOR_DUMP = {
     Function.ALL_PATCH_DUMP: Function.PATCH_BANK_REQUEST,
+    Function.MULTISET_DUMP: Function.MULTI_REQUEST,
     Function.ALL_PERFORMANCE_DUMP: Function.PERFORMANCE_BANK_REQUEST,
     Function.ALL_WAVESEQ_DUMP: Function.WAVESEQ_BANK_REQUEST,
 }

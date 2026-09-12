@@ -68,36 +68,25 @@ Performance and Patch mode and repeat one bank request each way.
 
 ---
 
-## 3b. Multi mode: the data is decoded, the way to ask for it is not
+## 3b. Multi mode — the request code is 0x06, SOLVED 2026-09-12
 
-**Status:** open. Decoding done; retrieval blocked.
+**Status:** resolved from Korg's own documentation.
 
-"Multi" means two things on this instrument, and they are not the same
-object -- the same double meaning the sibling p2ked had to untangle:
+The Multi Mode Setup Dump Request is **`0x06`** and takes no argument. One
+request draws three replies -- `0x55` Multi Mode Setup, `0x5E` Expanded and
+`0x62` SR Expanded -- which appendix 4 says always travel together. Only the
+last carries all 32 Multisets. `WavestationBridge.read_multi` sends it and
+returns that one.
 
-* a **performance** combines up to 8 **parts**, each a patch with its own
-  MIDI channel, key range and level. That is the multi-timbral *sound*.
-* a **Multiset** is the SR's MIDI multi mode: **32** of them, each assigning
-  all **16 MIDI channels**.
+Verified on the unit: 7563 bytes, 3777 decoded, and Multiset 1 reads as
+channels 1-16 pointing at RAM 1 performances 0-15 at full level.
 
-The Multiset dump is function **`0x62`**, and its layout is worked out --
-see docs/RESOLUTION_NOTES.md section 8. kwsed can decode a `.syx` containing
-one today; it cannot ask the unit for one.
-
-**Blocked on:** the request code. `0x32` was inferred from Korg's convention
-that a request sits 0x30 below its dump, and **probed on hardware with no
-argument, one and two: silence in every form** (the unit was unaffected and
-still dumps banks normally). So either the code is different -- the
-wave-sequence request `0x0C` for dump `0x54` already proves the arithmetic
-is not universal -- or Multi data is only served while the unit is in Multi
-mode, which would match how a bank request returns patches or performances
-according to the unit's own state rather than the request's.
-
-Next, in order of cost: retry the three `0x32` forms with the unit switched
-to Multi mode; failing that, dump Multi from the front panel (Global ->
-Dump), which needs no request code at all. Do **not** work through
-neighbouring function codes looking for a hit -- some codes in that range
-are commands rather than reads, and which ones is exactly what is not known.
+The earlier guess of `0x32` was wrong, and wrong for an instructive reason:
+it came from the convention that a request sits 0x30 below its dump, which
+holds for four of the five pairs that were visible and does not hold here.
+The documented requests are 0x06, 0x07, 0x08, 0x0C, 0x0E, 0x0F, 0x10, 0x19,
+0x1C and 0x1D -- all in the 0x0x and 0x1x range, with no arithmetic relation
+to their dumps at all.
 
 ---
 
