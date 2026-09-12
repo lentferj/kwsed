@@ -87,7 +87,8 @@ def favorite_bank_id(bank_id: str, kind: str) -> str:
 
 KEY_HINTS = (
     "↑↓ move", "tab pane", "⏎ select on the unit", "r read names",
-    "/ search", "f favourite", "F favourites only", "m multi", "i device",
+    "/ search", "[ ] channel", "c set channel", "f favourite",
+    "F favourites view", "t tags", "n note", "m multi", "i device",
     "? help", "q quit",
 )
 
@@ -405,9 +406,14 @@ class KwsedApp(App):
         # Enter is NOT bound here: a focused DataTable consumes it for its
         # own row selection, so it arrives as RowSelected instead.
         Binding("r", "read_names", "Read names"),
+        Binding("left_square_bracket", "channel_down", "Channel -"),
+        Binding("right_square_bracket", "channel_up", "Channel +"),
+        Binding("c", "pick_channel", "Set channel"),
         Binding("m", "multi", "Multi mode"),
         Binding("f", "toggle_favorite", "Favourite"),
         Binding("F", "cycle_favorites", "Favourites view"),
+        Binding("t", "edit_tags", "Tags"),
+        Binding("n", "edit_note", "Note"),
         Binding("slash", "search", "Search"),
         Binding("i", "device_info", "Device"),
         Binding("question_mark", "help", "Help"),
@@ -415,12 +421,17 @@ class KwsedApp(App):
         Binding("q", "quit", "Quit"),
     ]
 
-    def __init__(self, device, *, catalog=None, favorites=None) -> None:
+    def __init__(self, device, *, catalog=None, favorites=None,
+                 config_path: Optional[str] = None) -> None:
         super().__init__()
         self.device = device
         #: Injected, never opened here, so a test cannot write into the
         #: user's real database.
         self.favorites = favorites
+        #: Where the send channel is remembered. Injected and None
+        #: in tests, so a test cannot drop a config into the
+        #: working directory.
+        self._config_path = config_path
         self.view_mode = VIEW_ALL
         self.catalog = catalog if catalog is not None else cat.empty()
         self._lock = threading.RLock()
@@ -510,6 +521,68 @@ class KwsedApp(App):
             entries = [e for e in entries if e.number in marked]
         return entries
 
+
+    def _cursor_entry(self):
+        """The row under the cursor, or None."""
+        table = self.query_one("#slot-table", DataTable)
+        row = table.cursor_row
+        if not self._current or row is None or row >= len(self._current):
+            return None
+        return self._current[row]
+
+
+    # --- the send channel ---------------------------------------------------
+
+    def _channel(self) -> int:
+        return getattr(self.device, "channel", 0)
+
+    def _set_channel(self, channel: int) -> None:
+        """Change the channel selections are sent on, and remember it."""
+        channel = max(0, min(15, channel))
+        try:
+            self.device.channel = channel
+        except Exception:
+            self.notify_status("this device has no settable channel",
+                               refused=True)
+            return
+        self._remember_channel(channel)
+        self.notify_status(f"sending on MIDI channel {channel + 1}")
+
+    def _remember_channel(self, channel: int) -> None:
+        """Save it for next time. Only OSError is swallowed."""
+        if getattr(self, "_config_path", None) is None:
+            return
+        from kws import config
+
+        try:
+            config.save_channel(channel, self._config_path)
+        except OSError:
+            pass
+
+    def action_channel_up(self) -> None:
+        self._set_channel(self._channel() + 1)
+
+    def action_channel_down(self) -> None:
+        self._set_channel(self._channel() - 1)
+
+    def action_pick_channel(self) -> None:
+        def apply(text):
+            if not text:
+                return
+            try:
+                value = int(text)
+            except ValueError:
+                self.notify_status(f"{text!r} is not a number", refused=True)
+                return
+            if not 1 <= value <= 16:
+                self.notify_status("MIDI channels are 1-16", refused=True)
+                return
+            self._set_channel(value - 1)
+
+        self.push_screen(
+            PromptScreen("MIDI channel (1-16):", str(self._channel() + 1)),
+            apply)
+
     def action_toggle_favorite(self) -> None:
         """Mark or unmark the slot under the cursor. Sends no MIDI."""
         if self.favorites is None:
@@ -529,6 +602,58 @@ class KwsedApp(App):
             self.favorites.add(key, item.number, name=name)
             self.notify_status(f"favourited {name or item}")
         self._refill_keeping_place()
+
+
+    def _favourite_under_cursor(self):
+        """The favourite row for the slot under the cursor, if there is one.
+
+        Tags and notes hang off a favourite, so there is nothing to attach
+        them to until `f` has been pressed. Saying so is better than
+        silently creating one: the user asked to annotate, not to favourite.
+        """
+        entry = self._cursor_entry()
+        if entry is None or self.favorites is None:
+            return None, None
+        bank_id = favorite_bank_id(entry.bank.id, entry.kind)
+        number = entry.number
+        return (bank_id, number), self.favorites.get(bank_id, number)
+
+    def action_edit_tags(self) -> None:
+        where, existing = self._favourite_under_cursor()
+        if where is None:
+            return
+        if existing is None:
+            self.notify_status("not a favourite yet -- press f first",
+                               refused=True)
+            return
+
+        def apply(value):
+            if value is None:
+                return
+            self.favorites.set_tags(where[0], where[1], value)
+            self._refill_keeping_place()
+            self.notify_status("tags set")
+
+        self.push_screen(PromptScreen("Tags (comma separated):",
+                                  existing.tags), apply)
+
+    def action_edit_note(self) -> None:
+        where, existing = self._favourite_under_cursor()
+        if where is None:
+            return
+        if existing is None:
+            self.notify_status("not a favourite yet -- press f first",
+                               refused=True)
+            return
+
+        def apply(value):
+            if value is None:
+                return
+            self.favorites.set_note(where[0], where[1], value)
+            self._refill_keeping_place()
+            self.notify_status("note set")
+
+        self.push_screen(PromptScreen("Note:", existing.note), apply)
 
     def action_cycle_favorites(self) -> None:
         """Step: all slots -> this bank's favourites -> every favourite.
@@ -876,7 +1001,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     from kws.favorites import Favorites
 
     store = Favorites(args.favorites)
-    app = KwsedApp(device, catalog=cat.load(args.catalog), favorites=store)
+    app = KwsedApp(device, catalog=cat.load(args.catalog),
+                   favorites=store, config_path=config_path)
     try:
         app.run()
     finally:

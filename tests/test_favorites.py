@@ -18,7 +18,7 @@
 import pytest
 
 from kws.favorites import Favorites
-from kwsed.app import (VIEW_ALL, VIEW_ALL_FAVOURITES, VIEW_BANK_FAVOURITES,
+from kwsed.app import (KwsedApp, VIEW_ALL, VIEW_ALL_FAVOURITES, VIEW_BANK_FAVOURITES,
                       VIEW_CYCLE, KEY_HINTS)
 
 
@@ -118,3 +118,23 @@ class TestTheChannelIsRemembered:
         path_obj = tmp_path / "config.toml"
         path_obj.write_text("this is not toml = = =\n", encoding="utf-8")
         assert config.load_channel(str(path_obj)) is None
+
+
+class TestTheLegendIsComplete:
+    """A legend that omits a key teaches the user the key does not exist."""
+
+    #: Textual key names are not what a legend prints.
+    SHOWN_AS = {"left_square_bracket": "[", "right_square_bracket": "]",
+                "slash": "/", "question_mark": "?"}
+    IMPLIED = {"enter", "tab"}
+
+    def test_every_binding_appears(self):
+        legend = " ".join(KEY_HINTS)
+        missing = []
+        for binding in KwsedApp.BINDINGS:
+            if binding.key in self.IMPLIED:
+                continue
+            shown = self.SHOWN_AS.get(binding.key, binding.key)
+            if f"{shown} " not in legend:
+                missing.append(binding.key)
+        assert not missing, f"bound but missing from the legend: {missing}"
