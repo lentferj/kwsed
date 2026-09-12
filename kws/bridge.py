@@ -411,10 +411,7 @@ class WavestationBridge:
                  timeout: Optional[float] = None) -> bytes:
         """One bank dump of a given kind, as the bytes that arrived."""
         self._drain()
-        request = (m.bulk_request(bank_number, self.channel)
-                   if function != m.Function.ALL_WAVESEQ_DUMP
-                   else m.frame(0x0C, [bank_number], channel=self.channel))
-        self._send(request)
+        self._send(m.bank_request(bank_number, function, self.channel))
         deadline = time.time() + (DUMP_TIMEOUT if timeout is None else timeout)
         while time.time() < deadline:
             message = self._in.get_message()

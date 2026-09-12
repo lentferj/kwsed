@@ -60,9 +60,34 @@ __all__ = ["KwsedApp", "main", "build_parser", "KEY_HINTS", "wrap_blocks"]
 
 _SEP = " · "
 
+#: What `F` steps through. The same three the sibling rxved, p2ked and
+#: x5ded use, so the key means the same thing across these projects.
+VIEW_ALL = "all"
+VIEW_BANK_FAVOURITES = "bank-favourites"
+VIEW_ALL_FAVOURITES = "all-favourites"
+VIEW_CYCLE = (VIEW_ALL, VIEW_BANK_FAVOURITES, VIEW_ALL_FAVOURITES)
+VIEW_LABELS = {
+    VIEW_ALL: "all slots",
+    VIEW_BANK_FAVOURITES: "favourites in this bank",
+    VIEW_ALL_FAVOURITES: "every favourite, all banks",
+}
+
+
+def favorite_bank_id(bank_id: str, kind: str) -> str:
+    """The key a favourite is filed under.
+
+    The kind is part of it, in full. A bank holds 50 performances and 35
+    patches, and both words begin with P -- the same collision that once
+    merged them in ``Slot.key`` would merge a favourited performance with
+    the patch of the same number.
+    """
+    return f"{bank_id}:{kind}"
+
+
 KEY_HINTS = (
     "↑↓ move", "tab pane", "⏎ select on the unit", "r read names",
-    "/ search", "i device", "? help", "q quit",
+    "/ search", "f favourite", "F favourites only", "i device", "? help",
+    "q quit",
 )
 
 
@@ -290,6 +315,8 @@ class KwsedApp(App):
         # Enter is NOT bound here: a focused DataTable consumes it for its
         # own row selection, so it arrives as RowSelected instead.
         Binding("r", "read_names", "Read names"),
+        Binding("f", "toggle_favorite", "Favourite"),
+        Binding("F", "cycle_favorites", "Favourites view"),
         Binding("slash", "search", "Search"),
         Binding("i", "device_info", "Device"),
         Binding("question_mark", "help", "Help"),
@@ -297,9 +324,13 @@ class KwsedApp(App):
         Binding("q", "quit", "Quit"),
     ]
 
-    def __init__(self, device, *, catalog=None) -> None:
+    def __init__(self, device, *, catalog=None, favorites=None) -> None:
         super().__init__()
         self.device = device
+        #: Injected, never opened here, so a test cannot write into the
+        #: user's real database.
+        self.favorites = favorites
+        self.view_mode = VIEW_ALL
         self.catalog = catalog if catalog is not None else cat.empty()
         self._lock = threading.RLock()
         #: The left pane lists bank-and-kind pairs, because a Wavestation
@@ -338,7 +369,9 @@ class KwsedApp(App):
                           key=f"{number}:{kind}")
 
         slots = self.query_one("#slot-table", DataTable)
-        for label, key in (("#", "num"), ("name", "name")):
+        # The favourite marker leads the row: a gutter mark the eye runs
+        # down, rather than a character glued to the name.
+        for label, key in (("♥", "fav"), ("#", "num"), ("name", "name")):
             slots.add_column(label, key=key)
         self._fill(self._current_pair)
         table.focus()
@@ -350,24 +383,115 @@ class KwsedApp(App):
 
     # --- filling ------------------------------------------------------------
 
+    def _favorite_keys(self, bank_id: str, kind: str) -> set:
+        if self.favorites is None:
+            return set()
+        return self.favorites.keys_for_bank(favorite_bank_id(bank_id, kind))
+
+    def _all_favourites(self):
+        """Every favourite in every bank and kind, in listing order."""
+        if self.favorites is None:
+            return []
+        wanted = {}
+        for favourite in self.favorites.all(order="bank"):
+            wanted.setdefault(favourite.bank_id, set()).add(favourite.number)
+        out = []
+        for number, kind in self._pairs:
+            entry = banks.bank(number)
+            numbers = wanted.get(favorite_bank_id(entry.id, kind))
+            if not numbers:
+                continue
+            out.extend(s for s in banks.slots(number, kind)
+                       if s.number in numbers)
+        return out
+
+    def _visible(self, pair):
+        number, kind = pair
+        if self.view_mode == VIEW_ALL_FAVOURITES:
+            return self._all_favourites()
+        entries = banks.slots(number, kind)
+        if self.view_mode == VIEW_BANK_FAVOURITES:
+            marked = self._favorite_keys(banks.bank(number).id, kind)
+            entries = [e for e in entries if e.number in marked]
+        return entries
+
+    def action_toggle_favorite(self) -> None:
+        """Mark or unmark the slot under the cursor. Sends no MIDI."""
+        if self.favorites is None:
+            self.notify_status("no favourites database")
+            return
+        table = self.query_one("#slot-table", DataTable)
+        row = table.cursor_row
+        if not self._current or row is None or row >= len(self._current):
+            return
+        item = self._current[row]
+        key = favorite_bank_id(item.bank.id, item.kind)
+        name = self.catalog.display_name(item.bank.id, item.kind, item.number)
+        if self.favorites.get(key, item.number) is not None:
+            self.favorites.remove(key, item.number)
+            self.notify_status(f"unfavourited {name or item}")
+        else:
+            self.favorites.add(key, item.number, name=name)
+            self.notify_status(f"favourited {name or item}")
+        self._refill_keeping_place()
+
+    def action_cycle_favorites(self) -> None:
+        """Step: all slots -> this bank's favourites -> every favourite.
+
+        Always exactly three steps, even when a view is empty.
+        """
+        if self.favorites is None:
+            self.notify_status("no favourites database")
+            return
+        index = VIEW_CYCLE.index(self.view_mode)
+        self.view_mode = VIEW_CYCLE[(index + 1) % len(VIEW_CYCLE)]
+        self._refill_keeping_place()
+        shown = len(self._current)
+        if self.view_mode == VIEW_ALL:
+            self.notify_status(VIEW_LABELS[self.view_mode])
+        elif not shown:
+            where = ("this bank" if self.view_mode == VIEW_BANK_FAVOURITES
+                     else "any bank")
+            self.notify_status(
+                f"{VIEW_LABELS[self.view_mode]} - nothing favourited in "
+                f"{where} yet")
+        else:
+            self.notify_status(f"{VIEW_LABELS[self.view_mode]} - {shown}")
+
+    def _refill_keeping_place(self) -> None:
+        table = self.query_one("#slot-table", DataTable)
+        row = table.cursor_row or 0
+        self._fill(self._current_pair)
+        if self._current:
+            table.move_cursor(row=min(row, len(self._current) - 1))
+
     def _fill(self, pair) -> None:
         number, kind = pair
         entry = banks.bank(number)
         table = self.query_one("#slot-table", DataTable)
         self._current_pair = pair
-        self._current = banks.slots(number, kind)
+        self._current = self._visible(pair)
         self._filling = True
         try:
             table.clear()
             for item in self._current:
-                name = self.catalog.display_name(entry.id, kind, item.number)
-                if self.catalog.differs(entry.id, kind, item.number):
+                name = self.catalog.display_name(item.bank.id, item.kind,
+                                                 item.number)
+                if self.catalog.differs(item.bank.id, item.kind, item.number):
                     shown = f"[b]{name}[/b] [dim]*[/dim]"
-                elif self.catalog.is_live(entry.id, kind, item.number):
+                elif self.catalog.is_live(item.bank.id, item.kind,
+                                          item.number):
                     shown = f"[b]{name}[/b]"
                 else:
                     shown = name
-                table.add_row(f"{item.number:02d}", shown, key=item.key)
+                marked = self._favorite_keys(item.bank.id, item.kind)
+                label = (f"{item.bank.label} {item.kind[:4]} "
+                         f"{item.number:02d}"
+                         if self.view_mode == VIEW_ALL_FAVOURITES
+                         else f"{item.number:02d}")
+                table.add_row(
+                    "[b]♥[/b]" if item.number in marked else "",
+                    label, shown, key=item.key)
         finally:
             self._filling = False
         self._detail(0)
@@ -573,6 +697,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--midi-channel", type=int, default=None,
                         help="the unit's global channel, 1-16")
     parser.add_argument("--catalog", default=None)
+    parser.add_argument("--favorites", default=None,
+                        help="favourites database (default: "
+                             "the per-platform data directory)")
     return parser
 
 
@@ -602,10 +729,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         except Exception as exc:
             sys.exit(f"error: {exc}")
 
-    app = KwsedApp(device, catalog=cat.load(args.catalog))
+    from kws.favorites import Favorites
+
+    store = Favorites(args.favorites)
+    app = KwsedApp(device, catalog=cat.load(args.catalog), favorites=store)
     try:
         app.run()
     finally:
+        store.close()
         device.close()
     return 0
 

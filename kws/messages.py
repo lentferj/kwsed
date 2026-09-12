@@ -78,6 +78,8 @@ __all__ = [
     "checksum",
     "frame_bulk",
     "bulk_request",
+    "bank_request",
+    "REQUEST_FOR_DUMP",
     "object_request",
     "DATA_OFFSET",
 ]
@@ -118,7 +120,13 @@ class Function:
     """
 
     # Requests
-    BULK_REQUEST = 0x1C          #: + bank
+    #: Each kind of bank has its **own** request. kwsed had only the patch
+    #: one for its whole life and waited for performance dumps that were
+    #: never asked for -- which read as "the unit decides what to send".
+    PATCH_BANK_REQUEST = 0x1C        #: + bank -> ALL_PATCH_DUMP
+    PERFORMANCE_BANK_REQUEST = 0x1D  #: + bank -> ALL_PERFORMANCE_DUMP
+    WAVESEQ_BANK_REQUEST = 0x0C      #: + bank -> ALL_WAVESEQ_DUMP
+    BULK_REQUEST = PATCH_BANK_REQUEST    #: the old name for the patch one
     OBJECT_REQUEST = 0x10        #: + bank + number
 
     # Dumps
@@ -394,9 +402,31 @@ def identity_reply_fields(message: Sequence[int]) -> Optional[dict]:
     }
 
 
+#: Which request asks for which dump.
+REQUEST_FOR_DUMP = {
+    Function.ALL_PATCH_DUMP: Function.PATCH_BANK_REQUEST,
+    Function.ALL_PERFORMANCE_DUMP: Function.PERFORMANCE_BANK_REQUEST,
+    Function.ALL_WAVESEQ_DUMP: Function.WAVESEQ_BANK_REQUEST,
+}
+
+
+def bank_request(bank: int, dump: int, channel: int = 0) -> bytes:
+    """Ask for one bank of one kind. Read-only, makes no sound."""
+    try:
+        function = REQUEST_FOR_DUMP[dump]
+    except KeyError:
+        raise ProtocolError(
+            f"there is no bank request for {Function.name(dump)}") from None
+    return frame(function, [bank], channel=channel)
+
+
 def bulk_request(bank: int, channel: int = 0) -> bytes:
-    """Ask for a whole bank. Read-only, makes no sound."""
-    return frame(Function.BULK_REQUEST, [bank], channel=channel)
+    """Ask for a bank of **patches**. Read-only, makes no sound.
+
+    Kept for callers that predate :func:`bank_request`. It asks for patches,
+    which is what it always did.
+    """
+    return frame(Function.PATCH_BANK_REQUEST, [bank], channel=channel)
 
 
 def object_request(bank: int, number: int, channel: int = 0) -> bytes:
