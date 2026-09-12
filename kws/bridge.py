@@ -80,6 +80,18 @@ SEND_GAP = 0.010
 
 DEFAULT_TIMEOUT = 2.0
 
+#: How long to wait for a **single** patch or performance. Measured, not
+#: guessed: this unit answers a single patch request after about 9.9
+#: seconds, every time and remarkably consistently, for 861 bytes that take
+#: a third of a second on the wire. Whole-bank dumps come back far sooner.
+#:
+#: The old value here was DEFAULT_TIMEOUT, two seconds, which cut every one
+#: of them off. The replies then arrived during the *next* request and were
+#: taken for its answer -- which is how a read of Card 12 came back holding
+#: the patch from Card 3, and why the behaviour looked erratic rather than
+#: simply slow.
+SINGLE_OBJECT_TIMEOUT = 15.0
+
 #: How long to wait for a bank dump. A patch bank is nearly 30 kB, which is
 #: about eight seconds of 31250-baud MIDI before the unit's own delay.
 DUMP_TIMEOUT = 20.0
@@ -313,7 +325,7 @@ class WavestationBridge:
         entry = banks.bank(bank)
         self._drain()
         self._send(m.single_patch_request(entry.sysex, number, self.channel))
-        deadline = time.time() + (DEFAULT_TIMEOUT if timeout is None
+        deadline = time.time() + (SINGLE_OBJECT_TIMEOUT if timeout is None
                                   else timeout)
         while time.time() < deadline:
             message = self._in.get_message()

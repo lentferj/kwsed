@@ -90,37 +90,39 @@ to their dumps at all.
 
 ---
 
-## 3c. Single-object reads are unreliable, and nobody knows why
+## 3c. Single-object reads: slow, and still not explained
 
 **Status:** open. It blocks single-patch *writes*, and nothing else.
 
-A whole-bank read works every time. A **single patch** read (`0x10` request,
-`0x40` reply) mostly does not:
+A whole-bank read works every time. A single patch read (`0x10` request,
+`0x40` reply) does not, and measurement has narrowed it without settling it.
 
-* the request alone draws nothing, even after twenty seconds;
-* sending any other message afterwards can shake the reply loose, and the
-  reply that arrives is the answer to an *earlier* request;
-* nudging the unit with an identity request worked once and then stopped.
+**What is established:**
 
-The replies themselves are correct when they come -- the bank and number
-bytes identify the slot that was asked for, and the patch data decodes. It
-is the delivery that is erratic.
+* The unit answers a single patch request after about **9.9 seconds** --
+  consistently, to two decimal places, for 861 bytes that take a third of a
+  second on the wire. Five requests in a row, all answered, all at 9.89s.
+* `SINGLE_OBJECT_TIMEOUT` is therefore 15 seconds. The old value was 2, so
+  every reply was cut off and then arrived during the *next* request, which
+  is how a read of Card 12 came back holding the patch from Card 3 and why
+  the whole thing looked erratic rather than merely slow.
+* The replies are correct when they come: the bank and number bytes name the
+  slot that was asked for, and the data decodes.
 
-This is why `write_patch` exists but should not be relied on. It is fenced
-the same way a bank write is, and its first step is to read the slot it is
-about to replace, so an unreliable read means it refuses rather than writes
-blind. That is the correct behaviour and it is also, at the moment, the
-usual behaviour.
+**What is not:** the same slot answers five times running in one session and
+not at all in the next, with the same request, the same gap and a 14-second
+window. It is not per-slot, it is not the gap between requests, and it is
+not the timeout. Something about the unit's state decides it and that
+something has not been found.
 
-**Blocked on:** understanding the delivery. Worth trying: whether the unit
-answers single-object requests only in a particular mode, and whether the
-sibling x5ded's priming trick -- a request that draws silence, sent first --
-has an equivalent here. **Do not** work around it by matching any patch
-dump that arrives: an answer to an abandoned request is indistinguishable
-from the right one, and that mistake already produced a read of Card 12 that
-returned the patch from Card 3.
+**Blocked on:** an explanation. Worth trying at the desk: whether the unit's
+current mode or edit level decides it, since a single patch dump is
+documented to land in the edit buffer and the Edit Patch level is where a
+patch is selected. Do **not** work around it by accepting any patch dump
+that arrives -- an answer to an abandoned request is indistinguishable from
+the right one, which is the mistake that produced the wrong-slot reads.
 
-**Not blocked:** whole-bank writes, which are verified and work.
+**Not blocked:** whole-bank reads and writes, which are verified and work.
 
 ---
 
