@@ -54,6 +54,7 @@ from textual.screen import ModalScreen
 from textual.widgets import DataTable, Header, Input, Label, Static
 
 from kws import banks
+from kws import messages as m
 from kws import catalog as cat
 
 __all__ = ["KwsedApp", "main", "build_parser", "KEY_HINTS", "wrap_blocks"]
@@ -86,8 +87,8 @@ def favorite_bank_id(bank_id: str, kind: str) -> str:
 
 KEY_HINTS = (
     "↑↓ move", "tab pane", "⏎ select on the unit", "r read names",
-    "/ search", "f favourite", "F favourites only", "i device", "? help",
-    "q quit",
+    "/ search", "f favourite", "F favourites only", "m multi", "i device",
+    "? help", "q quit",
 )
 
 
@@ -158,6 +159,89 @@ class ReportScreen(ModalScreen[None]):
     def action_close(self) -> None:
         self.dismiss(None)
 
+
+
+
+def _bank_label(sysex_byte: int) -> str:
+    """A part's bank number as a person reads it.
+
+    The number in a Multiset is the instrument's own, which is not the
+    position a person sees the banks in -- byte 3 is the Card, not ROM 4.
+    """
+    try:
+        return banks.by_sysex(sysex_byte).label
+    except LookupError:
+        return f"bank {sysex_byte}"
+
+
+class MultiScreen(ModalScreen[None]):
+    """The 32 Multisets and what each assigns to the 16 MIDI channels.
+
+    Read-only, and reading it makes no sound: one request, three replies,
+    nothing selected.
+
+    This is MIDI multi mode, not a performance's eight parts -- the two are
+    both called "multi" on this instrument and are different objects. See
+    :mod:`kws.multi`.
+    """
+
+    DEFAULT_CSS = """
+    MultiScreen { align: center middle; }
+    MultiScreen > Vertical {
+        width: 92; height: 86%; border: thick $accent;
+        background: $surface; padding: 1 2;
+    }
+    MultiScreen DataTable { height: 1fr; }
+    """
+
+    BINDINGS = [Binding("escape", "close", "Close"),
+                Binding("q", "close", "Close")]
+
+    def __init__(self, multisets, bank_label=None) -> None:
+        super().__init__()
+        self._multisets = list(multisets)
+        self._bank_label = bank_label or (lambda n: str(n))
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Label("[b]Multi mode -- 32 Multisets[/b]")
+            yield DataTable(id="multi-table", cursor_type="row")
+            yield Static("", id="multi-detail")
+            yield Static("[dim]arrows to move, esc / q to close[/dim]")
+
+    def on_mount(self) -> None:
+        table = self.query_one("#multi-table", DataTable)
+        for label, key in (("#", "num"), ("name", "name"),
+                           ("channels used", "used")):
+            table.add_column(label, key=key)
+        for entry in self._multisets:
+            used = sum(1 for part in entry.parts if part.used)
+            table.add_row(f"{entry.number:02d}", entry.name or "[dim]--[/dim]",
+                          str(used), key=str(entry.number))
+        self._detail(0)
+
+    def on_data_table_row_highlighted(self, event) -> None:
+        self._detail(event.cursor_row)
+
+    def _detail(self, row: int) -> None:
+        if not self._multisets or row is None or row >= len(self._multisets):
+            return
+        entry = self._multisets[row]
+        lines = []
+        for part in entry.parts:
+            if not part.used:
+                lines.append(f"ch {part.channel:2d}  --")
+                continue
+            lines.append(
+                f"ch {part.channel:2d}  {self._bank_label(part.bank)} "
+                f"perf {part.performance:02d}  level {part.level}")
+        half = (len(lines) + 1) // 2
+        rows = [f"{a:38s}{b}" for a, b in
+                zip(lines[:half], lines[half:] + [""])]
+        self.query_one("#multi-detail", Static).update("\n".join(rows))
+
+    def action_close(self) -> None:
+        self.dismiss(None)
 
 
 class SendScreen(ModalScreen[Optional[dict]]):
@@ -321,6 +405,7 @@ class KwsedApp(App):
         # Enter is NOT bound here: a focused DataTable consumes it for its
         # own row selection, so it arrives as RowSelected instead.
         Binding("r", "read_names", "Read names"),
+        Binding("m", "multi", "Multi mode"),
         Binding("f", "toggle_favorite", "Favourite"),
         Binding("F", "cycle_favorites", "Favourites view"),
         Binding("slash", "search", "Search"),
@@ -628,6 +713,39 @@ class KwsedApp(App):
             self.push_screen(ReportScreen("Search", "\n".join(lines)))
 
         self.push_screen(PromptScreen("Search names:"), done)
+
+    def action_multi(self) -> None:
+        """Show the Multisets. One request; makes no sound."""
+        if self._busy:
+            self.notify_status("busy", refused=True)
+            return
+        self._multi_worker()
+
+    @work(thread=True)
+    def _multi_worker(self) -> None:
+        """**MIDI only** -- the screen is built on the main thread."""
+        self._busy = True
+        try:
+            raw = self.device.read_multi()
+        except Exception as exc:
+            self.call_from_thread(self.notify_status,
+                                  f"multi: {exc}", refused=True)
+            return
+        finally:
+            self._busy = False
+        self.call_from_thread(self._show_multi, raw)
+
+    def _show_multi(self, raw: bytes) -> None:
+        from kws import multi as multi_mod
+
+        try:
+            sets = multi_mod.parse(m.parse(raw).data())
+        except Exception as exc:
+            self.notify_status(f"multi: {exc}", refused=True)
+            return
+        self.push_screen(MultiScreen(
+            sets, bank_label=lambda n: _bank_label(n)))
+        self.notify_status(f"{len(sets)} multisets")
 
     def action_device_info(self) -> None:
         self._info_worker()

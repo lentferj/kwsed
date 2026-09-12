@@ -144,6 +144,29 @@ def _cmd_select(device, args) -> None:
     print("established (see TODO.md), so treat this as a best effort.")
 
 
+def _cmd_multi(device, args) -> int:
+    """Show the Multisets. One request; makes no sound."""
+    from kws import messages as msg, multi as multi_mod
+    from kws import banks as bk
+
+    sets = multi_mod.parse(msg.parse(device.read_multi()).data())
+    print(f"{len(sets)} multisets")
+    for entry in sets:
+        used = [p for p in entry.parts if p.used]
+        if not used and not args.all:
+            continue
+        print(f"\n{entry.number:02d}  {entry.name or '(unnamed)'}"
+              f"   {len(used)} channel(s)")
+        for part in used:
+            try:
+                label = bk.by_sysex(part.bank).label
+            except LookupError:
+                label = f"bank {part.bank}"
+            print(f"    ch {part.channel:2d}  {label:7s} perf "
+                  f"{part.performance:02d}  level {part.level}")
+    return 0
+
+
 def _cmd_send(device, args) -> int:
     """Write a bank dump into the instrument. **This destroys a bank.**
 
@@ -229,6 +252,7 @@ _COMMANDS: Dict[str, Callable] = {
 
     "select": _cmd_select,
     "send": _cmd_send,
+    "multi": _cmd_multi,
 }
 _OFFLINE = {"banks", "list", "find", "ports"}
 
@@ -260,6 +284,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("bank")
     sp.add_argument("kind", choices=kinds)
     sp.add_argument("number", type=int)
+    sp = sub.add_parser("multi", help="the 32 Multisets (silent)")
+    sp.add_argument("--all", action="store_true",
+                    help="include Multisets with nothing assigned")
     sp = sub.add_parser("send", help="WRITE a bank dump INTO the unit")
     sp.add_argument("file", help="a .syx holding one bank dump")
     sp.add_argument("--to", required=True,

@@ -265,3 +265,56 @@ class TestTheSendIsPaced:
         size = 2 * banks.PATCHES_PER_BANK * r.PATCH_SIZE  # nibble encoded
         seconds = size / alsa.Sender.BYTES_PER_SECOND
         assert 9 < seconds < 15, f"a patch bank would take {seconds:.1f}s"
+
+
+class TestMultisets:
+    """32 Multisets, each assigning all 16 MIDI channels."""
+
+    def _dump(self, assignments=None):
+        from kws import multi
+        data = bytearray(multi.NAME_BASE + multi.MULTISETS * multi.NAME_SIZE)
+        for number in range(multi.MULTISETS):
+            base = number * multi.MULTISET_SIZE
+            for channel in range(multi.CHANNELS):
+                at = base + multi.PART_BASE + channel * multi.PART_SIZE
+                data[at] = 0
+                data[at + 1] = channel
+                data[at + 2] = 127
+            name = f"Invented{number}".encode()[:multi.NAME_SIZE]
+            at = multi.NAME_BASE + number * multi.NAME_SIZE
+            data[at:at + len(name)] = name
+        for at, value in (assignments or {}).items():
+            data[at] = value
+        return bytes(data)
+
+    def test_the_arithmetic_lands_flush(self):
+        from kws import multi
+        assert multi.PART_BASE + multi.CHANNELS * multi.PART_SIZE == \
+            multi.MULTISET_SIZE
+        assert multi.MULTISETS * multi.MULTISET_SIZE == multi.NAME_BASE
+
+    def test_it_parses_all_thirty_two(self):
+        from kws import multi
+        sets = multi.parse(self._dump())
+        assert len(sets) == multi.MULTISETS
+        assert sets[0].name == "Invented0"
+        assert len(sets[0].parts) == multi.CHANNELS
+        assert [p.channel for p in sets[0].parts] == list(range(1, 17))
+
+    def test_a_short_dump_is_refused(self):
+        from kws import multi
+        with pytest.raises(ValueError, match="at least"):
+            multi.parse(self._dump()[:100])
+
+    def test_seven_f_reads_as_a_space(self):
+        """Korg's appendix says 0x7F is a space; the names use it too."""
+        from kws import multi
+        data = bytearray(self._dump())
+        at = multi.NAME_BASE
+        data[at:at + 16] = b"Two\x7fWords" + bytes(7)
+        assert multi.parse(bytes(data))[0].name == "Two Words"
+
+    def test_the_request_is_the_documented_one(self):
+        from kws import messages as m
+        assert m.Function.MULTI_REQUEST == 0x06
+        assert m.REQUEST_FOR_DUMP[m.Function.MULTISET_DUMP] == 0x06

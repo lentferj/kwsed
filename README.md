@@ -41,6 +41,18 @@ Two panes: bank-and-kind on the left, that bank's slots on the right.
   met with silence.
 - **A CLI** (`kwscli`), most of which needs no unit at all.
 
+### Multi mode, and the word's two meanings
+
+"Multi" names two different objects here, and mixing them up is easy:
+
+* a **performance** combines up to eight parts, each a patch with its own
+  MIDI channel and key range — the multi-timbral *sound*;
+* a **Multiset** is MIDI multi mode proper: 32 of them, each saying which
+  performance answers on each of the 16 channels, and at what level.
+
+`m` in the browser, or `kwscli multi`, shows the second. One request, three
+replies, nothing selected and no sound.
+
 ### A performance is not a patch
 
 They are different objects, and a bank holds both:
@@ -96,6 +108,7 @@ kwsed --port "U6MIDI Pro:U6MIDI Pro MIDI 1 44:0" --midi-channel 5
 | `enter` | select this sound — **it will sound** |
 | `r` | read this bank's names from the unit — **silent** |
 | `/` | search names |
+| `m` | the 32 Multisets and their 16 channels — **silent** |
 | `i` | device identity and the unit's global channel |
 | `?` / `q` | help / quit |
 
@@ -110,6 +123,7 @@ kwscli find "glass"               # search names (no unit needed)
 kwscli ports                      # MIDI ports on this host
 kwscli status                     # who is there, and on which global channel
 kwscli dump CARD                  # read a bank's names (silent)
+kwscli multi                      # the 32 Multisets (silent)
 kwscli select RAM1 patch 12       # select a sound ON THE UNIT
 ```
 
