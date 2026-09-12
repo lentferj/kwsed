@@ -65,6 +65,39 @@ Performance and Patch mode and repeat one bank request each way.
 
 ---
 
+## 3b. Multi mode: the data is decoded, the way to ask for it is not
+
+**Status:** open. Decoding done; retrieval blocked.
+
+"Multi" means two things on this instrument, and they are not the same
+object -- the same double meaning the sibling p2ked had to untangle:
+
+* a **performance** combines up to 8 **parts**, each a patch with its own
+  MIDI channel, key range and level. That is the multi-timbral *sound*.
+* a **Multiset** is the SR's MIDI multi mode: **32** of them, each assigning
+  all **16 MIDI channels**.
+
+The Multiset dump is function **`0x62`**, and its layout is worked out --
+see docs/RESOLUTION_NOTES.md section 8. kwsed can decode a `.syx` containing
+one today; it cannot ask the unit for one.
+
+**Blocked on:** the request code. `0x32` was inferred from Korg's convention
+that a request sits 0x30 below its dump, and **probed on hardware with no
+argument, one and two: silence in every form** (the unit was unaffected and
+still dumps banks normally). So either the code is different -- the
+wave-sequence request `0x0C` for dump `0x54` already proves the arithmetic
+is not universal -- or Multi data is only served while the unit is in Multi
+mode, which would match how a bank request returns patches or performances
+according to the unit's own state rather than the request's.
+
+Next, in order of cost: retry the three `0x32` forms with the unit switched
+to Multi mode; failing that, dump Multi from the front panel (Global ->
+Dump), which needs no request code at all. Do **not** work through
+neighbouring function codes looking for a hit -- some codes in that range
+are commands rather than reads, and which ones is exactly what is not known.
+
+---
+
 ## 4. The single-performance dump has never been requested from the unit
 
 **Status:** open.

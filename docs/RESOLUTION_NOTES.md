@@ -212,3 +212,96 @@ needs a collision test.**
   is not a finding.** In rxved that produced a confident, wrong claim that a
   parameter was absent from Roland's address map; it was there. With scans
   and no OCR, as here, the same trap is one step closer.
+
+---
+
+## 8. Multi mode: the Multiset dump, and a request code that is not derivable
+
+### 8.1 Two different objects, both called "multi"
+
+* A **performance** combines up to 8 **parts**, each a patch with its own
+  MIDI channel, key range and level.
+* A **Multiset** is the SR's MIDI multi mode: 32 of them, each assigning all
+  16 MIDI channels.
+
+Worth stating because the sibling p2ked hit the same ambiguity on the
+Proteus and it cost a wrong reading of the manual there.
+
+### 8.2 The Multiset dump, function `0x62`
+
+Derived from the owner's `sr_multi.syx`, 7563 bytes on the wire, data at
+offset **7** (two header bytes, unlike the banks' one):
+
+```
+3777 decoded bytes
+   0 .. 2751   32 multisets x 86 bytes
+2752 .. 3263   32 names x 16 bytes
+3264 .. 3776   513 bytes, not identified
+```
+
+Each 86-byte multiset is **22 bytes of settings followed by 16 parts of 4
+bytes** -- and 22 + 16*4 = 86 exactly, ending on the record boundary, which
+is not what a wrong split does. The part fields, by their ranges over all
+32 x 16 = 512 parts in the factory file:
+
+| byte | range | reading |
+|---|---|---|
+| 0 | 1-2 | bank |
+| 1 | 0-49 | performance number, exactly the 50-per-bank range |
+| 2 | 3-127 | level |
+| 3 | 0-1 | flag; 1 on channels 1-15, 0 on channel 16, in every record |
+
+The alignment was found by scanning every offset from 16 to 25 and keeping
+the one whose four columns give a plausible bank, a number inside 0-49 and a
+level inside 0-127. Only offset 22 both does that and ends flush with the
+record.
+
+Two things this does **not** establish: bytes 0 and 3 are read from a file in
+which all 32 multisets are factory defaults, all named `Multiset`, so the
+name decoding is proven but unexercised on real names; and the trailing 513
+bytes are unaccounted for.
+
+### 8.3 `0x32` was inferred, probed, and is wrong
+
+Edisyn has no Multiset support, but its five request/dump pairs give the
+convention:
+
+| object | request | dump | difference |
+|---|---|---|---|
+| single patch | `0x10` | `0x40` | 0x30 |
+| single performance | `0x19` | `0x49` | 0x30 |
+| patch bank | `0x1C` | `0x4C` | 0x30 |
+| performance bank | `0x1D` | `0x4D` | 0x30 |
+| wave sequences | `0x0C` | `0x54` | **0x48** |
+
+Four of five sit 0x30 below their dump, which is Korg's family-wide
+convention -- the 01/W documents the same relationship, down to mode request
+`0x12` and mode data `0x42`. That predicts `0x32` for the Multiset dump
+`0x62`, and the exception looked explicable: wave sequences would need
+`0x24`, which is already the data-load-error reply, so the rule appears to
+break where it would collide, and `0x32` collides with nothing known.
+
+**Probed on hardware, 2026-09-12, and it was wrong.** All three forms --
+`F0 42 34 28 32 F7`, with one argument, and with two -- returned silence.
+The unit was unaffected: it answered an Identity Request and dumped RAM 1
+normally straight afterwards.
+
+Silence distinguishes nothing here, so the reading is either that the code
+is different, or that Multi data is only served while the unit is in Multi
+mode. The second would match behaviour this unit already shows, where a bank
+request returns performances or patches according to its own state.
+
+**Do not hunt for the code by trying neighbours.** Some values in that range
+are commands rather than reads, and which ones is precisely what is not
+known; kwsed's rule that it writes nothing to the unit is not compatible
+with finding out empirically. The front panel dumps Multi data with no
+request code at all, and that is the route to prefer.
+
+### 8.4 The status codes are transcribed, not confirmed
+
+`Function.NAMES` lists `0x21`-`0x26` as write/load/format status replies.
+Those come from Korg's family convention, **not** from evidence here: no
+dump in hand contains one, this unit has never returned one, and Edisyn
+implements none of them. The docstring in `kws/messages.py` groups them
+under a sentence claiming confirmation against dumps and against Edisyn,
+which is true of the dump codes and overstated for these.

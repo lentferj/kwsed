@@ -105,8 +105,14 @@ class ProtocolError(ValueError):
 class Function:
     """Function codes.
 
-    Confirmed against dumps the instrument produced and against the sizes
-    Edisyn's Wavestation support expects.
+    The **dump** codes are confirmed against dumps the instrument produced
+    and against the sizes Edisyn's Wavestation support expects.
+
+    The **status replies** below are not. They are transcribed from Korg's
+    family convention: no dump in hand contains one, this unit has never
+    returned one, and Edisyn implements none of them. Treat a match on one
+    as a strong hint rather than a fact -- see docs/RESOLUTION_NOTES.md
+    section 8.4.
     """
 
     # Requests
