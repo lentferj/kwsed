@@ -707,6 +707,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--midi-channel", type=int, default=None,
                         help="the unit's global channel, 1-16")
     parser.add_argument("--catalog", default=None)
+    parser.add_argument("--config", default=None,
+                        help="settings cache (default: ./config.toml)")
     parser.add_argument("--favorites", default=None,
                         help="favourites database (default: "
                              "the per-platform data directory)")
@@ -715,6 +717,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
+    from kws import config as cfg
+
+    config_path = getattr(args, "config", None) or cfg.DEFAULT_PATH
     if args.midi_channel is not None and not 1 <= args.midi_channel <= 16:
         sys.exit("error: --midi-channel is 1-16")
 
@@ -726,18 +731,29 @@ def main(argv: Optional[List[str]] = None) -> int:
         from kws import bridge as b
 
         b.install_clean_exit()
+        # The channel on the command line wins; otherwise the one used last
+        # time, so it does not have to be given again every run.
+        remembered = cfg.load_channel(config_path)
         try:
             if args.port:
                 device = b.WavestationBridge.open(
                     args.port, recv_port=args.recv_port,
-                    channel=(args.midi_channel - 1) if args.midi_channel
-                    else 0)
+                    channel=((args.midi_channel - 1) if args.midi_channel
+                             else (remembered if remembered is not None
+                                   else 0)))
             else:
                 device = b.WavestationBridge.autodetect(
                     on_try=lambda n: print(f"  probing {n}...",
                                            file=sys.stderr))
         except Exception as exc:
             sys.exit(f"error: {exc}")
+
+        # Remember whatever channel is actually in use -- which after an
+        # autodetect is the one the unit reported, not the one asked for.
+        try:
+            cfg.save_channel(getattr(device, "channel", 0), config_path)
+        except OSError:
+            pass
 
     from kws.favorites import Favorites
 
