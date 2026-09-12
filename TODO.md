@@ -129,26 +129,34 @@ but it has not been measured either.
 
 ---
 
-## 6. kwsed does not write
+## 6. Writing: one operation, fenced
 
-**Status:** deliberate. Recorded so that adding a write is a decision, not
-an omission somebody quietly fills.
+**Status:** done for whole banks; deliberately limited.
 
-Four of the twelve banks are writable (RAM 1-3 and the Card). kwsed stores
-nothing, renames nothing and erases nothing.
+kwsed writes in exactly one place, `WavestationBridge.write_bank`, and it
+replaces a whole bank. Four banks accept it -- RAM 1-3 and the Card -- which
+kwsed's own table and Edisyn's `getWriteableBanks()` independently agree on;
+the eight ROM banks are refused before anything is read or sent.
 
-If that changes, it follows the sibling projects' fence, which exists
-because the alternative has cost people their sounds:
+The fence, which is the rule for any destructive feature added later:
 
-1. a modal **arm-then-fire** screen — opening it sends nothing, arming sends
-   nothing, firing is a *different* key and works only while armed, and
-   moving the cursor disarms;
-2. never one keystroke from the browser;
-3. **back up the destination first, unconditionally** — if that read fails,
-   nothing is written;
-4. say what is about to be overwritten **by name**, not by slot number;
-5. verify by reading back and comparing, and report what did not match
-   rather than claiming success.
+1. A modal **arm-then-fire** screen (`SendScreen`) or, on the command line,
+   `--yes`. Opening sends nothing; arming sends nothing; firing is a
+   *different* key and works only while armed.
+2. **Never one keystroke from the browser.**
+3. **Back up first, unconditionally.** The destination is read in full and
+   written to a file before a byte goes out; if that read fails, nothing is
+   written. Backups are plain `.syx` plus a JSON sidecar, so they can be
+   restored by any tool including the instrument's own front panel.
+4. **Say what is about to be destroyed, by name.** "Card" means nothing; the
+   names it is about to replace mean everything.
+5. **Verify by reading back and comparing**, and report a mismatch rather
+   than claiming success -- a bulk dump is unacknowledged.
+
+**Still not done:** writing a single performance or patch rather than a
+whole bank, and restoring a backup from within kwsed (the files are plain
+`.syx`, so the instrument can already take them back). Neither is a dict to
+widen: both are new destinations and get the same fence.
 
 ---
 

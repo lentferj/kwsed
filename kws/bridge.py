@@ -55,6 +55,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 import rtmidi  # noqa: E402
 
+from kws import backup
 from kws import banks
 from kws import dumps
 from kws import messages as m
@@ -311,3 +312,130 @@ class WavestationBridge:
         self._out.send_message([status, 0x20, slot.bank.number])
         self._out.send_message([0xC0 | target, slot.number])
         time.sleep(SEND_GAP)
+
+    # --- writing, which is fenced ------------------------------------------
+
+    #: Only these banks accept a write. Confirmed twice: kwsed's own bank
+    #: table marks RAM 1-3 and the Card writable, and Edisyn's Wavestation
+    #: support lists the same four and no others.
+    def writable(self, bank) -> bool:
+        return banks.bank(bank).writable
+
+    def write_bank(self, bank, kind: str, data: bytes, *,
+                   backup_dir: str,
+                   verify: bool = True,
+                   timeout: Optional[float] = None) -> dict:
+        """Replace a whole bank. **This destroys what is there.**
+
+        The only thing in kwsed that writes to the instrument, and it is
+        fenced the way the sibling projects fence theirs:
+
+        1. **A ROM bank is refused**, before anything is read or sent.
+        2. **The destination is read in full and backed up first.** If that
+           read fails, nothing is written -- a write that cannot be undone
+           is not one this program performs.
+        3. The dump is sent, nibble encoded and checksummed.
+        4. **It is read back and compared**, and the result says so. A bulk
+           dump is unacknowledged, so reporting the bytes sent as if they
+           had arrived would be a guess dressed as a confirmation.
+
+        Arming and confirming belong to the caller -- the TUI's modal and
+        the command line's ``--yes`` -- because a fence that lives in the
+        transport can be bypassed by the next caller who forgets it exists.
+        """
+        entry = banks.bank(bank)
+        if not entry.writable:
+            raise DeviceError(
+                f"{entry.label} is ROM and cannot be written. The banks that "
+                f"can are: "
+                f"{', '.join(b.label for b in banks.writable_banks())}.")
+        if kind not in (banks.Kind.PERFORMANCE, banks.Kind.PATCH,
+                        "waveseq"):
+            raise ValueError(f"cannot write {kind!r}")
+
+        function = {
+            banks.Kind.PATCH: m.Function.ALL_PATCH_DUMP,
+            banks.Kind.PERFORMANCE: m.Function.ALL_PERFORMANCE_DUMP,
+            "waveseq": m.Function.ALL_WAVESEQ_DUMP,
+        }[kind]
+
+        # --- 2. back the destination up, or do not write at all ------------
+        try:
+            before = self.read_raw(entry.number, function, timeout=timeout)
+        except Exception as exc:
+            raise DeviceError(
+                f"could not read {entry.label} before writing it, so nothing "
+                f"was sent ({exc}). kwsed does not overwrite a bank it has "
+                f"not backed up.") from exc
+        names = []
+        try:
+            packet = m.parse(before)
+            if packet is not None and function != m.Function.ALL_WAVESEQ_DUMP:
+                names = list(dumps.parse_bulk(packet).names().values())
+        except Exception:
+            names = []
+        saved = backup.save(before, backup_dir, bank_label=entry.label,
+                            kind=kind, names=names, channel=self.channel)
+
+        # --- 3. send -------------------------------------------------------
+        self._drain()
+        self._send(m.frame_bulk(function, entry.number, data,
+                                channel=self.channel))
+
+        result = {"bank": entry.label, "kind": kind, "backup": saved,
+                  "verified": None, "mismatch": None}
+        if not verify:
+            return result
+
+        # --- 4. read back and compare --------------------------------------
+        try:
+            after = self.read_raw(entry.number, function, timeout=timeout)
+        except Exception as exc:
+            result["verified"] = False
+            result["mismatch"] = (
+                f"the write was sent but {entry.label} could not be read "
+                f"back to check it ({exc}). Whether it took is unknown.")
+            return result
+        sent = m.frame_bulk(function, entry.number, data,
+                            channel=self.channel)
+        result["verified"] = bytes(after) == bytes(sent)
+        if not result["verified"]:
+            result["mismatch"] = _first_difference(bytes(sent), bytes(after))
+        return result
+
+    def read_raw(self, bank_number: int, function: int, *,
+                 timeout: Optional[float] = None) -> bytes:
+        """One bank dump of a given kind, as the bytes that arrived."""
+        self._drain()
+        request = (m.bulk_request(bank_number, self.channel)
+                   if function != m.Function.ALL_WAVESEQ_DUMP
+                   else m.frame(0x0C, [bank_number], channel=self.channel))
+        self._send(request)
+        deadline = time.time() + (DUMP_TIMEOUT if timeout is None else timeout)
+        while time.time() < deadline:
+            message = self._in.get_message()
+            if message is None:
+                time.sleep(0.003)
+                continue
+            packet = m.parse(message[0])
+            if packet is None or packet.channel != self.channel:
+                continue
+            if packet.is_error:
+                raise DeviceRefused(packet.function)
+            if packet.function == function:
+                return bytes(message[0])
+        raise TimeoutError(
+            f"no {m.Function.name(function)} came back for bank "
+            f"{bank_number}")
+
+
+def _first_difference(sent: bytes, got: bytes) -> str:
+    """Where a read-back stopped matching, in words rather than two dumps."""
+    if len(sent) != len(got):
+        return (f"the read-back is {len(got)} bytes and {len(sent)} were "
+                f"sent")
+    for index, (a, b) in enumerate(zip(sent, got)):
+        if a != b:
+            return (f"byte {index} differs: sent {a:#04x}, read back "
+                    f"{b:#04x}")
+    return "no difference found, which contradicts the comparison"

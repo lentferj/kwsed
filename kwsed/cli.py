@@ -144,10 +144,91 @@ def _cmd_select(device, args) -> None:
     print("established (see TODO.md), so treat this as a best effort.")
 
 
+def _cmd_send(device, args) -> int:
+    """Write a bank dump into the instrument. **This destroys a bank.**
+
+    The gate here is the command line's equivalent of the TUI's
+    arm-then-fire: without ``--yes`` it reads the destination, says what is
+    about to be replaced **by name**, and stops. A slot number means nothing;
+    the names it is about to overwrite mean everything.
+    """
+    from kws import backup, banks as bk, dumps, messages as m, records as rec
+
+    raw = open(args.file, "rb").read()
+    packets = [p for p in dumps.read_syx_file(args.file)]
+    if not packets:
+        print(f"{args.file} holds no Wavestation message kwsed recognises")
+        return 2
+    packet = packets[0]
+    kinds = {
+        m.Function.ALL_PATCH_DUMP: bk.Kind.PATCH,
+        m.Function.ALL_PERFORMANCE_DUMP: bk.Kind.PERFORMANCE,
+        m.Function.ALL_WAVESEQ_DUMP: "waveseq",
+    }
+    if packet.function not in kinds:
+        print(f"{args.file} is a {packet.function_name}, which kwsed does "
+              f"not send")
+        return 2
+    kind = kinds[packet.function]
+    sizes = {bk.Kind.PATCH: bk.PATCHES_PER_BANK * rec.PATCH_SIZE,
+             bk.Kind.PERFORMANCE: bk.PERFORMANCES_PER_BANK
+             * rec.PERFORMANCE_SIZE,
+             "waveseq": rec.WAVESEQ_BANK_SIZE}
+    payload = packet.data()[:sizes[kind]]
+    if len(payload) < sizes[kind]:
+        print(f"{args.file} decodes to {len(payload)} bytes; a {kind} bank "
+              f"is {sizes[kind]}. Refusing to send a short bank.")
+        return 2
+
+    destination = bk.bank(args.to)
+    if not destination.writable:
+        print(f"{destination.label} is ROM and cannot be written. The banks "
+              f"that can are: "
+              f"{', '.join(b.label for b in bk.writable_banks())}.")
+        return 2
+
+    print(f"about to replace: {destination.label}, all "
+          f"{'32 wave sequences' if kind == 'waveseq' else kind + 's'}")
+    print(f"          source: {args.file} ({len(raw)} bytes)")
+
+    if kind != "waveseq":
+        try:
+            current = device.read_bank_names(destination.number)
+            _, names = current
+            shown = [f"{n:03d} {name}" for n, name in
+                     sorted(names.items())[:6]]
+            print(f"     it now holds: {', '.join(shown)}"
+                  f"{' ...' if len(names) > 6 else ''}")
+        except Exception as exc:
+            print(f"     it now holds: could not be read ({exc})")
+            print("Refusing to write a bank that cannot first be read and "
+                  "backed up.")
+            return 1
+
+    if not args.yes:
+        print("\nNothing has been sent. Add --yes to write, and be sure: "
+              "this replaces the whole bank and no power cycle brings it "
+              "back.")
+        return 0
+
+    where = args.backup_dir or backup.default_dir()
+    result = device.write_bank(destination.number, kind, payload,
+                               backup_dir=where)
+    print(f"\nbacked up to: {result['backup']}")
+    if result["verified"] is True:
+        print("written and verified by reading it back")
+        return 0
+    print(f"written, but the read-back does NOT match: {result['mismatch']}")
+    print("The backup above holds what was there before.")
+    return 1
+
+
 _COMMANDS: Dict[str, Callable] = {
     "banks": _cmd_banks, "list": _cmd_list, "find": _cmd_find,
     "ports": _cmd_ports, "status": _cmd_status, "dump": _cmd_dump,
+
     "select": _cmd_select,
+    "send": _cmd_send,
 }
 _OFFLINE = {"banks", "list", "find", "ports"}
 
@@ -179,6 +260,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("bank")
     sp.add_argument("kind", choices=kinds)
     sp.add_argument("number", type=int)
+    sp = sub.add_parser("send", help="WRITE a bank dump INTO the unit")
+    sp.add_argument("file", help="a .syx holding one bank dump")
+    sp.add_argument("--to", required=True,
+                    help="destination bank: RAM1, RAM2, RAM3 or CARD")
+    sp.add_argument("--yes", action="store_true",
+                    help="actually write; without it nothing is sent")
+    sp.add_argument("--backup-dir", default=None,
+                    help="where to save the destination before overwriting")
     return parser
 
 
@@ -208,21 +297,24 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if args.command in _OFFLINE:
         try:
-            handler(None, args)
+            code = handler(None, args)
         except (LookupError, ValueError) as exc:
             sys.exit(f"error: {exc}")
-        return 0
+        return int(code or 0)
     try:
         device = _build_device(args)
     except Exception as exc:
         sys.exit(f"error: {exc}")
     try:
-        handler(device, args)
+        # the handler's code is the process's: `send` reports a read-back
+        # that did not match by exiting non-zero, and a script that ignores
+        # that would treat a failed write as a success
+        code = handler(device, args)
     except (LookupError, TimeoutError, ValueError, RuntimeError) as exc:
         sys.exit(f"error: {exc}")
     finally:
         device.close()
-    return 0
+    return int(code or 0)
 
 
 if __name__ == "__main__":

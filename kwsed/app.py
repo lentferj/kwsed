@@ -134,6 +134,112 @@ class ReportScreen(ModalScreen[None]):
         self.dismiss(None)
 
 
+
+class SendScreen(ModalScreen[Optional[dict]]):
+    """Write a bank dump into the instrument. **Destructive.**
+
+    The only screen in kwsed that can destroy anything. Writing a bank
+    replaces all fifty performances or all thirty-five patches that were in
+    it, and no power cycle brings them back. So this follows the sibling
+    projects' rule for destructive operations -- eosed's Master menu,
+    k2kremote's DELBANK, rxved's store -- and then adds a backup:
+
+    1. The destination's **current names** are read and shown, because
+       "Card" means nothing and the names it is about to replace mean
+       everything.
+    2. **Arm.** Nothing has been sent yet.
+    3. **Fire**, a different key, only while armed.
+
+    Three deliberate steps, none of them a single keystroke from the
+    browser. Opening this screen sends nothing; arming sends nothing.
+
+    Before a byte goes out the destination is read in full and saved to a
+    file. If that read fails, nothing is written at all.
+    """
+
+    DEFAULT_CSS = """
+    SendScreen { align: center middle; }
+    SendScreen > Vertical {
+        width: 80; height: auto; border: thick $error;
+        background: $surface; padding: 1 2;
+    }
+    SendScreen .armed { color: $error; text-style: bold; }
+    SendScreen .what { height: auto; }
+    """
+
+    BINDINGS = [
+        Binding("escape", "close", "Cancel"),
+        Binding("q", "close", "Cancel"),
+        Binding("a", "arm", "Arm", show=False),
+        # Deliberately not Enter, and deliberately not beside "a": the fire
+        # key should not be the one a finger is already resting on.
+        Binding("w", "fire", "Write", show=False),
+    ]
+
+    def __init__(self, *, path: str, kind: str, destination,
+                 current: Optional[Dict[int, str]] = None,
+                 on_send=None) -> None:
+        super().__init__()
+        self._path = path
+        self._kind = kind
+        self._destination = destination
+        self._current = dict(current or {})
+        self._on_send = on_send
+        self._armed = False
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Label("[b]Write a bank into the instrument[/b]")
+            yield Static(self._describe(), classes="what")
+            yield Static("", id="send-state")
+            yield Static(
+                "[dim]a to arm, then w to write. esc cancels.[/dim]")
+
+    def _describe(self) -> str:
+        lines = [
+            f"source      {self._path}",
+            f"destination {self._destination.label}  "
+            f"({'writable' if self._destination.writable else 'ROM'})",
+            f"kind        {self._kind}",
+        ]
+        if self._current:
+            shown = ", ".join(f"{n:03d} {name}" for n, name
+                              in sorted(self._current.items())[:5])
+            more = " ..." if len(self._current) > 5 else ""
+            lines.append(f"replacing   {shown}{more}")
+        else:
+            lines.append("replacing   (names not read)")
+        return "\n".join(lines)
+
+    def on_mount(self) -> None:
+        if not self._destination.writable:
+            self.query_one("#send-state", Static).update(
+                "[b]$error[/b] this bank is ROM and cannot be written")
+
+    def action_arm(self) -> None:
+        if not self._destination.writable:
+            return
+        self._armed = True
+        self.query_one("#send-state", Static).update(
+            f"[b]ARMED[/b] - w replaces {self._destination.label} "
+            f"{self._kind}s. Nothing has been sent yet.")
+
+    def action_fire(self) -> None:
+        """Only while armed, and only once."""
+        if not self._armed:
+            self.query_one("#send-state", Static).update(
+                "[dim]not armed - press a first[/dim]")
+            return
+        self._armed = False
+        if self._on_send is not None:
+            self._on_send(self._destination, self._kind)
+        self.dismiss({"destination": self._destination.number,
+                      "kind": self._kind})
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
 class PromptScreen(ModalScreen[Optional[str]]):
     """One line of text."""
 

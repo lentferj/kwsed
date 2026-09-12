@@ -54,11 +54,23 @@ collide in the catalog, and the cursor never sends MIDI.
 
 ## What kwsed does to the instrument
 
-**It does not write to the unit's memory.** Nothing stores, renames or
-erases anything — not even to the four writable banks.
+**It writes to the unit's memory in exactly one place, and that place is
+fenced.** `write_bank` replaces a whole bank in RAM 1-3 or the Card. The
+eight ROM banks are refused. Nothing stores a single performance or patch,
+and nothing renames anything.
 
-It plays the instrument in one place, and that place says so: `Enter` in the
-TUI and `kwscli select`.
+The fence: arm-then-fire in the TUI, `--yes` on the command line, the
+destination read in full and backed up to a `.syx` before a byte goes out —
+if that read fails nothing is written at all — the names about to be
+replaced shown first, and the result verified by reading it back.
+
+**This write path has never been exercised against hardware.** The bytes it
+builds match the instrument's own dumps in length, framing and checksum, and
+round-trip through kwsed's own reader, but no bank has been written to a
+real WS SR. Try it on something disposable first.
+
+It plays the instrument in one other place, and that place says so: `Enter`
+in the TUI and `kwscli select`.
 
 **Reading a bank makes no sound.** One System Exclusive message; nothing is
 selected.
