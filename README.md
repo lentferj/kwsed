@@ -1,0 +1,167 @@
+<!--
+SPDX-License-Identifier: GPL-2.0-or-later
+SPDX-FileCopyrightText: Copyright (C) 2026  kwsed contributors
+-->
+
+# kwsed
+
+A terminal browser for the **Korg Wavestation SR**.
+
+> **Prototype. Its read path works against a real WS SR; parts are still
+> unverified.** Discovery, the identity reply and bank dumps — including
+> from a fitted program card — were exercised on hardware on 2026-09-12.
+> What is *not* established is which of the twelve banks a Bank Select
+> actually reaches, and nothing inside a record past its name is decoded.
+> **Read [DISCLAIMER.md](DISCLAIMER.md) first.**
+
+Two panes: bank-and-kind on the left, that bank's slots on the right.
+
+```
+ bank    kind  n         #    name
+ RAM 1   perf  50        00   Glass Meridian
+ RAM 1   patc  35        01   Slow Tideline
+▸Card    patc  35        02   Amber Drift
+ ROM 4   perf  50  ro    03   Kelp Forest
+
+ Card patch 02  Amber Drift
+```
+
+## What it does
+
+- **All twelve banks, both kinds.** RAM 1-3, ROM 4-11 and the **Card** slot,
+  each holding 50 performances and 35 patches.
+- **Reads names off the unit, silently.** `r` asks for a whole bank in one
+  System Exclusive message. Nothing is selected and nothing sounds.
+- **Names from two sources, kept distinct**: a catalog built from your own
+  `.syx` dumps, and what the unit says. A name read from hardware shows in
+  bold; one that *disagrees* with the catalog gets a `*`.
+- **Finds the unit and its global channel by itself.** A Wavestation answers
+  a Universal Identity Request, and the reply carries the channel it is set
+  to — the one number you cannot guess and without which every request is
+  met with silence.
+- **A CLI** (`kwscli`), most of which needs no unit at all.
+
+### A performance is not a patch
+
+They are different objects, and a bank holds both:
+
+- a **patch** is a sound: four oscillators, each playing a wave or a wave
+  sequence;
+- a **performance** combines up to **eight parts**, each pointing at a patch,
+  with its own MIDI channel, key range and level.
+
+So the performance is the multi-timbral object, and usually what a sequencer
+wants. kwsed keys them separately throughout — both words begin with `P`, and
+an abbreviated key merges a bank's 50 performances with its 35 patches
+without any error at all. That was a real bug here, caught by a test.
+
+### The reply decides which kind you get
+
+One request code asks for a bank, and the unit answers with performances
+*or* patches — **its** choice, not the request's. kwsed therefore reads the
+bank and the kind out of the **reply** and files the names under that,
+rather than under what it asked for. A late answer filed under the wrong
+bank is a silent, permanent error in a name catalog.
+
+### Selecting is a best effort, and says so
+
+`select` sends Bank Select and a Program Change, but **which of the twelve
+banks a given Bank Select reaches has not been established** — the manuals
+to hand are scans with no text layer. kwsed sends the bank's own System
+Exclusive number and reports what it sent, rather than implying it knows
+where that lands. See [TODO.md](TODO.md).
+
+## Install
+
+```sh
+python3 -m venv --system-site-packages .venv
+.venv/bin/pip install -e .
+```
+
+Needs Python 3.11+, `python-rtmidi` and `textual`.
+
+## Run
+
+```sh
+kwsed --demo      # built-in demo device; opens no MIDI ports
+kwsed             # find a Wavestation and adopt its global channel
+kwsed --port "U6MIDI Pro:U6MIDI Pro MIDI 1 44:0" --midi-channel 5
+```
+
+### Keys
+
+| | |
+|---|---|
+| arrows, `tab` | move; `tab` switches pane |
+| `enter` | select this sound — **it will sound** |
+| `r` | read this bank's names from the unit — **silent** |
+| `/` | search names |
+| `i` | device identity and the unit's global channel |
+| `?` / `q` | help / quit |
+
+**Moving the cursor never sends anything**, enforced by a test.
+
+### Command line
+
+```sh
+kwscli banks                      # the bank table (no unit needed)
+kwscli list RAM1 performance      # one bank's slots (no unit needed)
+kwscli find "glass"               # search names (no unit needed)
+kwscli ports                      # MIDI ports on this host
+kwscli status                     # who is there, and on which global channel
+kwscli dump CARD                  # read a bank's names (silent)
+kwscli select RAM1 patch 12       # select a sound ON THE UNIT
+```
+
+## Names are not included
+
+kwsed ships **no** Korg content. The bank table and the numbering are its
+own; the names come from your own dumps:
+
+```sh
+python3 tools/extract_catalog.py ~/path/to/*.syx
+```
+
+That writes `kws/data/catalog.json`, which is gitignored. kwsed works
+without it, showing numbers only — and a connected unit can supply every
+name.
+
+Where two files hold the same bank and kind, the **first wins** and the rest
+are reported. Silently keeping whichever was read last would produce a
+catalog matching no actual instrument.
+
+## How the dump format was worked out
+
+The manuals to hand are scans with no text layer, so the format was derived
+from dumps the machine produced, then confirmed on hardware:
+
+- The Wavestation encodes each data byte as **two MIDI bytes, low nibble
+  first** — which is *not* what the X5 family does, and assuming Korg is
+  consistent across its own range costs an afternoon.
+- The sizes then come out exact: from offset 6, a performance bank yields
+  `9050 = 50 × 181` bytes and a patch bank `14910 = 35 × 426`, neither with
+  anything left over. Two unrelated dumps landing exactly is not what a
+  wrong reading does.
+- A single-performance dump (function `0x49`) independently yields 181 bytes
+  **from offset 7** — one byte later, because that message carries a number
+  as well as a bank — agreeing with the bulk dump's division.
+- Every record then begins with a legible name: all 35 patches in a bank,
+  all 50 performances.
+
+`docs/RESOLUTION_NOTES.md` records it in full, including the wrong turns.
+
+## Edisyn
+
+[Edisyn](https://github.com/eclab/edisyn) has Wavestation support and is
+**Apache-2.0**, which is not compatible with this project's GPL-2.0. It was
+read **only as a reference for interface facts** — the bank list, the nibble
+encoding, the dump sizes — each of which is independently evidenced by dumps
+this instrument produced. **No Edisyn code is used or derived here.** See
+[LICENSE](LICENSE) and `docs/RESOLUTION_NOTES.md` §2.
+
+## Licence
+
+GPL-2.0-or-later. See [LICENSE](LICENSE) for the copyright notice and
+third-party attributions, and [COPYING](COPYING) for the licence text.
+
+Not affiliated with KORG INC.

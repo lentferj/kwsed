@@ -1,0 +1,84 @@
+kwsed — Terminal browser for the Korg Wavestation SR
+Copyright (C) 2026  kwsed contributors
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 2 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+The full, verbatim text of the GNU General Public License version 2 is in
+the file COPYING alongside this one.
+
+-------------------------------------------------------------------------------
+Edisyn: consulted for facts, not for code
+-------------------------------------------------------------------------------
+
+Edisyn (Sean Luke and contributors) has Korg Wavestation support and is
+licensed under the **Apache License 2.0**.
+
+Apache-2.0 is compatible with GPL-3.0 but **not** with GPL-2.0. Since kwsed
+is GPL-2.0-or-later, incorporating Edisyn code would force the combined work
+to GPL-3.0-or-later — a change to this project's licensing that is not made
+silently, and not one worth making for what was needed.
+
+So Edisyn was read **only as a reference for interface facts**, and no code,
+structure or comment from it appears here. Specifically, these facts were
+confirmed against it, each of which is also evidenced independently by
+System Exclusive dumps the instrument produced:
+
+  - the twelve bank names and which four are writable;
+  - that the data encoding is nibble-based, low nibble first;
+  - the sizes of the performance and patch bulk dumps.
+
+Facts about an interface are not copyrightable expression. The distinction
+is recorded here so that a later reader can check the claim rather than take
+it on trust. See docs/RESOLUTION_NOTES.md §2.
+
+-------------------------------------------------------------------------------
+Third-party references and their licenses
+-------------------------------------------------------------------------------
+
+kws/messages.py, kws/banks.py, kws/dumps.py
+  The frame layout, model ID, function codes, bank list, nibble encoding and
+  record sizes are transcribed as data, and in part derived, from:
+
+    Korg Wavestation SR Reference Guide / Player's Guide, KORG INC.
+    System Exclusive dumps produced by the instrument itself
+    Edisyn's Wavestation support, as facts only (see above)
+
+  None of those documents is redistributed here.
+
+kws/bridge.py, kwsed/app.py
+  The transport helpers and the key-hint legend are ported from the sibling
+  rxved, p2ked and x5ded projects, which port them from s3ked, eosed,
+  k2kremote and mpc2emu:
+
+    x5ded      Copyright (C) 2026  x5ded contributors        - GPL-2.0-or-later
+    p2ked      Copyright (C) 2026  p2ked contributors        - GPL-2.0-or-later
+    rxved      Copyright (C) 2026  rxved contributors        - GPL-2.0-or-later
+    s3ked      Copyright (C) 2026  s3ked contributors        - GPL-2.0-or-later
+    eosed      Copyright (C) 2026  eosed contributors        - GPL-2.0-or-later
+    k2kremote  Copyright (C) 2026  k2kremote contributors    - GPL-2.0-or-later
+    mpc2emu    Copyright (C) 2025-2026  mpc2emu contributors - GPL-2.0-or-later
+
+tools/extract_catalog.py
+  Reads, but does not redistribute, the user's own System Exclusive dumps.
+  Its output is performance and patch names, which belong to Korg or to a
+  sound designer; that output is NOT part of this distribution and is
+  excluded by .gitignore.
+
+-------------------------------------------------------------------------------
+Not affiliated with Korg
+-------------------------------------------------------------------------------
+
+Korg and Wavestation are trademarks of KORG INC. This project is an
+independent work by its authors, is not endorsed by or affiliated with KORG
+INC., and uses those names only to say what hardware it talks to.
