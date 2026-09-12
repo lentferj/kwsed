@@ -243,3 +243,25 @@ class TestLargeMessagesGetTheOtherTransport:
         """A whole dump in one event is refused however large the pool is."""
         from kws import alsa
         assert alsa.Sender.CHUNK <= 512
+
+
+class TestTheSendIsPaced:
+    """A MIDI cable carries 3125 bytes a second and cannot say "slow down".
+
+    The first bank written to hardware went out instantly and the instrument
+    stored a stream with 672 bytes missing from the middle. Nothing reported
+    an error; only the read-back comparison caught it.
+    """
+
+    def test_the_rate_is_below_the_wire_rate(self):
+        from kws import alsa
+        assert alsa.Sender.BYTES_PER_SECOND < 3125, \
+            "pacing at exactly the wire rate leaves no margin"
+        assert alsa.Sender.BYTES_PER_SECOND > 2000, \
+            "too slow makes a bank write take minutes"
+
+    def test_a_bank_would_take_about_the_time_the_wire_needs(self):
+        from kws import alsa, banks, records as r
+        size = 2 * banks.PATCHES_PER_BANK * r.PATCH_SIZE  # nibble encoded
+        seconds = size / alsa.Sender.BYTES_PER_SECOND
+        assert 9 < seconds < 15, f"a patch bank would take {seconds:.1f}s"

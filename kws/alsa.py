@@ -153,10 +153,35 @@ class Sender:
     #: kernel caps the pool at 2000 cells no matter what is asked for.
     CHUNK = 256
 
+    #: A MIDI DIN cable carries 3125 bytes a second: 31250 baud, ten bits
+    #: to a byte with the start and stop bits. Sending faster does not make
+    #: a dump arrive sooner -- it makes the interface drop what it cannot
+    #: hold, because MIDI has no flow control to push back with.
+    #:
+    #: This was not theoretical. The first bank written to real hardware
+    #: went out in 0.00 seconds for 29828 bytes, and the instrument stored a
+    #: stream with 672 bytes missing from the middle: every patch after the
+    #: sixth was shifted earlier by 336 and the tail was lost. The read-back
+    #: comparison caught it, which is the entire reason that comparison
+    #: exists.
+    #:
+    #: **Deliberately below the wire rate, not at it.** Pacing at exactly
+    #: 3125 took 9.53 seconds for 29828 bytes -- the theoretical minimum,
+    #: which is another way of saying no margin at all. The sibling
+    #: k2kremote records paying for exactly that mistake: a gap its own
+    #: sweep said was safe locked the K2000 up in ordinary use, because a
+    #: clean measurement is not the same as real traffic. Ten per cent back
+    #: costs a second on a bank and is not worth arguing about.
+    BYTES_PER_SECOND = 2800
+
     def send(self, data: bytes) -> None:
+        """Send one message, paced to the speed of the wire."""
         data = bytes(data)
         for start in range(0, len(data), self.CHUNK):
-            self._send_one(data[start:start + self.CHUNK])
+            chunk = data[start:start + self.CHUNK]
+            self._send_one(chunk)
+            if start + self.CHUNK < len(data):
+                time.sleep(len(chunk) / self.BYTES_PER_SECOND)
 
     def _send_one(self, data: bytes) -> None:
         buf = ctypes.create_string_buffer(bytes(data), len(data))
