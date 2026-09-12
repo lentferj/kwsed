@@ -142,3 +142,40 @@ class TestIdentity:
                        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xF7])
         fields = m.identity_reply_fields(reply)
         assert fields["is_korg"] and not fields["is_wavestation"]
+
+
+class TestChecksum:
+    """The trailing byte of a bulk dump.
+
+    Reading never needed it -- the record arithmetic divides exactly whether
+    or not it is counted -- which is why kwsed went a long time without
+    noticing. Building needs it: a dump without it is a byte short of what
+    the instrument sends, and will not load.
+    """
+
+    def test_it_is_the_seven_bit_sum(self):
+        from kws import messages as m
+        assert m.checksum([1, 2, 3]) == 6
+        assert m.checksum([0x7F, 0x7F]) == 0x7E, "it wraps at seven bits"
+        assert m.checksum([]) == 0
+
+    def test_a_built_bulk_dump_matches_the_instrument_s_shape(self):
+        from kws import messages as m
+        data = bytes(range(256)) * 4
+        frame = m.frame_bulk(m.Function.ALL_PATCH_DUMP, 11, data, channel=4)
+        assert frame[0] == m.SYSEX_START and frame[-1] == m.SYSEX_END
+        assert frame[4] == m.Function.ALL_PATCH_DUMP
+        assert frame[5] == 11, "the bank byte is plain, not nibble encoded"
+        body = frame[6:-1]
+        assert body[-1] == m.checksum(body[:-1])
+        assert len(frame) == 6 + 2 * len(data) + 1 + 1, \
+            "header, nibbles, checksum, F7"
+
+    def test_it_round_trips_through_the_parser(self):
+        from kws import messages as m
+        data = bytes([9, 8, 7, 6, 5])
+        frame = m.frame_bulk(m.Function.ALL_PATCH_DUMP, 3, data)
+        packet = m.parse(frame)
+        assert packet is not None and packet.bank == 3
+        # the checksum rides along in the data, so it is trimmed by length
+        assert packet.data()[:len(data)] == data

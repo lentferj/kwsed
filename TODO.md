@@ -29,25 +29,28 @@ pass over the twelve banks settles it.
 
 ---
 
-## 2. Nothing inside a record past the name is decoded
+## 2. The record interiors: references done, parameters not
 
-**Status:** open by design for now.
+**Status:** the parts that matter for building banks are **done**; the rest
+is open.
 
-A performance is 181 bytes and a patch 426; kwsed reads the name and stops.
-The parts of a performance — eight of them, each with a patch, a MIDI
-channel, a key range and a level — are the obvious next thing to show, and
-are the reason the sibling rxved has a multi-mode screen.
+**Decoded and verified** (see docs/BANK_BUILDER.md and
+docs/RESOLUTION_NOTES.md section 9): a performance's 8 parts and the patch
+each points at; a patch's 4 oscillators and the wave or wave sequence each
+names; the wave sequence bank's 32 headers, shared pool of 501 steps, and
+names. `kws/records.py` reads and rewrites exactly those fields.
 
-**Blocked on:** the parameter layout. The manuals to hand are scans with no
-text layer and no OCR tool is installed, so the layout has not been read.
-Two ways forward:
+**Still open:** everything else. A performance's 21 effect bytes, a patch's
+74 settings bytes and the bulk of each 84-byte oscillator, and most of a
+wave sequence step. kwsed copies them verbatim and does not interpret them,
+which is enough to build banks and not enough to edit sounds.
 
-1. OCR the Reference Guide's System Exclusive appendix.
-2. Derive it: change one parameter on the unit, dump the performance again,
-   and diff. Slow, but it produces evidence rather than a reading.
-
-Do **not** guess offsets from plausible-looking byte values. A name that
-decodes is proof; a channel number that happens to be in 0-15 is not.
+**Blocked on:** nothing but effort. The method that worked is in the
+resolution notes: derive a candidate structurally from many records, then
+check it field by field against Edisyn, which reads the same records. Do not
+guess offsets from plausible-looking values -- a byte that happens to fall
+in 0-127 proves nothing, and an early reading here was wrong in exactly that
+way.
 
 ---
 

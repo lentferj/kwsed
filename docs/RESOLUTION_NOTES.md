@@ -305,3 +305,63 @@ dump in hand contains one, this unit has never returned one, and Edisyn
 implements none of them. The docstring in `kws/messages.py` groups them
 under a sentence claiming confirmation against dumps and against Edisyn,
 which is true of the dump codes and overstated for these.
+
+---
+
+## 9. The reference graph, and the checksum that only building needs
+
+Worked out to make `docs/BANK_BUILDER.md` possible. The layouts and the two
+traps are there; this records how they were established and what went wrong.
+
+### 9.1 Two independent derivations
+
+**Structural.** Scanning every plausible (start, stride) across 35,550
+performance records, one alignment gives 8 repeating groups ending flush
+with the 181-byte record: 18 bytes from offset 37. In it, one column takes
+**exactly 0-34 plus 255** -- the 35 patches a bank holds plus a sentinel,
+with nothing outside, over roughly 280,000 samples.
+
+**Against Edisyn.** `Part.read` lists those 18 bytes in order,
+`PerformanceStructure.read` places them after 16 name and 21 effect bytes,
+`PatchStructure.read` gives 16 + 74 + 4 x 84 = 426, and `Block.read` gives
+32 headers, 501 steps, 32 names = 8784. Facts only; no code taken.
+
+The chain walk was then checked against 657 wave sequence banks: 1-49 steps
+per sequence, unused sequences walking to zero, and no bank exceeding the
+501-step pool. One real bank uses 495 of 501, so the pool is a real
+constraint and not a theoretical one.
+
+### 9.2 Three wrong readings, and what they looked like
+
+Worth recording because each produced a confident number rather than an
+error.
+
+1. **Byte order.** 16-bit fields are big-endian while the nibble encoding is
+   low-nibble-first. Reading words the other way gave wave numbers that were
+   all multiples of 256 -- and a claim that 98% of patches use a wave
+   sequence.
+2. **The wrong pivot.** Edisyn splits a wave number at 396 when *writing*,
+   which is about its `waveNumExp` field and not about sequences. Testing
+   `wave >= 396` gave 17%. The actual rule is `wave < 32`, the same rule a
+   step uses, which is why a sequence can quote another sequence.
+3. **The verified figure is 46%.**
+
+The general lesson, which the earlier XV-2020 and X5D work had already
+taught once each: a reading that produces plausible numbers is not thereby
+correct, and the check is always an independent one -- a size that divides
+exactly, a range that matches a known capacity, or a second source.
+
+### 9.3 The checksum
+
+A bulk dump ends with one byte before F7 that kwsed had always ignored.
+Reading never needed it: the record arithmetic divides exactly whether or
+not it is counted, so its absence was invisible for the entire life of the
+project so far.
+
+It is **the 7-bit sum of the nibble data**, confirmed against every bulk
+dump in the owner's library. Building needs it -- a dump without it is one
+byte shorter than what the instrument sends, and would presumably be
+refused. `messages.frame_bulk` applies it.
+
+This is a good example of a fact that only a new use exposes. Nothing was
+wrong before; the code simply had never been asked the question.

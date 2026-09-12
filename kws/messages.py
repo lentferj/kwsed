@@ -75,6 +75,8 @@ __all__ = [
     "encode_name",
     "identity_request",
     "identity_reply_fields",
+    "checksum",
+    "frame_bulk",
     "bulk_request",
     "object_request",
     "DATA_OFFSET",
@@ -123,6 +125,8 @@ class Function:
     PERFORMANCE_DUMP = 0x49      #: one performance: bank, number, 181 bytes
     ALL_PATCH_DUMP = 0x4C        #: one bank: 35 patches of 426
     ALL_PERFORMANCE_DUMP = 0x4D  #: one bank: 50 performances of 181
+    ALL_WAVESEQ_DUMP = 0x54      #: one bank: 32 sequences over a 501-step pool
+    MULTISET_DUMP = 0x62         #: all 32 Multisets
 
     # Status replies
     WRITE_COMPLETED = 0x21
@@ -137,6 +141,8 @@ class Function:
         0x49: "performance dump",
         0x4C: "all patch dump",
         0x4D: "all performance dump",
+        0x54: "all wave sequence dump",
+        0x62: "multiset dump",
         0x21: "write completed",
         0x22: "write error",
         0x23: "data load completed",
@@ -159,7 +165,13 @@ class Function:
 DATA_OFFSET = {
     Function.ALL_PATCH_DUMP: 6,
     Function.ALL_PERFORMANCE_DUMP: 6,
+    Function.ALL_WAVESEQ_DUMP: 6,
     Function.PERFORMANCE_DUMP: 7,
+    # The Multiset dump carries two bytes of its own before the data, where
+    # the bank dumps carry one. Reading it at 6 yields 3778 bytes that still
+    # look like data -- the names even decode -- so this is the difference
+    # between a right answer and a plausible wrong one.
+    Function.MULTISET_DUMP: 7,
 }
 
 
@@ -265,6 +277,33 @@ class Packet:
         return (isinstance(other, Packet) and other.channel == self.channel
                 and other.function == self.function
                 and other.payload == self.payload)
+
+
+def checksum(data: Sequence[int]) -> int:
+    """The trailing byte of a bulk dump: the 7-bit sum of its nibble data.
+
+    kwsed read dumps for a long time without noticing this, because reading
+    does not need it -- the record arithmetic divides exactly whether or not
+    the last byte is counted. It matters the moment a dump is *built*: a
+    file without it is one byte short of what the instrument sends, and the
+    instrument will not load it.
+
+    Confirmed against every bulk dump in the owner's library: the last byte
+    before F7 equals ``sum(nibble data) & 0x7F`` in each one.
+    """
+    return sum(data) & 0x7F
+
+
+def frame_bulk(function: int, bank: int, data: Sequence[int], *,
+               channel: int = 0) -> bytes:
+    """A bulk dump, nibble-encoded and checksummed, ready to save or send.
+
+    ``data`` is plain bytes; the nibble encoding and the trailing checksum
+    are applied here so that no caller has to remember either.
+    """
+    nibbles = list(to_nibbles(data))
+    return frame(function, [bank] + nibbles + [checksum(nibbles)],
+                 channel=channel)
 
 
 def frame(function: int, payload: Sequence[int] = (), *,

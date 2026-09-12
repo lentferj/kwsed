@@ -113,6 +113,31 @@ kwscli dump CARD                  # read a bank's names (silent)
 kwscli select RAM1 patch 12       # select a sound ON THE UNIT
 ```
 
+## Building a favourites bank
+
+The instrument's programs form a graph: a performance names patches, a patch
+names wave sequences, and a wave sequence is a chain of steps drawn from a
+pool the whole bank shares. Copying a favourite between banks therefore
+means rewriting references, not copying bytes -- which is why the Wavestation
+itself distinguishes COPY from MOVE, and only for whole banks.
+
+`tools/build_bank.py` builds one. **Patch first**: you name the patches, it
+works out what they drag along, packs them against all four budgets (50
+performances, 35 patches, 32 wave sequences, 501 shared steps), and reports
+which performances came out complete and exactly why anything was left out.
+
+```sh
+python3 tools/build_bank.py \
+    --source A=dumps/cardA-*.syx --source B=dumps/cardB-*.syx \
+    --template dumps/empty-*.syx \
+    --patch A:3 --patch A:7 --patch B:12 \
+    --out favourites
+```
+
+It writes `.syx` files and **never touches the instrument** -- loading them
+is the machine's own business, through its front panel. See
+[docs/BANK_BUILDER.md](docs/BANK_BUILDER.md).
+
 ## Names are not included
 
 kwsed ships **no** Korg content. The bank table and the numbering are its
