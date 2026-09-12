@@ -210,3 +210,36 @@ class TestTheModal:
         assert "Glass Meridian" in text, \
             "a destination shown only as a number is how work gets lost"
         assert "Card" in text
+
+
+class TestLargeMessagesGetTheOtherTransport:
+    """python-rtmidi cannot send a bank dump on ALSA; kws.alsa can.
+
+    Measured: rtmidi sends 8 kB and fails at 16 kB, and a patch bank is
+    29828 bytes, so every bank write died before a byte left the machine.
+    """
+
+    def test_a_port_name_yields_its_sequencer_address(self):
+        from kws import alsa
+        assert alsa.port_address("U6MIDI Pro:U6MIDI Pro MIDI 1 44:0") == (44, 0)
+        assert alsa.port_address("Midi Through:Midi Through Port-0 14:0") \
+            == (14, 0)
+
+    def test_a_name_without_an_address_is_declined(self):
+        from kws import alsa
+        assert alsa.port_address("not an alsa port") is None
+        assert alsa.port_address("") is None
+        assert alsa.port_address(None) is None
+
+    def test_the_threshold_is_below_what_rtmidi_manages(self):
+        from kws.bridge import WavestationBridge
+        from kws import banks, records as r
+        assert WavestationBridge.RTMIDI_LIMIT < 8192
+        bank = banks.PATCHES_PER_BANK * r.PATCH_SIZE
+        assert bank > WavestationBridge.RTMIDI_LIMIT, \
+            "a patch bank must take the other transport"
+
+    def test_the_chunk_is_small_enough_for_one_event(self):
+        """A whole dump in one event is refused however large the pool is."""
+        from kws import alsa
+        assert alsa.Sender.CHUNK <= 512

@@ -55,6 +55,7 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 import rtmidi  # noqa: E402
 
+from kws import alsa
 from kws import backup
 from kws import banks
 from kws import dumps
@@ -194,7 +195,23 @@ class WavestationBridge:
         while self._in.get_message() is not None:
             pass
 
+    #: Above this, python-rtmidi cannot send at all on ALSA: it manages
+    #: 8 kB and fails at 16 kB, and a patch bank is 29828 bytes. Messages
+    #: this large go through :mod:`kws.alsa` instead.
+    RTMIDI_LIMIT = 4096
+
     def _send(self, data: bytes) -> None:
+        data = bytes(data)
+        if len(data) > self.RTMIDI_LIMIT and alsa.available():
+            address = alsa.port_address(self.description.split(" -> ")[0])
+            if address is not None:
+                sender = alsa.Sender(*address, name=b"kwsed")
+                try:
+                    sender.send(data)
+                finally:
+                    sender.close()
+                time.sleep(SEND_GAP)
+                return
         self._out.send_message(list(data))
         time.sleep(SEND_GAP)
 

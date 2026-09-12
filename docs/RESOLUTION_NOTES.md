@@ -440,3 +440,63 @@ every one of the twelve.
 
 Whether a **Bank Select** wants the display position or the wire byte is
 still not established, and it is now a sharper question than before. TODO 1.
+
+
+---
+
+## 11. Sending a bank: why rtmidi could not, and what does
+
+The builder produced correct dumps for weeks before anything tried to send
+one. The first attempt died in ALSA, not on the instrument.
+
+**python-rtmidi cannot send a message this large.** Measured against a
+virtual port: 8192 bytes go through, 16384 fails with "error sending MIDI
+message to port". A patch bank is 29828. So every bank write failed before a
+byte left the machine -- and the backup had already been taken, so the fence
+behaved correctly on its first real outing.
+
+### Three limits, none of them where it looked
+
+1. **The kernel caps the client's output pool at 2000 cells.**
+   `snd_seq_set_client_pool_output` accepts more, returns success, and
+   clamps: asking for 100000 leaves it at 2000. "Make the buffer bigger" is
+   not an available answer.
+2. **There is a second, separate limit**, the userspace output buffer, and
+   an event larger than it is refused with EINVAL by
+   `snd_seq_event_output`. Raising only the pool leaves the dump rejected,
+   with an error that points at the wrong thing.
+3. **EAGAIN is normal.** A 30 kB dump is about eight seconds of MIDI at
+   31250 baud; the far end drains it no faster than the wire allows and the
+   sequencer refuses more until it has room.
+
+### What works
+
+A System Exclusive message does not have to be one sequencer event. Once it
+reaches the wire it is a byte stream, so it can be handed over in many small
+events whose payloads run together, and the device sees one continuous
+message. `kws/alsa.py` sends in 256-byte events, retrying on EAGAIN.
+
+**Verified byte for byte**, which matters because two earlier "successes"
+were not: 29828 bytes sent through a virtual port and read back from its raw
+side came out identical, `sent == received`, 29828 of 29828.
+
+The two false successes are worth recording. `aseqdump` reported far fewer
+bytes than were sent -- it is a userspace receiver with no flow control and
+drops what it cannot keep up with, which reads exactly like a failing
+sender. And an earlier run reported every send succeeding while nothing
+arrived at all, because the events were going to a port with no subscriber.
+Neither was the transport's fault, and both would have been taken for it.
+
+### The trap that costs a segmentation fault
+
+`snd_seq_ev_ext_t` is declared `__attribute__((packed))` in ALSA's headers.
+Without `_pack_ = 1` ctypes aligns its pointer to offset 8, ALSA reads it
+from 4, and the library dereferences whatever happens to be there. The
+symptom is a crash with no Python traceback, which is a poor signpost to a
+struct declaration.
+
+### Still not done
+
+**No bank has been written to the instrument.** The transport is proven
+against a virtual port only; the write itself was blocked by this
+environment's sandbox, not by anything in the code. See TODO.
