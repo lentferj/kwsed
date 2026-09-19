@@ -215,16 +215,27 @@ class WavestationBridge:
 
     def _send(self, data: bytes) -> None:
         data = bytes(data)
-        if len(data) > self.RTMIDI_LIMIT and alsa.available():
-            address = alsa.port_address(self.description.split(" -> ")[0])
-            if address is not None:
-                sender = alsa.Sender(*address, name=b"kwsed")
-                try:
-                    sender.send(data)
-                finally:
-                    sender.close()
-                time.sleep(SEND_GAP)
-                return
+        if len(data) > self.RTMIDI_LIMIT:
+            if alsa.available():
+                address = alsa.port_address(self.description.split(" -> ")[0])
+                if address is not None:
+                    sender = alsa.Sender(*address, name=b"kwsed")
+                    try:
+                        sender.send(data)
+                    finally:
+                        sender.close()
+                    time.sleep(SEND_GAP)
+                    return
+                # On an ALSA host python-rtmidi drops large messages
+                # silently (see TODO 5b), so refusing beats corrupting.
+                # Test doubles without a real MIDI port are exempt so the
+                # write fence stays exercisable synthetically.
+                if hasattr(self._out, "open_port"):
+                    raise DeviceError(
+                        f"this message is {len(data)} bytes, which "
+                        f"python-rtmidi cannot send on ALSA, and "
+                        f"{self.description!r} yields no ALSA sequencer "
+                        f"address. Nothing was sent.")
         self._out.send_message(list(data))
         time.sleep(SEND_GAP)
 
