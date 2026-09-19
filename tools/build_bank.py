@@ -68,6 +68,9 @@ def main(argv=None):
                     help="global channel to frame the output for, 1-16")
     args = ap.parse_args(argv)
 
+    if not 1 <= args.channel <= 16:
+        raise SystemExit("error: --channel is 1-16")
+
     sources = dict(_load(s) for s in args.source)
     if not sources:
         raise SystemExit("no --source given")
@@ -77,7 +80,10 @@ def main(argv=None):
         if ":" not in spec:
             raise SystemExit(f"--patch wants ID:N, got {spec!r}")
         bank_id, number = spec.rsplit(":", 1)
-        chosen.append((bank_id, int(number)))
+        try:
+            chosen.append((bank_id, int(number)))
+        except ValueError:
+            raise SystemExit(f"--patch wants ID:N, got {spec!r}")
 
     destination = banks.bank(args.bank)
     made = bankbuild.plan(sources, chosen)
@@ -132,7 +138,8 @@ def main(argv=None):
         frame = m.frame_bulk(function, destination.sysex, payload,
                              channel=channel)
         path = f"{args.out}-{suffix}.syx"
-        open(path, "wb").write(bytes(frame))
+        with open(path, "wb") as handle:
+            handle.write(bytes(frame))
         written.append((path, len(frame)))
     for path, size in written:
         print(f"wrote {path}  ({size} bytes)")
