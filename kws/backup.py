@@ -114,10 +114,16 @@ def save(raw: bytes, directory: str, *, bank_label: str, kind: str,
         raise BackupError(
             "refusing to record an empty backup: nothing was read back from "
             "the destination, so there would be nothing to restore")
-    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    base = f"{stamp}-{_slug(bank_label)}-{_slug(kind)}"
+    stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+    stem = f"{stamp}-{_slug(bank_label)}-{_slug(kind)}"
     try:
         os.makedirs(directory, exist_ok=True)
+        base = stem
+        suffix = 0
+        while (os.path.exists(os.path.join(directory, base + ".syx"))
+               or os.path.exists(os.path.join(directory, base + ".json"))):
+            suffix += 1
+            base = f"{stem}-{suffix:02d}"
         syx = os.path.join(directory, base + ".syx")
         with open(syx, "wb") as handle:
             handle.write(raw)
