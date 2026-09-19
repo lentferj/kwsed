@@ -218,13 +218,28 @@ def build(sources: Dict[str, deps.Source], made: Plan, *,
     # --- wave sequences, and the steps they occupy --------------------------
     if waveseq is not None and made.sequence_map:
         next_step = 1          # step 0 is the pool's null link
+        # One map for the whole build, keyed by source bank *and* step, so a
+        # step two sequences share is copied once and both chains point at
+        # the same slot. Copying it twice is what plan() stopped counting
+        # twice: with a per-sequence map the plan accepted a set the build
+        # then overflowed, and past step 500 the writes land on the
+        # sequence-name table. Keyed by source bank because two banks number
+        # their own pools independently -- step 7 of one is not step 7 of
+        # the other.
+        moved: dict = {}
         for (src_id, wave_bank, seq), slot in sorted(
                 made.sequence_map.items(), key=lambda kv: kv[1]):
             holder = sources[src_id]
             chain = deps.walk_sequence(holder.waveseq, seq)
-            moved = {}
             for old in chain.steps:
-                moved[old] = next_step
+                if (src_id, old) in moved:
+                    continue
+                if next_step >= rec.STEPS_PER_BANK:
+                    raise ValueError(
+                        f"the destination's pool of {rec.STEPS_PER_BANK} "
+                        f"steps is full; {src_id} sequence {seq} does not "
+                        f"fit. This should have been caught while planning.")
+                moved[(src_id, old)] = next_step
                 at_new = rec.STEP_BASE + next_step * rec.STEP_SIZE
                 at_old = rec.STEP_BASE + old * rec.STEP_SIZE
                 waveseq[at_new:at_new + rec.STEP_SIZE] = \
@@ -233,17 +248,17 @@ def build(sources: Dict[str, deps.Source], made: Plan, *,
             for old in chain.steps:
                 info = rec.step(holder.waveseq, old)
                 rec.set_step_links(
-                    waveseq, moved[old],
-                    forward=moved.get(info["forward"], 0),
-                    back=moved.get(info["back"], 0),
-                    loop=moved.get(info["loop"], 0))
+                    waveseq, moved[(src_id, old)],
+                    forward=moved.get((src_id, info["forward"]), 0),
+                    back=moved.get((src_id, info["back"]), 0),
+                    loop=moved.get((src_id, info["loop"]), 0))
             head = rec.SEQ_BASE + slot * rec.SEQ_SIZE
             old_head = rec.SEQ_BASE + seq * rec.SEQ_SIZE
             waveseq[head:head + rec.SEQ_SIZE] = \
                 holder.waveseq[old_head:old_head + rec.SEQ_SIZE]
             first = rec.sequence_header(holder.waveseq, seq)["link"]
-            waveseq[head] = (moved.get(first, 0) >> 8) & 0xFF
-            waveseq[head + 1] = moved.get(first, 0) & 0xFF
+            waveseq[head] = (moved.get((src_id, first), 0) >> 8) & 0xFF
+            waveseq[head + 1] = moved.get((src_id, first), 0) & 0xFF
             name_at = rec.SEQNAME_BASE + slot * rec.SEQNAME_SIZE
             old_name = rec.SEQNAME_BASE + seq * rec.SEQNAME_SIZE
             waveseq[name_at:name_at + rec.SEQNAME_SIZE] = \
