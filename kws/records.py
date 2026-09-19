@@ -229,6 +229,9 @@ def sequence_names(bank: Sequence[int]) -> List[str]:
 
 def sequence_header(bank: Sequence[int], number: int) -> dict:
     """One wave sequence's header, including the step it starts at."""
+    if not 0 <= number < SEQUENCES_PER_BANK:
+        raise ValueError(
+            f"sequence {number} is outside 0-{SEQUENCES_PER_BANK - 1}")
     at = SEQ_BASE + number * SEQ_SIZE
     return {
         "link": _u16(bank, at),
@@ -242,6 +245,9 @@ def sequence_header(bank: Sequence[int], number: int) -> dict:
 
 def step(bank: Sequence[int], index: int) -> dict:
     """One step out of the bank's shared pool of 501."""
+    if not 0 <= index < STEPS_PER_BANK:
+        raise ValueError(
+            f"step {index} is outside 0-{STEPS_PER_BANK - 1}")
     at = STEP_BASE + index * STEP_SIZE
     return {
         "forward": _u16(bank, at),
@@ -256,6 +262,9 @@ def step(bank: Sequence[int], index: int) -> dict:
 def set_step_links(bank: bytearray, index: int, *, forward: int,
                    back: int, loop: int) -> None:
     """Repoint one step. Used when steps are moved into a new pool."""
+    if not 0 <= index < STEPS_PER_BANK:
+        raise ValueError(
+            f"step {index} is outside 0-{STEPS_PER_BANK - 1}")
     at = STEP_BASE + index * STEP_SIZE
     _put_u16(bank, at, forward)
     _put_u16(bank, at + 2, back)
