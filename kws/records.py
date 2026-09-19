@@ -63,6 +63,7 @@ __all__ = [
     "performance_parts", "set_performance_part",
     "patch_waves", "set_patch_wave",
     "sequence_names", "sequence_header", "step", "set_step_links",
+    "set_step_wave",
     "ROM_WAVE_BASE", "UNUSED_PATCH",
 ]
 
@@ -257,6 +258,23 @@ def step(bank: Sequence[int], index: int) -> dict:
         "duration": _u16(bank, at + 12),
         "level": bank[at + 14],
     }
+
+
+def set_step_wave(bank: bytearray, index: int, wave: int) -> None:
+    """Repoint one step at a different wave, or a different **sequence**.
+
+    Below :data:`ROM_WAVE_BASE` this field names a wave sequence in the
+    step's own bank rather than a wave in ROM, so it needs renumbering when
+    steps are moved into a new pool for exactly the same reason the links
+    do -- and unlike the links, it survives a naive copy looking perfectly
+    valid, because any value at all is a legal sequence number.
+    """
+    if not 0 <= index < STEPS_PER_BANK:
+        raise ValueError(
+            f"step {index} is outside 0-{STEPS_PER_BANK - 1}")
+    if not 0 <= wave <= 0xFF:
+        raise ValueError(f"{wave} does not fit in the step's wave byte")
+    bank[STEP_BASE + index * STEP_SIZE + 7] = wave
 
 
 def set_step_links(bank: bytearray, index: int, *, forward: int,

@@ -610,3 +610,93 @@ bank request by calling `banks.bank()` -- display order -- on a byte that
 came off the wire. Byte 3 is the Card and resolved to ROM 4. The same
 confusion as section 10, in the one place that has no hardware to
 contradict it.
+
+## 14. Quoting: the reference that survives being copied wrong
+
+A wave sequence's step has a one-byte `wave` field at offset +7. Below 32
+it is not a wave at all but another wave sequence *of the same bank*,
+which the step plays in place of a sample. The manual gives the rule for
+an oscillator's wave number and the same rule holds for a step's, which is
+how one sequence comes to quote another -- and quoting is how a long
+sequence gets assembled out of short ones, so it is common rather than
+exotic.
+
+**Measured, because "common" needed a number.** Over the 828 `.syx` files
+in the library here: 657 wave sequence banks, 15679 non-empty sequences,
+1752 of them quoting another. **11.2%**, spread over 453 of the 828 files.
+
+### Why it went unnoticed for so long
+
+`walk_sequence` had collected quotes from the start, into a field whose
+comment reads "Sequences quoted by this one's steps, which must travel
+with it." Nothing ever read the field. A grep for it across `kws/`,
+`kwsed/` and `tools/` found only the three lines that produce it.
+
+So the builder did two things wrong at once, and each hid the other:
+
+1. It never pulled a quoted sequence into the plan, so the quoted sequence
+   usually was not in the built bank at all.
+2. It copied each step's bytes and then repaired only `forward`, `back`
+   and `loop`. The `wave` field kept the *source* bank's sequence number.
+
+The second is the interesting one. Every other reference in this format
+fails loudly when it is copied wrong: a step link past the end of the pool
+raises, a patch that points at a missing sequence is reported by
+`closure`. A stale quote raises nothing, because **any byte is a legal
+sequence number**. It addresses whatever sits at that number in the
+destination -- normally a slot the build deliberately zeroed. The file is
+well formed, the checksum is right, and `send` reads the bank back and
+compares equal, because the bytes that went out are the bytes that came
+back. The write fence does everything it promises and cannot see this at
+all: the bytes are not what is wrong.
+
+Six patches from one source file produced 36 references to zeroed slots
+and 21 to unrelated sequences.
+
+### The fix, and the second bug it uncovered
+
+`walk_sequence` takes the bank it is walking, so a quote is
+`(bank, number)` rather than `(None, number)`. `deps.quoted_closure`
+expands a wanted set to include everything quoted, transitively, guarded
+by a `seen` set because a sequence may quote one that quotes it back --
+legal data, and an infinite loop without the guard. `closure` and `plan`
+both go through it, so a quoted sequence costs a slot and its steps count
+against the budget. `build` renumbers the step's `wave` through
+`sequence_map`, and raises rather than writing a stale number.
+
+Fixing that exposed a flaw in the *previous* fix, the one for shared steps
+(section 13). Relocation was keyed `(source bank, step)`. A patch can name
+the same sequence number in two different wave banks; a `Source` holds one
+wave sequence bank, so both resolve to the same bytes and walk identical
+steps -- but they are separate entries with separate destination slots,
+each needing its quote pointed at its own copy. One shared physical step
+cannot hold two different targets, and the second sequence written took
+the first one's.
+
+This was invisible until quoting was fixed. With the quote never
+renumbered, both sequences were equally wrong, so sharing cost nothing.
+The key is now `(source bank, wave bank, step)`, and `plan`'s step budget
+counts in the same units, because a budget that counts sharing the build
+does not perform is a budget that rejects plans that fit.
+
+**Verified over the library**, not just the fixtures: 347 source banks
+with quoting built, 7634 quoting steps in the output, all 7634 landing on
+the sequence they quoted, none on a zeroed slot. Each of the four changes
+was reverted in turn to confirm a test fails without it.
+
+### A third thing, found while verifying
+
+`Soft1.syx` and `PacificWinds.SYX` end a chain with a forward link of
+`0x0700` instead of 0, in banks that are otherwise impeccable -- 8784
+bytes, all 32 headers in range. `walk_sequence` stopped on a link of 0, on
+a step already seen and at the size of the pool, but not on a link past
+the end, so it raised out of `records.step` and took the builder with it.
+It stops now. Whatever wrote those files, the instrument evidently stops
+there too.
+
+The general lesson, and the reason this section is long: the two reviews
+of this code between them raised twenty-one items and none of them was
+this. Both read the code for what it says. This was found by asking what
+the *data* does -- by counting how many sequences in a real library quote
+another, and then building a bank and reading back what the references
+actually pointed at.

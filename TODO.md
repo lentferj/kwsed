@@ -220,70 +220,86 @@ distinction; the TUI just does not use it for this yet.
 
 ---
 
-## 8. A built bank drops the sequences its sequences quote
+## 8. A built bank dropped the sequences its sequences quote — FIXED
 
-**Status:** open, **the most severe thing currently on this list**. The
-bank builder produces a file that plays wrong, and says it succeeded.
+**Status:** **fixed 2026-09-20.** Was the most severe thing on this list:
+the bank builder produced a file that played wrong and reported success.
 
-A wave sequence's step carries a `wave` field. When that value is below
-`rec.ROM_WAVE_BASE` (32) it does not name a wave at all -- it names
-*another wave sequence in the same bank*, which the step plays in place of
-a sample. `deps.walk_sequence` already notices this and records it:
-
-```python
-if info["wave"] < rec.ROM_WAVE_BASE:
-    quotes.append((None, info["wave"]))
-```
-
-with the field documented as "Sequences quoted by this one's steps, which
-must travel with it."
-
-Nothing reads `quotes`. Not `closure`, not `plan`, not `build` -- a grep
-for it across `kws/`, `kwsed/` and `tools/` finds only the three lines in
-`deps.py` that produce it. So:
-
-1. A quoted sequence is never pulled into the plan. It comes along only by
-   coincidence, if some chosen patch happens to want it too.
-2. `build` copies each step's bytes verbatim and then calls
-   `set_step_links`, which repairs `forward`, `back` and `loop` -- and
-   leaves `wave` alone. So a quoting step still holds the *source* bank's
-   sequence number, which in the destination is a different sequence
-   entirely. The patch loop does remap its sequence references; the step
-   loop does not.
-3. The slots the plan did not fill are deliberately zeroed, so most of
-   those stale numbers land on an empty header.
+A wave sequence's step carries a `wave` field. Below `rec.ROM_WAVE_BASE`
+(32) it does not name a wave -- it names *another wave sequence in the
+same bank*, which the step plays in place of a sample.
+`deps.walk_sequence` already collected those into `quotes`, documented as
+"must travel with it", and **nothing read the field**. So the builder
+neither pulled a quoted sequence into the plan nor renumbered the
+reference when it copied the step, though it renumbered the same kind of
+reference in a patch.
 
 **How common, measured.** Across the 828 `.syx` files under
 `~/Dokumente/SYNTHS/WavestationSR`: 657 wave-sequence banks, 15679
-non-empty sequences, of which **1752 (11.2%) quote another sequence**, in
-453 of the 828 files. This is ordinary Wavestation practice, not an edge
-case -- quoting is how a long sequence is assembled from shorter ones.
+non-empty sequences, **1752 of them (11.2%) quoting another**, in 453 of
+the 828 files. Ordinary practice, not an edge case -- quoting is how a
+long sequence is assembled from short ones.
 
-**Demonstrated, not inferred.** Building a bank from six patches of
-`pa_01.syx` that depend on a quoting sequence gives a bank whose steps
-hold **36 references to slots the build zeroed** (those play nothing) and
-**21 to slots holding an unrelated sequence** (those play the wrong
-thing). Both are silent failures: the file is well-formed, the checksum is
-right, and the read-back after a write compares equal, because the bytes
-that went out are the bytes that came back. It is the *content* that is
-wrong.
+**What it cost.** Building from six patches of one such file gave a bank
+holding 36 step references to slots the build had zeroed (silence) and 21
+to slots holding an unrelated sequence (the wrong sound). Every one is a
+silent failure: the file is well-formed, the checksum is right, and the
+read-back after a write compares equal, because the bytes that went out
+are the bytes that came back. It is the content that was wrong, which is
+the one failure the write fence cannot catch.
 
-**Blocked on:** nothing, but it wants care, in this order:
+### What the fix is
 
-* `walk_sequence` takes the bank it is walking, so a quote is a real
-  `SequenceId` rather than `(None, n)` -- see item 11, which is the same
-  root cause seen from the other side.
-* `closure` and `plan` follow quotes transitively when gathering
-  sequences, and count their steps in the budget. A quote can itself
-  quote, so this is a fixpoint, and it needs the same cycle guard
-  `walk_sequence` already has.
-* `build` remaps each copied step's `wave` field through `sequence_map`
-  when it is below `ROM_WAVE_BASE`, exactly as the patch loop remaps a
-  patch's oscillator.
-* A test that builds from a quoting source and asserts no step in the
-  result points at an unfilled slot.
+* `walk_sequence` takes the `bank_id` it is walking, so a quote is a real
+  `SequenceId` instead of `(None, n)` -- the other half of what was item
+  12.
+* `deps.quoted_closure` expands a set of wanted sequences to include
+  everything they quote, transitively, with a `seen` set because quoting
+  can be circular. `closure` and `plan` both go through it, so a quoted
+  sequence costs a slot and its steps count against the budget.
+* `build` renumbers each copied step's `wave` through `sequence_map` when
+  it is below `ROM_WAVE_BASE`, exactly as the patch loop renumbers an
+  oscillator's reference, and raises rather than writing a stale number if
+  the plan somehow did not carry it.
 
-*Found while checking the review below; the review did not raise it.*
+### And one thing the fix exposed
+
+Relocation was keyed `(source bank, step)`. Two *wave banks* reached
+through one source share that key, resolve to the single wave sequence
+bank a `Source` holds, and so walked identical steps -- which meant one
+physical step in the destination shared by two sequences that need
+*different* quote targets. Whichever was written second took the other's.
+The key is now `(source bank, wave bank, step)`, and `plan`'s step budget
+counts in the same units so it cannot disagree with what the build shares.
+
+Invisible before this item: with the quote never renumbered at all, both
+sequences were equally wrong, so sharing the step cost nothing.
+
+### Verified
+
+Across the whole library: 347 source banks with quoting built, **7634
+quoting steps in the built output, all 7634 landing on the sequence they
+quoted**, none on a zeroed slot. `tests/test_bankbuild.py` carries
+`TestASequenceThatQuotesAnother`; each of the four fixes was reverted in
+turn to confirm a test fails without it.
+
+---
+
+## 8b. `walk_sequence` raised on a link past the end of the pool — FIXED
+
+**Status:** fixed 2026-09-20, found while verifying item 8.
+
+Three files of the 828 -- `Soft1.syx` and `PacificWinds.SYX` -- end a
+chain with a forward link of `0x0700` rather than 0, in wave sequence
+banks that are otherwise perfectly well formed: 8784 bytes, all 32 headers
+in range. `walk_sequence` stopped on a link of 0, on a step already seen
+and at the size of the pool, but not on a link past the end, so it raised
+out of `records.step` and took the bank builder with it.
+
+It now stops, as it does for the other three cases. Whatever wrote those
+files, the instrument evidently stops there too.
+
+---
 
 ---
 
@@ -349,9 +365,9 @@ not because it is going to happen.
 
 ---
 
-## 12. `walk_sequence` does not know which bank it is walking
+## 12. `walk_sequence` did not know which bank it is walking — FIXED
 
-**Status:** open, real, and the root of item 8. **Verified.**
+**Status:** **fixed 2026-09-20**, with item 8, whose root it was.
 
 `deps.walk_sequence` returns `SequenceChain(bank_id="", ...)` at
 `kws/deps.py:108` and, four lines above, appends `(None, info["wave"])` to
@@ -363,8 +379,9 @@ The review calls this cosmetic because the callers set the bank from their
 own context. They do for `bank_id`. Nobody sets it for `quotes`, because
 nobody reads `quotes` at all -- which is item 8.
 
-**Blocked on:** nothing. Take `bank_id` as a parameter and use it in both
-places; fix it with item 8 rather than on its own.
+`walk_sequence` now takes `bank_id`, defaulting to the empty string for
+callers that want only the step list, and fills in both the chain's bank
+and its quotes from it.
 
 ---
 
@@ -380,9 +397,9 @@ the next reader filing this again.
 
 ---
 
-## 14. `patch_dependencies` annotates a 3-tuple list as `List[SequenceId]`
+## 14. `patch_dependencies` annotated a 3-tuple list as `List[SequenceId]` — FIXED
 
-**Status:** open, real, but **not the fix the review proposes.**
+**Status:** **fixed 2026-09-20**, but **not the way the review proposed.**
 
 The review has the symptom right and the remedy backwards. It suggests
 `SequenceId` was never updated to match the 3-tuple. It should not be:
@@ -396,7 +413,9 @@ at `kws/deps.py:122`, inside a function whose signature correctly says
 `(bank_id, wave.bank, wave.wave)`. The annotation is simply wrong about
 its own variable.
 
-**Blocked on:** nothing. Fix line 122; leave `SequenceId` alone.
+Fixed by correcting that one local annotation. `SequenceId` is unchanged,
+and the three-element key now has a name of its own, `deps.SequenceKey`,
+because item 8 made the distinction load-bearing rather than decorative.
 
 ---
 

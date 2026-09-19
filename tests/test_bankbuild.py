@@ -181,13 +181,19 @@ class TestBuild:
                          template_patches=bytes(35 * r.PATCH_SIZE),
                          template_performances=bytes(50 * r.PERFORMANCE_SIZE),
                          template_waveseq=bytes(r.WAVESEQ_BANK_SIZE))
-        for (bank_id, _wb, seq), slot in made.sequence_map.items():
+        for (bank_id, wave_bank, seq), slot in made.sequence_map.items():
             before = deps.walk_sequence(src[bank_id].waveseq, seq)
             after = deps.walk_sequence(built.waveseq, slot)
             assert before.cost == after.cost
             for old, new in zip(before.steps, after.steps):
-                assert (r.step(src[bank_id].waveseq, old)["wave"]
-                        == r.step(built.waveseq, new)["wave"])
+                was = r.step(src[bank_id].waveseq, old)["wave"]
+                now = r.step(built.waveseq, new)["wave"]
+                if was < r.ROM_WAVE_BASE:
+                    # not a wave at all: a quote of another sequence, which
+                    # is renumbered with everything else it points at
+                    assert now == made.sequence_map[(bank_id, wave_bank, was)]
+                else:
+                    assert now == was
 
     def test_untouched_template_slots_survive(self):
         src = TestPlan()._sources()
@@ -199,3 +205,145 @@ class TestBuild:
                          template_performances=bytes(50 * r.PERFORMANCE_SIZE),
                          template_waveseq=bytes(r.WAVESEQ_BANK_SIZE))
         assert built.patches[34 * r.PATCH_SIZE:34 * r.PATCH_SIZE + 4] == b"KEEP"
+
+
+def _build(sources, made):
+    """The three templates a build needs, all empty. Invented, as ever."""
+    return bb.build(sources, made,
+                    template_patches=bytes(35 * r.PATCH_SIZE),
+                    template_performances=bytes(50 * r.PERFORMANCE_SIZE),
+                    template_waveseq=bytes(r.WAVESEQ_BANK_SIZE))
+
+
+class TestASequenceThatQuotesAnother:
+    """A step's wave number below 32 plays a *sequence*, not a wave.
+
+    That is the one reference in the format that survives being copied
+    wrong: any byte is a legal sequence number, so a stale one addresses
+    some other sequence in the destination and the bank stays well-formed.
+    The checksum agrees, the read-back after a write agrees, and the sound
+    is missing. Everything in this class exists because of that.
+    """
+
+    def _sources(self):
+        """Sequence 0 ends by quoting sequence 7; 7 quotes nothing."""
+        waveseq = make_waveseq({0: [40, 41, 7], 7: [50, 51]})
+        return {"A": deps.Source(
+            bank_id="A",
+            patches=[make_patch("Quoter", waves=((0, 0),) * 4)],
+            performances=[],
+            waveseq=waveseq)}
+
+    def test_walk_sequence_reports_the_quote_against_its_bank(self):
+        src = self._sources()
+        chain = deps.walk_sequence(src["A"].waveseq, 0, bank_id="A")
+        assert chain.bank_id == "A"
+        assert chain.quotes == (("A", 7),), (
+            "a quote is only actionable as 'sequence N of this bank'")
+
+    def test_the_closure_pulls_in_what_is_quoted(self):
+        src = self._sources()
+        order, chains, unresolved = deps.quoted_closure(src, [("A", 0, 0)])
+        assert not unresolved
+        assert order == [("A", 0, 0), ("A", 0, 7)], (
+            "the quoted sequence must travel, and after the one quoting it")
+        assert chains[("A", 0, 7)].steps
+
+    def test_a_circular_quote_terminates(self):
+        """Two sequences that quote each other are legal and must not hang."""
+        waveseq = make_waveseq({0: [40, 7], 7: [50, 0]})
+        src = {"A": deps.Source(bank_id="A", waveseq=waveseq,
+                                patches=[make_patch(waves=((0, 0),) * 4)])}
+        order, _, unresolved = deps.quoted_closure(src, [("A", 0, 0)])
+        assert not unresolved
+        assert sorted(order) == [("A", 0, 0), ("A", 0, 7)]
+
+    def test_the_plan_carries_the_quoted_sequence(self):
+        src = self._sources()
+        made = bb.plan(src, [("A", 0)], include_performances=False)
+        assert made.fits
+        assert ("A", 0, 7) in made.sequence_map, (
+            "the plan took the patch but left a sequence it needs behind")
+
+    def test_the_built_quote_points_at_the_quoted_sequences_new_slot(self):
+        src = self._sources()
+        made = bb.plan(src, [("A", 0)], include_performances=False)
+        built = _build(src, made)
+
+        where = made.sequence_map[("A", 0, 7)]
+        chain = deps.walk_sequence(built.waveseq, made.sequence_map[("A", 0, 0)])
+        quotes = [r.step(built.waveseq, s)["wave"] for s in chain.steps
+                  if r.step(built.waveseq, s)["wave"] < r.ROM_WAVE_BASE]
+        assert quotes == [where], (
+            f"the step should quote slot {where}, the quoted sequence's new "
+            f"home, not its number in the source bank")
+
+    def test_no_step_in_a_built_bank_quotes_an_empty_slot(self):
+        """The failure this whole class is about, stated as the invariant."""
+        src = self._sources()
+        made = bb.plan(src, [("A", 0)], include_performances=False)
+        built = _build(src, made)
+
+        filled = set(made.sequence_map.values())
+        for slot in filled:
+            for index in deps.walk_sequence(built.waveseq, slot).steps:
+                wave = r.step(built.waveseq, index)["wave"]
+                if wave < r.ROM_WAVE_BASE:
+                    assert wave in filled, (
+                        f"slot {slot} quotes sequence {wave}, which the build "
+                        f"zeroed; that step plays nothing")
+
+    def test_two_wave_banks_do_not_share_one_relocated_step(self):
+        """One physical step cannot hold two different quote targets.
+
+        A patch may name the same sequence number in two different wave
+        banks. Both resolve to the one wave sequence bank a Source holds, so
+        the chains walk identical steps -- but they are separate entries with
+        separate destination slots, and each needs its quote pointed at its
+        own copy of what it quotes. Relocating by source bank and step alone
+        gave them one shared step, and whichever was written second took the
+        other's target.
+        """
+        waveseq = make_waveseq({0: [40, 7], 7: [50, 51]})
+        src = {"A": deps.Source(
+            bank_id="A", waveseq=waveseq,
+            patches=[make_patch("Two banks",
+                                waves=((0, 0), (2, 0), (0, 40), (0, 40)))])}
+        made = bb.plan(src, [("A", 0)], include_performances=False)
+        assert ("A", 0, 0) in made.sequence_map
+        assert ("A", 2, 0) in made.sequence_map
+
+        built = _build(src, made)
+        for wave_bank in (0, 2):
+            slot = made.sequence_map[("A", wave_bank, 0)]
+            want = made.sequence_map[("A", wave_bank, 7)]
+            got = [r.step(built.waveseq, s)["wave"]
+                   for s in deps.walk_sequence(built.waveseq, slot).steps
+                   if r.step(built.waveseq, s)["wave"] < r.ROM_WAVE_BASE]
+            assert got == [want], (
+                f"wave bank {wave_bank}'s copy quotes {got}, not {want}")
+
+    def test_the_budget_counts_the_quoted_sequences_steps(self):
+        """A quote costs slots and steps, and the plan has to know."""
+        src = self._sources()
+        tight = bb.Budget(sequences=1)
+        made = bb.plan(src, [("A", 0)], budget=tight,
+                       include_performances=False)
+        assert made.rejected, (
+            "one slot cannot hold a sequence and the one it quotes")
+
+
+class TestAChainThatRunsOffTheEnd:
+    def test_an_out_of_range_forward_link_stops_the_walk(self):
+        """Three files in an ordinary library of 828 do this.
+
+        They end a chain with a forward link of 0x0700 rather than 0, in
+        banks that are otherwise well formed. Before this stop the walk
+        raised out of records.step and took the bank builder with it.
+        """
+        bank = bytearray(make_waveseq({0: [40, 41]}))
+        last = deps.walk_sequence(bank, 0).steps[-1]
+        r.set_step_links(bank, last, forward=0x0700, back=0, loop=0)
+
+        chain = deps.walk_sequence(bytes(bank), 0)
+        assert chain.steps == (1, 2), "the walk should stop, not raise"

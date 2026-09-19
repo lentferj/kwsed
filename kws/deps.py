@@ -35,7 +35,7 @@ from kws import records as rec
 __all__ = [
     "PatchId", "SequenceId", "Source", "SequenceChain",
     "walk_sequence", "patch_dependencies", "performance_dependencies",
-    "closure",
+    "SequenceKey", "quoted_closure", "closure",
 ]
 
 #: A patch, as (bank id, number).
@@ -83,29 +83,44 @@ class SequenceChain:
         return len(self.steps)
 
 
-def walk_sequence(bank: Sequence[int], number: int,
-                  *, limit: int = rec.STEPS_PER_BANK) -> SequenceChain:
+def walk_sequence(bank: Sequence[int], number: int, *, bank_id: str = "",
+                  limit: int = rec.STEPS_PER_BANK) -> SequenceChain:
     """Follow one wave sequence through the shared step pool.
 
     The chain is followed by forward link, stopping on a link of 0, on a
-    step already seen, or at the size of the pool. All three stops matter:
-    the data is a linked list written by an instrument, and a list that
-    loops is normal here rather than corrupt -- a wave sequence that repeats
-    is the entire point of the machine.
+    link past the end of the pool, on a step already seen, or at the size of
+    the pool. All four stops matter: the data is a linked list written by an
+    instrument, and a list that loops is normal here rather than corrupt --
+    a wave sequence that repeats is the entire point of the machine.
+
+    The out-of-range stop is not defensive programming. Three files in an
+    ordinary library of 828 end a chain with a forward link of 0x0700
+    instead of 0, in banks that are otherwise perfectly well formed, and
+    without that stop this raises out of :func:`records.step` and takes the
+    bank builder with it. Whatever wrote them, the instrument evidently
+    stops there, so this does too.
+
+    ``bank_id`` names the bank being walked, and is worth passing: the
+    quotes this collects are useless without it, since a quote is only
+    actionable as "sequence N *of this bank*", and the caller is the only
+    one that knows which bank the bytes came from. It defaults to the empty
+    string so that a caller which only wants the step list -- a test, or a
+    cost estimate -- need not invent one.
     """
     header = rec.sequence_header(bank, number)
     steps: List[int] = []
     quotes: List[SequenceId] = []
     seen: Set[int] = set()
     at = header["link"]
-    while at and at not in seen and len(steps) < limit:
+    while (at and at < rec.STEPS_PER_BANK and at not in seen
+           and len(steps) < limit):
         seen.add(at)
         steps.append(at)
         info = rec.step(bank, at)
         if info["wave"] < rec.ROM_WAVE_BASE:
-            quotes.append((None, info["wave"]))
+            quotes.append((bank_id, info["wave"]))
         at = info["forward"]
-    return SequenceChain(bank_id="", number=number, steps=tuple(steps),
+    return SequenceChain(bank_id=bank_id, number=number, steps=tuple(steps),
                          quotes=tuple(quotes))
 
 
@@ -119,7 +134,7 @@ def patch_dependencies(record: Sequence[int],
     copying a patch between banks change how it sounds, so the bank is
     kept rather than assumed.
     """
-    out: List[SequenceId] = []
+    out: List[Tuple[str, int, int]] = []
     for wave in rec.patch_waves(record):
         if wave.is_sequence:
             out.append((bank_id, wave.bank, wave.wave))
@@ -138,6 +153,70 @@ def performance_dependencies(record: Sequence[int]) -> List[Tuple[int, int]]:
     return [(p.bank, p.patch) for p in rec.performance_parts(record) if p.used]
 
 
+#: A wave sequence as the plan and the builder key it: the source bank it
+#: was loaded from, the wave bank its oscillator named, and its number.
+#: The middle field does not choose the bytes -- a Source has one wave
+#: sequence bank -- it keeps two references that differ only in wave bank
+#: from collapsing into one entry.
+SequenceKey = Tuple[str, int, int]
+
+
+def quoted_closure(sources: Dict[str, Source],
+                   seeds: Iterable[SequenceKey],
+                   ) -> Tuple[List[SequenceKey],
+                              Dict[SequenceKey, SequenceChain],
+                              List[SequenceKey]]:
+    """Seed sequences plus every sequence they quote, transitively.
+
+    A step whose wave number is below :data:`records.ROM_WAVE_BASE` plays
+    another wave sequence in the *same bank* rather than a wave in ROM.
+    That quoted sequence is as much a dependency of the patch as the one it
+    was reached through: leave it behind and the step plays whatever
+    occupies its number in the destination, which is usually nothing.
+
+    Returns ``(order, chains, unresolved)``. ``order`` lists every sequence
+    that must travel, seeds first and in the order given, each quoted
+    sequence after the one that quotes it. ``chains`` gives the walk for
+    each. ``unresolved`` holds seeds whose source has no wave sequence bank
+    loaded -- a quote can never land there, since it names a sequence in
+    the bank the quoting step was just read from.
+
+    Quoting is transitive and may be circular: a sequence can quote one
+    that quotes it back. The ``seen`` set is what makes that terminate, and
+    it is the same reason :func:`walk_sequence` carries one for steps.
+    """
+    order: List[SequenceKey] = []
+    chains: Dict[SequenceKey, SequenceChain] = {}
+    unresolved: List[SequenceKey] = []
+    seen: Set[SequenceKey] = set()
+    queue: List[SequenceKey] = list(seeds)
+
+    while queue:
+        key = queue.pop(0)
+        if key in seen:
+            continue
+        seen.add(key)
+        src_id, wave_bank, number = key
+        holder = sources.get(src_id)
+        if holder is None or holder.waveseq is None:
+            unresolved.append(key)
+            continue
+        if not 0 <= number < rec.SEQUENCES_PER_BANK:
+            # A step's wave byte is one byte wide and any value in it is a
+            # legal wave; only those below ROM_WAVE_BASE are sequences, so
+            # this cannot trip on real data. It is here so that a truncated
+            # or misaligned bank cannot walk the builder off the end.
+            unresolved.append(key)
+            continue
+        chain = walk_sequence(holder.waveseq, number, bank_id=src_id)
+        order.append(key)
+        chains[key] = chain
+        for _, quoted in chain.quotes:
+            queue.append((src_id, wave_bank, quoted))
+
+    return order, chains, unresolved
+
+
 def closure(sources: Dict[str, Source],
             patches: Iterable[PatchId]) -> Dict[str, object]:
     """Everything a set of patches drags along with it.
@@ -151,7 +230,7 @@ def closure(sources: Dict[str, Source],
     want_patches: List[PatchId] = []
     want_seqs: List[Tuple[str, int, int]] = []
     missing: List[str] = []
-    used: Set[Tuple[str, int]] = set()
+    used: Set[Tuple[str, int, int]] = set()
     seen_seq: Set[Tuple[str, int, int]] = set()
 
     for bank_id, number in patches:
@@ -160,23 +239,20 @@ def closure(sources: Dict[str, Source],
             missing.append(f"{bank_id}:{number:03d} (patch not loaded)")
             continue
         want_patches.append((bank_id, number))
-        for src_id, wave_bank, seq_num in patch_dependencies(
-                source.patch(number), bank_id):
-            key = (src_id, wave_bank, seq_num)
+        order, chains, unresolved = quoted_closure(
+            sources, patch_dependencies(source.patch(number), bank_id))
+        for src_id, wave_bank, seq_num in unresolved:
+            missing.append(
+                f"{bank_id}:{number:03d} needs wave sequence "
+                f"{seq_num} from bank {wave_bank}, whose wave sequence "
+                f"bank is not loaded")
+        for key in order:
             if key in seen_seq:
                 continue
             seen_seq.add(key)
-            holder = sources.get(src_id)
-            if holder is None or holder.waveseq is None:
-                missing.append(
-                    f"{bank_id}:{number:03d} needs wave sequence "
-                    f"{seq_num} from bank {wave_bank}, whose wave sequence "
-                    f"bank is not loaded")
-                continue
-            chain = walk_sequence(holder.waveseq, seq_num)
             want_seqs.append(key)
-            for step in chain.steps:
-                used.add((src_id, step))
+            for step in chains[key].steps:
+                used.add((key[0], key[1], step))
 
     return {
         "patches": want_patches,
