@@ -110,13 +110,14 @@ def walk_sequence(bank: Sequence[int], number: int,
 
 
 def patch_dependencies(record: Sequence[int],
-                       bank_id: str) -> List[SequenceId]:
+                       bank_id: str) -> List[Tuple[str, int, int]]:
     """The wave sequences one patch needs, in oscillator order.
 
-    A patch's oscillator carries its own wave *bank*, which need not be the
-    bank the patch itself lives in. That is exactly the cross-bank reference
-    that makes copying a patch between banks change how it sounds, so the
-    bank is kept rather than assumed.
+    Each is ``(source bank, wave bank, sequence)``. A patch's oscillator
+    carries its own wave *bank*, which need not be the bank the patch
+    itself lives in. That is exactly the cross-bank reference that makes
+    copying a patch between banks change how it sounds, so the bank is
+    kept rather than assumed.
     """
     out: List[SequenceId] = []
     for wave in rec.patch_waves(record):
@@ -168,7 +169,7 @@ def closure(sources: Dict[str, Source],
             holder = sources.get(src_id)
             if holder is None or holder.waveseq is None:
                 missing.append(
-                    f"{src_id}:{number:03d} needs wave sequence "
+                    f"{bank_id}:{number:03d} needs wave sequence "
                     f"{seq_num} from bank {wave_bank}, whose wave sequence "
                     f"bank is not loaded")
                 continue
