@@ -248,6 +248,18 @@ def build(sources: Dict[str, deps.Source], made: Plan, *,
             old_name = rec.SEQNAME_BASE + seq * rec.SEQNAME_SIZE
             waveseq[name_at:name_at + rec.SEQNAME_SIZE] = \
                 holder.waveseq[old_name:old_name + rec.SEQNAME_SIZE]
+        # Slots the plan did not fill would otherwise keep the template's
+        # headers pointing at step indices this relocation overwrote: real
+        # headers, real names, wrong steps. Park them on the null link.
+        taken = set(made.sequence_map.values())
+        for slot in range(rec.SEQUENCES_PER_BANK):
+            if slot in taken:
+                continue
+            head = rec.SEQ_BASE + slot * rec.SEQ_SIZE
+            waveseq[head:head + rec.SEQ_SIZE] = bytes(rec.SEQ_SIZE)
+            name_at = rec.SEQNAME_BASE + slot * rec.SEQNAME_SIZE
+            waveseq[name_at:name_at + rec.SEQNAME_SIZE] = \
+                bytes(rec.SEQNAME_SIZE)
 
     # --- patches -------------------------------------------------------------
     for (bank_id, number), slot in sorted(made.patch_map.items(),
