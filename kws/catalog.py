@@ -186,11 +186,15 @@ def load(path: Optional[str] = None) -> Catalog:
             payload = json.load(handle)
     except (OSError, json.JSONDecodeError):
         return empty()
-    entries = []
-    for bank_id, rows in payload.get("banks", {}).items():
+    try:
+        banks_payload = payload.get("banks", {})
+        entries = []
+        for bank_id, rows in banks_payload.items():
             for row in rows:
                 entries.append(Entry(bank_id=bank_id, kind=row["kind"],
                                      number=int(row["n"]),
                                      name=row["name"]))
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return empty()
     return Catalog(entries, source=payload.get("source", ""),
                    generated=payload.get("generated", ""))
