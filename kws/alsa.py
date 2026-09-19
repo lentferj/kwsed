@@ -95,33 +95,42 @@ class _Event(ctypes.Structure):
     ]
 
 
-_lib.snd_seq_open.argtypes = [ctypes.POINTER(ctypes.c_void_p),
-                              ctypes.c_char_p, ctypes.c_int, ctypes.c_int]
-_lib.snd_seq_set_client_name.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
-_lib.snd_seq_create_simple_port.argtypes = [ctypes.c_void_p, ctypes.c_char_p,
-                                            ctypes.c_uint, ctypes.c_uint]
-_lib.snd_seq_connect_to.argtypes = [ctypes.c_void_p, ctypes.c_int,
-                                    ctypes.c_int, ctypes.c_int]
-_lib.snd_seq_set_client_pool_output.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
-_lib.snd_seq_set_output_buffer_size.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
-_lib.snd_seq_event_output.argtypes = [ctypes.c_void_p, ctypes.POINTER(_Event)]
-_lib.snd_seq_event_output_direct.argtypes = [ctypes.c_void_p,
-                                             ctypes.POINTER(_Event)]
-_lib.snd_seq_drain_output.argtypes = [ctypes.c_void_p]
-_lib.snd_seq_close.argtypes = [ctypes.c_void_p]
-_lib.snd_strerror.argtypes = [ctypes.c_int]
-_lib.snd_strerror.restype = ctypes.c_char_p
+if _lib is not None:
+    _lib.snd_seq_open.argtypes = [ctypes.POINTER(ctypes.c_void_p),
+                                  ctypes.c_char_p, ctypes.c_int, ctypes.c_int]
+    _lib.snd_seq_set_client_name.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+    _lib.snd_seq_create_simple_port.argtypes = [ctypes.c_void_p, ctypes.c_char_p,
+                                                ctypes.c_uint, ctypes.c_uint]
+    _lib.snd_seq_connect_to.argtypes = [ctypes.c_void_p, ctypes.c_int,
+                                        ctypes.c_int, ctypes.c_int]
+    _lib.snd_seq_set_client_pool_output.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    _lib.snd_seq_set_output_buffer_size.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
+    _lib.snd_seq_event_output.argtypes = [ctypes.c_void_p, ctypes.POINTER(_Event)]
+    _lib.snd_seq_event_output_direct.argtypes = [ctypes.c_void_p,
+                                                 ctypes.POINTER(_Event)]
+    _lib.snd_seq_drain_output.argtypes = [ctypes.c_void_p]
+    _lib.snd_seq_close.argtypes = [ctypes.c_void_p]
+    _lib.snd_strerror.argtypes = [ctypes.c_int]
+    _lib.snd_strerror.restype = ctypes.c_char_p
 
 
 def _check(code, what):
     if code < 0:
-        raise OSError(f"{what}: {_lib.snd_strerror(code).decode()}")
+        detail = _lib.snd_strerror(code).decode() if _lib is not None else str(code)
+        raise OSError(f"{what}: {detail}")
     return code
+
+
+def _require_lib() -> None:
+    if _lib is None:
+        raise OSError("no ALSA sequencer on this host; "
+                      "large dumps cannot be sent via kws.alsa")
 
 
 class Sender:
     def __init__(self, client: int, port: int, *, pool: int = 2000,
                  buffer_size: int = 1 << 18, name: bytes = b"kwsed"):
+        _require_lib()
         self._seq = ctypes.c_void_p()
         _check(_lib.snd_seq_open(ctypes.byref(self._seq), b"default",
                                  SND_SEQ_OPEN_OUTPUT, 0), "snd_seq_open")
