@@ -549,3 +549,64 @@ the counter-example it was.
 * **`0x0F` All Data Request**, one message for everything.
 * **`0x5B` / `0x63` Multi Mode Setup Select**, which confirms 32 Multisets:
   0-15 by the first, 16-31 by the SR expanded form.
+
+## 13. What a review of the write path found, and why each one hid
+
+Six findings, all in code that had been exercised. None of them showed up
+as an error; that is the common thread and the reason for the note.
+
+**The refusal that only fired on some hosts.** `_send()` chunks a
+bank-sized SysEx through the ALSA sequencer, because rtmidi silently
+truncates above roughly 8 kB (section 11). Where no sequencer address can
+be had, it refuses rather than let rtmidi try. That refusal was written
+inside `if alsa.available()` -- `available()` being
+`find_library("asound")` having found the shared library. But rtmidi's own
+ALSA backend is linked, not dlopened: a host can carry a perfectly working
+ALSA MIDI stack and still fail `find_library`. Such a host skipped the
+refusal and took the silent-truncation path the refusal exists to prevent.
+The condition is now about the one thing that decides the outcome -- is
+there an address to chunk through -- and the libasound question is asked
+only in service of that.
+
+The reason this is worth writing down: the guard and the thing it guards
+were the same idea in the author's head, so nesting one inside the other
+read as a tautology rather than as a narrowing.
+
+**Reads that accepted another bank's answer.** `read_patch` compared the
+bank byte of an arriving dump with the one it requested; `read_bank` and
+`read_raw` did not, and both docstrings said they did. A single-object
+read on this unit can take ten seconds (TODO 3c), long enough to time out
+and have the dump arrive during the *next* read -- which then filed it
+under the bank it had asked for. Whole-bank reads are fast and reliable,
+which is exactly why the bug survived: on the bench the wrong path is
+never taken.
+
+**The confirmation that named the wrong objects.** The fence requires
+saying what is about to be destroyed, by name. `send` did read the
+destination and print its contents -- but called `read_bank_names()`
+without a kind, and the default is patch. Overwriting a performance bank
+therefore listed that bank's *patches*. Every word on screen was true and
+none of it was about what was going to change. A fence that prints names
+is only a fence if they are the right names.
+
+**A paragraph that outlived its fact.** `dump` printed three lines
+explaining that the kind that comes back is the unit's choice, not the
+request's, and that kwsed reports whatever arrived. That was true when
+kwsed knew only `0x1C`. `0x1D` went in with performances (section 3) and
+the paragraph stayed. Prose describing a limitation needs deleting at the
+same commit that lifts it, or it becomes a confident statement of
+something false.
+
+**Sharing a wave-sequence step, twice.** In `bankbuild`, a Step record
+reached by two different sequences was renumbered once per sequence and so
+copied twice. The built bank played correctly, which is why nothing caught
+it; the cost was duplicate steps and a `STEPS_PER_BANK` overflow on builds
+that would have fitted. The renumber map is now keyed by `(source, old
+step)` and links resolve in a second pass, since a chain can point forward
+to a step the first pass has not yet reached.
+
+**A wire byte read as a display position.** The demo device answered a
+bank request by calling `banks.bank()` -- display order -- on a byte that
+came off the wire. Byte 3 is the Card and resolved to ROM 4. The same
+confusion as section 10, in the one place that has no hardware to
+contradict it.
