@@ -318,3 +318,101 @@ class TestMultisets:
         from kws import messages as m
         assert m.Function.MULTI_REQUEST == 0x06
         assert m.REQUEST_FOR_DUMP[m.Function.MULTISET_DUMP] == 0x06
+
+
+class TestReadsMatchTheBankTheyAskedFor:
+    """A dump for another bank must not be taken for this one's.
+
+    read_patch guarded this; read_bank and read_raw did not, though the
+    docstring said otherwise. The caller files the names under the bank it
+    requested, so a late dump from a read that already timed out lands under
+    the wrong pane.
+    """
+
+    def _unit(self, reply_bank):
+        """A stand-in that answers every bank request with one fixed bank."""
+        from kws import banks as bk, records as r
+
+        payload = bytes(bk.PATCHES_PER_BANK * r.PATCH_SIZE)
+        reply = m.frame_bulk(m.Function.ALL_PATCH_DUMP, reply_bank,
+                             payload, channel=0)
+
+        class In:
+            def __init__(self): self.queue = []
+            def ignore_types(self, **kw): pass
+            def get_message(self):
+                return self.queue.pop(0) if self.queue else None
+
+        midi_in = In()
+
+        class Out:
+            def send_message(self, data):
+                # answer after the request, so _drain cannot eat it first
+                if len(data) > 4 and data[4] in (0x1C, 0x1D):
+                    midi_in.queue.append((list(reply), 0.0))
+
+        return WavestationBridge(midi_in, Out(), channel=0)
+
+    def test_a_dump_for_another_bank_is_ignored(self):
+        # the Card is wire byte 3; answer with ROM 11's byte 2 instead
+        bridge = self._unit(reply_bank=2)
+        with pytest.raises(TimeoutError):
+            bridge.read_bank("CARD", banks.Kind.PATCH, timeout=0.3)
+
+    def test_the_right_bank_is_accepted(self):
+        bridge = self._unit(reply_bank=3)
+        dump = bridge.read_bank("CARD", banks.Kind.PATCH, timeout=2.0)
+        assert dump.bank.label == "Card"
+
+
+class TestALargeSendIsRefusedWithoutTheAlsaPath:
+    """The refusal used to sit inside `if alsa.available()`.
+
+    alsa.available() is find_library("asound") having found something, which
+    fails on hosts where rtmidi's own ALSA backend works. Such a host fell
+    through to the silent drop the refusal exists to prevent.
+    """
+
+    def _bridge(self, description, available):
+        from kws import alsa, bridge as b
+
+        class Out:
+            def __init__(self): self.sent = []
+            def open_port(self, *a): pass        # looks like a real port
+            def send_message(self, data): self.sent.append(bytes(data))
+
+        class In:
+            def ignore_types(self, **kw): pass
+            def get_message(self): return None
+
+        out = Out()
+        bridge = WavestationBridge(In(), out, channel=0)
+        bridge.description = description
+        return bridge, out, alsa
+
+    def test_a_port_with_no_sequencer_address_is_refused(self, monkeypatch):
+        from kws import alsa
+
+        bridge, out, _ = self._bridge("a port with no address", True)
+        with pytest.raises(DeviceError, match="Nothing was sent"):
+            bridge._send(bytes(29828))
+        assert out.sent == [], "a refused send must transmit nothing"
+
+    def test_it_is_refused_even_when_libasound_is_absent(self, monkeypatch):
+        """The case the old nesting skipped."""
+        from kws import alsa
+
+        bridge, out, alsa_mod = self._bridge(
+            "U6MIDI Pro:U6MIDI Pro MIDI 1 44:0", False)
+        monkeypatch.setattr(alsa_mod, "available", lambda: False)
+        with pytest.raises(DeviceError, match="Nothing was sent"):
+            bridge._send(bytes(29828))
+        assert out.sent == []
+
+    def test_a_small_message_still_goes_out(self, monkeypatch):
+        from kws import alsa
+
+        bridge, out, alsa_mod = self._bridge("no address here", True)
+        monkeypatch.setattr(alsa_mod, "available", lambda: False)
+        bridge._send(bytes([0xF0, 0x42, 0x30, 0x28, 0x06, 0xF7]))
+        assert len(out.sent) == 1

@@ -224,26 +224,34 @@ class WavestationBridge:
     def _send(self, data: bytes) -> None:
         data = bytes(data)
         if len(data) > self.RTMIDI_LIMIT:
-            if alsa.available():
-                address = alsa.port_address(self.description.split(" -> ")[0])
-                if address is not None:
-                    sender = alsa.Sender(*address, name=b"kwsed")
-                    try:
-                        sender.send(data)
-                    finally:
-                        sender.close()
-                    time.sleep(SEND_GAP)
-                    return
-                # On an ALSA host python-rtmidi drops large messages
-                # silently (see TODO 5b), so refusing beats corrupting.
-                # Test doubles without a real MIDI port are exempt so the
-                # write fence stays exercisable synthetically.
-                if hasattr(self._out, "open_port"):
-                    raise DeviceError(
-                        f"this message is {len(data)} bytes, which "
-                        f"python-rtmidi cannot send on ALSA, and "
-                        f"{self.description!r} yields no ALSA sequencer "
-                        f"address. Nothing was sent.")
+            address = (alsa.port_address(self.description.split(" -> ")[0])
+                       if alsa.available() else None)
+            if address is not None:
+                sender = alsa.Sender(*address, name=b"kwsed")
+                try:
+                    sender.send(data)
+                finally:
+                    sender.close()
+                time.sleep(SEND_GAP)
+                return
+            # python-rtmidi drops a message this large silently on ALSA
+            # (see TODO 5b), so refusing beats corrupting -- and refusing
+            # whenever the ALSA path is unavailable, not only when
+            # libasound loaded and the port name lacked an address.
+            # alsa.available() is find_library("asound") having found
+            # something, which fails on a host with no ldconfig while
+            # rtmidi's own ALSA backend works perfectly; that host would
+            # otherwise fall straight through to the silent drop this
+            # check exists to prevent.
+            #
+            # Test doubles without a real MIDI port stay exempt, so the
+            # write fence remains exercisable synthetically.
+            if hasattr(self._out, "open_port"):
+                raise DeviceError(
+                    f"this message is {len(data)} bytes, which "
+                    f"python-rtmidi cannot send on ALSA, and no ALSA "
+                    f"sequencer address is available for "
+                    f"{self.description!r}. Nothing was sent.")
         self._out.send_message(list(data))
         time.sleep(SEND_GAP)
 
@@ -346,8 +354,17 @@ class WavestationBridge:
                 continue
             if packet.is_error:
                 raise DeviceRefused(packet.function)
-            if packet.function in wanted:
-                return dumps.parse_bulk(packet)
+            if packet.function not in wanted:
+                continue
+            # The bank the reply describes, not merely that it is a dump.
+            # A late answer to a request that already timed out is
+            # otherwise indistinguishable from this one's, and the caller
+            # files these names under the bank it asked for -- which is how
+            # a read came back holding another bank's contents. read_patch
+            # guards the same way.
+            if packet.bank is not None and packet.bank != entry.sysex:
+                continue
+            return dumps.parse_bulk(packet)
         raise TimeoutError(
             f"no dump came back for {entry.label}. The unit did not refuse "
             f"it either, so this means one of: powered off, wrong port, "
@@ -635,8 +652,16 @@ class WavestationBridge:
                 continue
             if packet.is_error:
                 raise DeviceRefused(packet.function)
-            if packet.function == function:
-                return bytes(message[0])
+            if packet.function != function:
+                continue
+            # Same guard as read_bank: the reply must describe the bank
+            # that was asked for. This one feeds the write fence's backup
+            # and its read-back comparison, so a dump from the wrong bank
+            # here would back up the wrong slot and then "verify" a write
+            # against it.
+            if packet.bank is not None and packet.bank != bank_number:
+                continue
+            return bytes(message[0])
         raise TimeoutError(
             f"no {m.Function.name(function)} came back for bank "
             f"{bank_number}")
