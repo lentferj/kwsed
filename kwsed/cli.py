@@ -72,7 +72,7 @@ def _cmd_list(_device, args) -> None:
     for item in banks.slots(entry.number, args.kind):
         rows.append([f"{item.number:02d}",
                      catalog.display_name(entry.id, args.kind, item.number)])
-    print(f"{entry.label} — {args.kind}s\n")
+    print(f"{entry.label} — {_plural(args.kind)}\n")
     print(_table(rows, ["#", "name"]))
 
 
@@ -115,16 +115,27 @@ def _cmd_status(device, _args) -> None:
     print(f"global channel  {fields['channel'] + 1}")
 
 
+def _plural(kind: str) -> str:
+    """"patch" pluralises to "patches", not "patchs"."""
+    if kind == "waveseq":
+        return "wave sequences"
+    return f"{kind}es" if kind.endswith("ch") else f"{kind}s"
+
+
 def _cmd_dump(device, args) -> None:
-    """Read one bank off the unit. Read-only, **makes no sound**."""
-    dump = device.read_bank(args.bank)
+    """Read one bank off the unit. Read-only, **makes no sound**.
+
+    The kind is asked for rather than accepted: each has its own request
+    code, ``0x1C`` for patches and ``0x1D`` for performances. It used to be
+    the unit's choice -- kwsed had only the patch request and waited for
+    whatever came back -- and the text here said so long after it stopped
+    being true.
+    """
+    dump = device.read_bank(args.bank, args.kind)
     catalog = _catalog(args)
     names = dump.names()
-    print(f"{dump.bank.label} — {dump.kind}s "
+    print(f"{dump.bank.label} — {_plural(dump.kind)} "
           f"({len(names)} named of {dump.count})")
-    print("\nWhich kind comes back is the unit's choice, not the request's:")
-    print("one code asks for a bank and the unit answers with whatever it")
-    print("is set to dump. kwsed reports what actually arrived.\n")
     rows = []
     for number in sorted(names):
         printed = catalog.name(dump.bank.id, dump.kind, number) or ""
@@ -221,8 +232,7 @@ def _cmd_send(device, args) -> int:
               f"{', '.join(b.label for b in bk.writable_banks())}.")
         return 2
 
-    plural = {"patch": "patches", "performance": "performances",
-              "waveseq": "wave sequences"}[kind]
+    plural = _plural(kind)
     print(f"about to replace: {destination.label}, all {plural}")
     print(f"          source: {args.file} ({size} bytes)")
 
@@ -237,7 +247,11 @@ def _cmd_send(device, args) -> int:
         print("     it now holds: (wave sequence names are not read)")
     else:
         try:
-            current = device.read_bank_names(destination.number)
+            # The kind matters: a kind-less read sends the patch request,
+            # so sending a performance bank would print the destination's
+            # *patch* names and the user would confirm the write against a
+            # list of the wrong objects.
+            current = device.read_bank_names(destination.number, kind)
             _, names = current
             shown = [f"{n:03d} {name}" for n, name in
                      sorted(names.items())[:6]]
@@ -301,6 +315,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("status", help="ask the unit who it is")
     sp = sub.add_parser("dump", help="read a bank off the unit (silent)")
     sp.add_argument("bank")
+    sp.add_argument("kind", nargs="?", default=banks.Kind.PATCH,
+                    choices=kinds,
+                    help="which kind to ask for (default: patch)")
     sp = sub.add_parser("select", help="select a sound ON THE UNIT")
     sp.add_argument("bank")
     sp.add_argument("kind", choices=kinds)

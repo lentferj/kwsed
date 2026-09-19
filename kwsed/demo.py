@@ -91,7 +91,9 @@ class DemoDevice:
         return self._bank_dump(packet.payload[0], kinds[packet.function])
 
     def _bank_dump(self, number: int, kind: str) -> bytes:
-        entry = banks.bank(number)
+        # The byte on the wire, not a display position: byte 3 is the
+        # Card, and banks.bank() would resolve it to ROM 4.
+        entry = banks.by_sysex(number)
         if kind == banks.Kind.PERFORMANCE:
             function, size = (m.Function.ALL_PERFORMANCE_DUMP,
                               dumps.PERFORMANCE_RECORD)
