@@ -61,10 +61,6 @@ class DemoDevice:
         self.selected: Optional[banks.Slot] = None
         self.selected_log: List[banks.Slot] = []
         self.received: List[bytes] = []
-        #: Which kind the fake answers a bank request with. The real unit
-        #: decides this itself, so kwsed must never assume -- and a fake
-        #: that always answered "performance" would hide that.
-        self.answer_kind = banks.Kind.PERFORMANCE
         self._closed = False
 
     def close(self) -> None:
@@ -86,13 +82,16 @@ class DemoDevice:
         packet = m.parse(data)
         if packet is None or packet.channel != self.channel:
             return None
-        if packet.function != m.Function.BULK_REQUEST or not packet.payload:
+        kinds = {
+            m.Function.BULK_REQUEST: banks.Kind.PATCH,
+            m.Function.PERFORMANCE_BANK_REQUEST: banks.Kind.PERFORMANCE,
+        }
+        if packet.function not in kinds or not packet.payload:
             return m.frame(m.Function.DATA_LOAD_ERROR, channel=self.channel)
-        return self._bank_dump(packet.payload[0])
+        return self._bank_dump(packet.payload[0], kinds[packet.function])
 
-    def _bank_dump(self, number: int) -> bytes:
+    def _bank_dump(self, number: int, kind: str) -> bytes:
         entry = banks.bank(number)
-        kind = self.answer_kind
         if kind == banks.Kind.PERFORMANCE:
             function, size = (m.Function.ALL_PERFORMANCE_DUMP,
                               dumps.PERFORMANCE_RECORD)
@@ -111,17 +110,24 @@ class DemoDevice:
 
     # --- the operations kwsed uses -------------------------------------------
 
-    def read_bank(self, bank, *, timeout: Optional[float] = None):
+    def read_bank(self, bank, kind: Optional[str] = None, *,
+                  timeout: Optional[float] = None):
         entry = banks.bank(bank)
-        reply = self.handle(m.bulk_request(entry.sysex, self.channel))
+        if kind == banks.Kind.PERFORMANCE:
+            request = m.bank_request(
+                entry.sysex, m.Function.ALL_PERFORMANCE_DUMP, self.channel)
+        else:
+            request = m.bulk_request(entry.sysex, self.channel)
+        reply = self.handle(request)
         packet = m.parse(reply)
         if packet is None or packet.is_error:
             raise RuntimeError("demo device refused its own request")
         return dumps.parse_bulk(packet)
 
-    def read_bank_names(self, bank, *, timeout: Optional[float] = None
+    def read_bank_names(self, bank, kind: Optional[str] = None, *,
+                        timeout: Optional[float] = None
                         ) -> Tuple[str, Dict[int, str]]:
-        dump = self.read_bank(bank)
+        dump = self.read_bank(bank, kind)
         return dump.kind, dump.names()
 
     def select(self, slot: banks.Slot, *, channel: Optional[int] = None

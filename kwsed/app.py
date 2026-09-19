@@ -790,17 +790,18 @@ class KwsedApp(App):
             self.notify_status("busy", refused=True)
             return
         self._busy = True
-        self._read_worker(self._current_pair[0])
+        self._read_worker(*self._current_pair)
 
     @work(thread=True)
-    def _read_worker(self, bank_id: int) -> None:
+    def _read_worker(self, bank_id: int, kind: str) -> None:
         """**MIDI only** -- the catalog is updated on the main thread."""
         try:
             self.call_from_thread(
                 self.notify_status,
-                f"asking for bank {bank_id} in one message (silent)...")
+                f"asking for bank {bank_id} {kind}s in one message "
+                f"(silent)...")
             with self._lock:
-                kind, names = self.device.read_bank_names(bank_id)
+                kind, names = self.device.read_bank_names(bank_id, kind)
         except Exception as exc:
             self.call_from_thread(
                 self.notify_status, f"read: {exc}", refused=True)
@@ -819,8 +820,7 @@ class KwsedApp(App):
             self._fill(self._current_pair)
         self.notify_status(
             f"read {len(names)} {kind} names from {entry.label}"
-            + (f"; {differing} differ from the catalog" if differing else "")
-            + "  (the unit chose the kind, not the request)")
+            + (f"; {differing} differ from the catalog" if differing else ""))
 
     def action_search(self) -> None:
         def done(text) -> None:

@@ -87,17 +87,17 @@ class TestReadingIsSilent:
                 await pilot.pause()
             assert app.catalog.differs("RAM1", banks.Kind.PERFORMANCE, 0)
 
-    async def test_the_kind_comes_from_the_reply(self, app):
-        """The unit chooses which kind a bank request returns, not kwsed."""
-        app.device.answer_kind = banks.Kind.PATCH
+    async def test_the_request_names_the_kind(self, app):
+        """Each kind has its own request; the reply is filed under it."""
         async with app.run_test() as pilot:
             await pilot.pause()
             await pilot.press("r")
             for _ in range(10):
                 await pilot.pause()
-            # Filed as patches even though the pane was showing performances.
-            assert app.catalog.is_live("RAM1", banks.Kind.PATCH, 0)
-            assert not app.catalog.is_live("RAM1", banks.Kind.PERFORMANCE, 0)
+            # The pane is showing performances, so performances come back --
+            # never the other kind filed under this pane's numbers.
+            assert app.catalog.is_live("RAM1", banks.Kind.PERFORMANCE, 0)
+            assert not app.catalog.is_live("RAM1", banks.Kind.PATCH, 0)
 
 
 class TestBothKindsAreListed:

@@ -96,6 +96,14 @@ SINGLE_OBJECT_TIMEOUT = 15.0
 #: about eight seconds of 31250-baud MIDI before the unit's own delay.
 DUMP_TIMEOUT = 20.0
 
+#: Which dump a bank request for a kind draws. The manual documents both;
+#: kwsed sent only the patch one for its whole life and read the end of
+#: that history as "the unit decides what to send".
+_DUMP_FOR_KIND = {
+    banks.Kind.PERFORMANCE: m.Function.ALL_PERFORMANCE_DUMP,
+    banks.Kind.PATCH: m.Function.ALL_PATCH_DUMP,
+}
+
 _HINTS = ("wavestation", "ws sr", "wssr", "korg")
 
 
@@ -290,22 +298,42 @@ class WavestationBridge:
 
     # --- operations ----------------------------------------------------------
 
-    def read_bank(self, bank, *, timeout: Optional[float] = None
-                  ) -> dumps.BulkDump:
+    def read_bank(self, bank, kind: Optional[str] = None, *,
+                  timeout: Optional[float] = None) -> dumps.BulkDump:
         """Dump one bank. Read-only, and **makes no sound**.
 
-        Which *kind* comes back -- performances or patches -- is the unit's
-        choice, not the caller's: one request code asks for a bank and the
-        unit answers with whatever it is currently set to dump. So the
-        result carries its own kind and bank, read from the reply.
+        Each kind has its own request -- ``0x1C`` for patches, ``0x1D``
+        for performances -- so the caller names the kind and only that
+        kind's dump is accepted, read from the reply like the bank. A
+        late answer to an earlier request is otherwise indistinguishable
+        from this one's, which is how wrong-bank reads happened.
+
+        Without a kind, the patch request goes out and either dump is
+        accepted; the result still carries the kind that actually
+        arrived. That legacy form is for callers that report what came
+        back rather than filing it under a pane.
 
         An error reply raises immediately instead of waiting out the clock;
         a refusal is a different problem from silence and points somewhere
         different.
         """
         entry = banks.bank(bank)
+        if kind is None:
+            wanted = (m.Function.ALL_PERFORMANCE_DUMP,
+                      m.Function.ALL_PATCH_DUMP)
+            request = m.bulk_request(entry.sysex, self.channel)
+        else:
+            try:
+                dump_function = _DUMP_FOR_KIND[kind]
+            except KeyError:
+                raise ValueError(
+                    f"cannot read {kind!r}; have "
+                    f"{', '.join(sorted(_DUMP_FOR_KIND))}") from None
+            wanted = (dump_function,)
+            request = m.bank_request(entry.sysex, dump_function,
+                                     self.channel)
         self._drain()
-        self._send(m.bulk_request(entry.sysex, self.channel))
+        self._send(request)
         deadline = time.time() + (
             DUMP_TIMEOUT if timeout is None else timeout)
         while time.time() < deadline:
@@ -318,8 +346,7 @@ class WavestationBridge:
                 continue
             if packet.is_error:
                 raise DeviceRefused(packet.function)
-            if packet.function in (m.Function.ALL_PERFORMANCE_DUMP,
-                                   m.Function.ALL_PATCH_DUMP):
+            if packet.function in wanted:
                 return dumps.parse_bulk(packet)
         raise TimeoutError(
             f"no dump came back for {entry.label}. The unit did not refuse "
@@ -473,10 +500,11 @@ class WavestationBridge:
             "argument; check the global channel and that System Exclusive "
             "reception is enabled.")
 
-    def read_bank_names(self, bank, *, timeout: Optional[float] = None
-                        ) -> Tuple[str, Dict[int, str]]:
-        """``(kind, {number: name})`` for one bank. Silent."""
-        dump = self.read_bank(bank, timeout=timeout)
+    def read_bank_names(self, bank, kind: Optional[str] = None, *,
+                          timeout: Optional[float] = None
+                          ) -> Tuple[str, Dict[int, str]]:
+        """``(kind, {number: name})`` for one bank of one kind. Silent."""
+        dump = self.read_bank(bank, kind, timeout=timeout)
         return dump.kind, dump.names()
 
     def select(self, slot: banks.Slot, *, channel: Optional[int] = None
