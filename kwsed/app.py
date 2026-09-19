@@ -893,7 +893,8 @@ class KwsedApp(App):
             lines.append(f"manufacturer    {fields['manufacturer']:#04x}"
                          + ("  (Korg)" if fields["is_korg"] else ""))
             lines.append(f"family          {fields['family']}"
-                         + ("  (X5 family)" if fields["is_x5_family"] else ""))
+                         + ("  (Wavestation)" if fields.get("is_wavestation")
+                            else ""))
             lines.append(f"global channel  {fields['channel'] + 1}")
             lines.append("")
             lines.append("The global channel comes from the unit. Every")
