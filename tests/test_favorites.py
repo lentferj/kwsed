@@ -96,7 +96,6 @@ class TestTheChannelIsRemembered:
         from kws import config
         path = str(tmp_path / "config.toml")
         config.save_channel(5, path)
-        config.save_last_port("some port")
         config.save_last_port("some port", path)
         assert config.load_channel(path) == 5
         assert config.load_last_port(path) == "some port"
