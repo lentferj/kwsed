@@ -789,12 +789,12 @@ class KwsedApp(App):
         if self._busy:
             self.notify_status("busy", refused=True)
             return
+        self._busy = True
         self._read_worker(self._current_pair[0])
 
     @work(thread=True)
     def _read_worker(self, bank_id: int) -> None:
         """**MIDI only** -- the catalog is updated on the main thread."""
-        self._busy = True
         try:
             self.call_from_thread(
                 self.notify_status,
@@ -844,14 +844,15 @@ class KwsedApp(App):
         if self._busy:
             self.notify_status("busy", refused=True)
             return
+        self._busy = True
         self._multi_worker()
 
     @work(thread=True)
     def _multi_worker(self) -> None:
         """**MIDI only** -- the screen is built on the main thread."""
-        self._busy = True
         try:
-            raw = self.device.read_multi()
+            with self._lock:
+                raw = self.device.read_multi()
         except Exception as exc:
             self.call_from_thread(self.notify_status,
                                   f"multi: {exc}", refused=True)
