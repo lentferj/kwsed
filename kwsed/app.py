@@ -726,9 +726,9 @@ class KwsedApp(App):
         self.query_one("#detail", Static).update(
             f"[b]{item.bank.label} {item.kind} {item.number:02d}[/b]  "
             f"{name}{note}\n"
-            f"Bank Select [b]{item.bank.number}[/b]   Program Change "
-            f"[b]{item.number}[/b]   [dim]which bank a Bank Select actually "
-            f"reaches is not established[/dim]"
+            f"Bank Select LSB [b]{item.bank.sysex}[/b]   Program Change "
+            f"[b]{item.number}[/b]   [dim]the wire byte is sent; which bank "
+            f"a Bank Select actually reaches is not established[/dim]"
         )
 
     def notify_status(self, message: str, *, refused: bool = False) -> None:
@@ -781,7 +781,7 @@ class KwsedApp(App):
             return
         self.call_from_thread(
             self.notify_status,
-            f"bank select {entry.bank.number} + program change "
+            f"bank select LSB {entry.bank.sysex} + program change "
             f"{entry.number} sent for {entry} — which bank a Bank Select "
             f"actually reaches is not established")
 
