@@ -243,10 +243,10 @@ def from_nibbles(data: Sequence[int]) -> bytes:
     for index in range(0, len(data) - 1, 2):
         low, high = data[index], data[index + 1]
         for part in (low, high):
-            if not 0 <= part <= 0x7F:
+            if not 0 <= part <= 0x0F:
                 raise ProtocolError(
-                    f"{part:#04x} has bit 7 set; nibble data must not")
-        out.append((low & 0x0F) | ((high & 0x0F) << 4))
+                    f"{part:#04x} is not a nibble; nibble data is 0x00-0x0F")
+        out.append(low | (high << 4))
     return bytes(out)
 
 
