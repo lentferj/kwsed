@@ -151,7 +151,7 @@ def closure(sources: Dict[str, Source],
     want_patches: List[PatchId] = []
     want_seqs: List[Tuple[str, int, int]] = []
     missing: List[str] = []
-    steps = 0
+    used: Set[Tuple[str, int]] = set()
     seen_seq: Set[Tuple[str, int, int]] = set()
 
     for bank_id, number in patches:
@@ -175,12 +175,13 @@ def closure(sources: Dict[str, Source],
                 continue
             chain = walk_sequence(holder.waveseq, seq_num)
             want_seqs.append(key)
-            steps += chain.cost
+            for step in chain.steps:
+                used.add((src_id, step))
 
     return {
         "patches": want_patches,
         "sequences": want_seqs,
-        "steps": steps,
+        "steps": len(used),
         "missing": missing,
     }
 

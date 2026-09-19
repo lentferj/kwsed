@@ -101,7 +101,10 @@ def plan(sources: Dict[str, deps.Source],
     saying plainly where the budget ran out leaves it with you.
     """
     out = Plan()
-    steps = 0
+    #: Every step already spoken for, as (source bank, step): pools are
+    #: per-bank, and chains from one bank can share steps, so summing
+    #: chain lengths double-counts the overlap and rejects plans that fit.
+    used: Set[Tuple[str, int]] = set()
 
     for bank_id, number in chosen:
         source = sources.get(bank_id)
@@ -119,7 +122,9 @@ def plan(sources: Dict[str, deps.Source],
 
         # what this patch drags along
         need: List[Tuple[str, int, int]] = []
-        cost = 0
+        chains = {}
+        fresh = 0
+        seen_fresh = set()
         blocked = None
         for src_id, wave_bank, seq in deps.patch_dependencies(
                 source.patch(number), bank_id):
@@ -134,7 +139,12 @@ def plan(sources: Dict[str, deps.Source],
                 break
             chain = deps.walk_sequence(holder.waveseq, seq)
             need.append(key)
-            cost += chain.cost
+            chains[key] = chain
+            for step in chain.steps:
+                tag = (src_id, step)
+                if tag not in used and tag not in seen_fresh:
+                    seen_fresh.add(tag)
+                    fresh += 1
         if blocked:
             out.rejected.append(blocked)
             continue
@@ -143,19 +153,21 @@ def plan(sources: Dict[str, deps.Source],
                 f"{bank_id}:{number:03d} - needs {len(need)} more wave "
                 f"sequence(s); only {budget.sequences} fit in a bank")
             continue
-        if steps + cost > budget.steps:
+        if len(used) + fresh > budget.steps:
             out.rejected.append(
-                f"{bank_id}:{number:03d} - needs {cost} more step(s); the "
-                f"bank's pool of {budget.steps} has {budget.steps - steps} "
-                f"left")
+                f"{bank_id}:{number:03d} - needs {fresh} more step(s); the "
+                f"bank's pool of {budget.steps} has "
+                f"{budget.steps - len(used)} left")
             continue
 
         out.patch_map[(bank_id, number)] = len(out.patch_map)
         for key in need:
             out.sequence_map[key] = len(out.sequence_map)
-        steps += cost
+        for key, chain in chains.items():
+            for step in chain.steps:
+                used.add((key[0], step))
 
-    out.steps_used = steps
+    out.steps_used = len(used)
 
     if include_performances:
         for bank_id, source in sources.items():
