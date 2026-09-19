@@ -217,3 +217,262 @@ marks both the same way.
 
 **Blocked on:** nothing. `banks.Bank.writable` already carries the
 distinction; the TUI just does not use it for this yet.
+
+---
+
+## 8. A built bank drops the sequences its sequences quote
+
+**Status:** open, **the most severe thing currently on this list**. The
+bank builder produces a file that plays wrong, and says it succeeded.
+
+A wave sequence's step carries a `wave` field. When that value is below
+`rec.ROM_WAVE_BASE` (32) it does not name a wave at all -- it names
+*another wave sequence in the same bank*, which the step plays in place of
+a sample. `deps.walk_sequence` already notices this and records it:
+
+```python
+if info["wave"] < rec.ROM_WAVE_BASE:
+    quotes.append((None, info["wave"]))
+```
+
+with the field documented as "Sequences quoted by this one's steps, which
+must travel with it."
+
+Nothing reads `quotes`. Not `closure`, not `plan`, not `build` -- a grep
+for it across `kws/`, `kwsed/` and `tools/` finds only the three lines in
+`deps.py` that produce it. So:
+
+1. A quoted sequence is never pulled into the plan. It comes along only by
+   coincidence, if some chosen patch happens to want it too.
+2. `build` copies each step's bytes verbatim and then calls
+   `set_step_links`, which repairs `forward`, `back` and `loop` -- and
+   leaves `wave` alone. So a quoting step still holds the *source* bank's
+   sequence number, which in the destination is a different sequence
+   entirely. The patch loop does remap its sequence references; the step
+   loop does not.
+3. The slots the plan did not fill are deliberately zeroed, so most of
+   those stale numbers land on an empty header.
+
+**How common, measured.** Across the 828 `.syx` files under
+`~/Dokumente/SYNTHS/WavestationSR`: 657 wave-sequence banks, 15679
+non-empty sequences, of which **1752 (11.2%) quote another sequence**, in
+453 of the 828 files. This is ordinary Wavestation practice, not an edge
+case -- quoting is how a long sequence is assembled from shorter ones.
+
+**Demonstrated, not inferred.** Building a bank from six patches of
+`pa_01.syx` that depend on a quoting sequence gives a bank whose steps
+hold **36 references to slots the build zeroed** (those play nothing) and
+**21 to slots holding an unrelated sequence** (those play the wrong
+thing). Both are silent failures: the file is well-formed, the checksum is
+right, and the read-back after a write compares equal, because the bytes
+that went out are the bytes that came back. It is the *content* that is
+wrong.
+
+**Blocked on:** nothing, but it wants care, in this order:
+
+* `walk_sequence` takes the bank it is walking, so a quote is a real
+  `SequenceId` rather than `(None, n)` -- see item 11, which is the same
+  root cause seen from the other side.
+* `closure` and `plan` follow quotes transitively when gathering
+  sequences, and count their steps in the budget. A quote can itself
+  quote, so this is a fixpoint, and it needs the same cycle guard
+  `walk_sequence` already has.
+* `build` remaps each copied step's `wave` field through `sequence_map`
+  when it is below `ROM_WAVE_BASE`, exactly as the patch loop remaps a
+  patch's oscillator.
+* A test that builds from a quoting source and asserts no step in the
+  result points at an unfilled slot.
+
+*Found while checking the review below; the review did not raise it.*
+
+---
+
+*Items 9 onward came from a code review by MiMo V2.5 Free on 2026-09-19.
+Each has been checked against the code; the verdict line says what that
+check found. Three did not survive it.*
+
+---
+
+## 9. `dumps.read_syx_file` does not close the file it opens
+
+**Status:** open, real, one line. **Verified.**
+
+`raw = open(path, "rb").read()` at `kws/dumps.py:187`. Called per `.syx`
+by `extract_catalog`, `build_bank`, `deps.load_syx` and `cli._cmd_send`.
+
+The review says a glob of 50 files leaks 50 handles; on CPython it does
+not -- the handle is refcounted shut as the expression ends, which is why
+this has never been felt. It is still wrong: it relies on a detail of one
+implementation, and it raises `ResourceWarning` under `-W error`, which is
+how the test suite should be run.
+
+**Blocked on:** nothing. `with open(path, "rb") as handle: raw = handle.read()`.
+
+---
+
+## 10. `identity_reply_fields` does not range-check the manufacturer byte
+
+**Status:** **rejected as stated.** The case cannot occur; a different one
+can.
+
+The review asks for a check that `data[5] < 0x80`. A byte of 0x80 or above
+cannot appear inside a SysEx message: 0xF7 ends it and any other status
+byte aborts it, so rtmidi never hands one over, and the function has
+already required `data[0] == F0` and `data[-1] == F7`. The check would
+never fire.
+
+The real gap in that function is a different one the review did not
+reach: an MMA *extended* manufacturer ID is three bytes beginning `00`, so
+for such a device `data[6]` and `data[7]` are not family bytes and the
+`family` field is meaningless. It costs nothing here -- every caller
+branches on `is_korg`, which a leading `00` fails -- so this is a note
+rather than a fix.
+
+**Blocked on:** nothing; nothing to do. Kept so the next reader does not
+re-raise it.
+
+---
+
+## 11. `config._update` escapes only `\` and `"` for TOML
+
+**Status:** open, real, unreachable in practice. **Verified.**
+
+`kws/config.py:82`. TOML basic strings also interpret `\n`, `\t`, `\r`,
+`\b`, `\f` and `\uXXXX`, so a value containing one would not survive a
+round-trip. The only strings written are MIDI port names and bank ids;
+ALSA will not produce a port name containing a control character.
+
+Worth fixing because it is three lines and the failure would be baffling,
+not because it is going to happen.
+
+**Blocked on:** nothing.
+
+---
+
+## 12. `walk_sequence` does not know which bank it is walking
+
+**Status:** open, real, and the root of item 8. **Verified.**
+
+`deps.walk_sequence` returns `SequenceChain(bank_id="", ...)` at
+`kws/deps.py:108` and, four lines above, appends `(None, info["wave"])` to
+`quotes`, whose declared type is `SequenceId = Tuple[str, int]`. Both are
+the same omission: the function is handed a bare `Sequence[int]` and has
+no way to say which bank it came from, so it fills in a placeholder twice.
+
+The review calls this cosmetic because the callers set the bank from their
+own context. They do for `bank_id`. Nobody sets it for `quotes`, because
+nobody reads `quotes` at all -- which is item 8.
+
+**Blocked on:** nothing. Take `bank_id` as a parameter and use it in both
+places; fix it with item 8 rather than on its own.
+
+---
+
+## 13. `Function.SINGLE_PERFORMANCE_REQUEST` is defined but never sent
+
+**Status:** open, cosmetic, expected. **Verified** -- `0x19` appears only
+in the enum and in `REQUEST_FOR_DUMP`. `SINGLE_PATCH_REQUEST` is sent from
+`messages.py:483`; its performance counterpart has no caller because
+single-object reads are still under investigation.
+
+**Blocked on:** TODO 3c. A comment at the enum entry saying so would stop
+the next reader filing this again.
+
+---
+
+## 14. `patch_dependencies` annotates a 3-tuple list as `List[SequenceId]`
+
+**Status:** open, real, but **not the fix the review proposes.**
+
+The review has the symptom right and the remedy backwards. It suggests
+`SequenceId` was never updated to match the 3-tuple. It should not be:
+`SequenceId = Tuple[str, int]` is correct for `SequenceChain.quotes` and
+for `walk_sequence`'s local, which are genuinely `(bank, sequence)`.
+Widening it to three elements would mis-type both.
+
+The actual defect is narrower -- one local annotation, `out: List[SequenceId]`
+at `kws/deps.py:122`, inside a function whose signature correctly says
+`List[Tuple[str, int, int]]` and which appends
+`(bank_id, wave.bank, wave.wave)`. The annotation is simply wrong about
+its own variable.
+
+**Blocked on:** nothing. Fix line 122; leave `SequenceId` alone.
+
+---
+
+## 15. `deps.WAVESEQ_DUMP` duplicates `Function.ALL_WAVESEQ_DUMP`
+
+**Status:** **rejected.** The premise is false.
+
+The review states that `deps.py` "already imports `messages as m`". It
+does not -- `kws/deps.py` imports `records as rec` and nothing else from
+the package. The local `WAVESEQ_DUMP = 0x54` exists precisely so that the
+dependency walker does not depend on the message layer, which is a
+sensible direction for the dependency to run.
+
+There is a smaller oddity the review did not catch: the constant is
+defined at line 216, *after* its use at line 207. That is legal, since the
+use is inside a function body, but it reads as a mistake. Move it up.
+
+**Blocked on:** nothing; move the constant, keep it.
+
+---
+
+## 16. `data_dir()` is implemented twice
+
+**Status:** open, cosmetic. **Verified** -- `kws/favorites.py:79` and
+`kws/backup.py:71`, same platform rules, independently written.
+
+They do agree today. The reason to merge them is that the next change to
+the rules will be made in one of the two.
+
+**Blocked on:** nothing.
+
+---
+
+## 17. The `Unit` test double answers patch requests only
+
+**Status:** open, real coverage gap. **Verified.**
+
+`tests/test_write.py:70` intercepts `BULK_REQUEST` and always replies with
+`ALL_PATCH_DUMP`. A performance or wave-sequence read against it goes
+unanswered. So `write_bank` is exercised for one kind of three, and the
+kinds differ in dump function, record size and count -- and the bug fixed
+in `5cdaa21` was precisely a kind that defaulted to patch when it should
+not have.
+
+**Blocked on:** nothing but writing them.
+
+---
+
+## 18. `from_nibbles` drops a trailing odd byte without saying so
+
+**Status:** open, by design, agreed. **Verified** -- `range(0, len - 1, 2)`
+at `kws/messages.py:248`. The instrument always sends an even count, so
+this only fires on a truncated file, where it silently shortens the last
+record rather than reporting the truncation.
+
+The strict per-nibble range check immediately below raises on bad data; an
+odd *length* is bad data of the same kind and is the one case that passes
+quietly. Raising there would be more consistent than the docstring note
+the review suggests.
+
+**Blocked on:** a decision on which way -- raise, or warn.
+
+---
+
+## 19. Test coverage gaps noted by the review
+
+**Status:** open, minor.
+
+* `walk_sequence` with a self-loop (step 0's forward link at step 0).
+* `from_nibbles` with a nibble of exactly `0x0F`, the upper boundary of
+  the strict check.
+* `write_bank` for performance and wave-sequence kinds -- see item 17.
+
+The fourth the review lists, `identity_reply_fields` with a manufacturer
+byte at or above `0x80`, is not worth a test: item 10 explains why the
+input cannot occur. A test for a state the transport cannot produce
+asserts only that the test double can produce it.
+
+**Blocked on:** nothing but writing them.
