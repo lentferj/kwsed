@@ -160,7 +160,12 @@ class Function:
 
     NAMES = {
         0x10: "object request",
-        0x1C: "bulk request",
+        0x19: "single performance request",
+        0x1C: "patch bank request",
+        0x1D: "performance bank request",
+        0x0C: "wave sequence bank request",
+        0x0E: "system setup request",
+        0x0F: "all data request",
         0x49: "performance dump",
         0x4C: "all patch dump",
         0x4D: "all performance dump",
@@ -297,10 +302,20 @@ class Packet:
         # gone; DATA_OFFSET counts from F0.
         return from_nibbles(self.payload[offset - 5:])
 
+    #: Functions whose payload opens with a bank byte. The Multiset dump
+    #: is decoded but excluded: its two header bytes are not a bank.
+    _BANKED = frozenset({
+        Function.ALL_PATCH_DUMP,
+        Function.ALL_PERFORMANCE_DUMP,
+        Function.ALL_WAVESEQ_DUMP,
+        Function.PERFORMANCE_DUMP,
+        Function.SINGLE_PATCH_DUMP,
+    })
+
     @property
     def bank(self) -> Optional[int]:
         """The bank byte a dump carries, if it carries one."""
-        if self.function in DATA_OFFSET and self.payload:
+        if self.function in self._BANKED and self.payload:
             return self.payload[0]
         return None
 
