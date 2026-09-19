@@ -324,7 +324,7 @@ class Favorites:
         """Every favourited slot, as ``BANK:NNN`` strings.
 
         One query for the whole set rather than a ``__contains__`` per row:
-        the browser needs to mark every visible line, and a bank is up to 128
+        the browser needs to mark every visible line, and a bank is up to 50
         lines redrawn on every cursor move.
         """
         return {

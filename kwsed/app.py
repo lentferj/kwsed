@@ -913,30 +913,30 @@ class KwsedApp(App):
 
 
 _HELP = """\
-Two panes. Left: the banks. Right: that bank's slots.
+Two panes. Left: the twelve banks, each listed twice -- once for its 50
+performances, once for its 35 patches. Right: that bank-and-kind's slots.
 
-  Bank A   100 programs, A00-A99. Yours; a soundset overwrites these.
-  Bank G   136 General MIDI programs, G001-G136. Read-only.
-  Combi    100 combinations, C00-C99, each layering up to eight programs.
+  RAM 1-3   writable; somebody's own work lives here.
+  ROM 4-11  read-only.
+  Card      writable; the card in the slot.
 
-  #    what the unit's display shows
-  PC   the program change on the wire
+A performance combines up to eight parts, each pointing at a patch. A
+patch is a sound: four oscillators playing waves or wave sequences. They
+are different objects; performance 7 is not patch 7.
 
-**Those are different numbers on Bank G.** Korg numbers it from 1 and a
-program change counts from 0, so G001 goes out as program change 0. They are
-equal on Bank A and the combinations, which is exactly why conflating them
-survives casual testing. kwsed keeps them apart everywhere.
-
-  ⏎   send a program change — it will sound
-  r   read this bank's names from the unit — SILENT, nothing is selected
+  ⏎   select the slot on the unit -- it will sound
+  r   read this bank's names from the unit -- SILENT, nothing is selected
   /   search names
+  m   the 32 Multisets: which performance answers on each MIDI channel
+  f   favourite this slot; F steps all -> this bank's -> every favourite
+  t   tags; n   note (both hang off a favourite, so press f first)
+  [ ] step the send channel; c set it by number
   i   device identity and the unit's global channel
 
-**A program change is not a bank change.** The Wavestation's banks are chosen on the
-unit, not over MIDI, and a freshly powered Wavestation sits in Bank G whatever a
-sequencer sends. So "my sequencer only plays GM sounds" is the expected
-behaviour of an Wavestation nobody has switched to Bank A -- not a fault. kwsed
-sends the program change and says which bank it assumed.
+**A program change is not a bank change.** Which of the twelve banks a
+Bank Select actually reaches is not established (see TODO 1), so kwsed
+sends the bank's wire byte with the program change and says which bank
+it assumed, rather than claiming a selection it cannot verify.
 
 Moving the cursor sends nothing at all.
 """
