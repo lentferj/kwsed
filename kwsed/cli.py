@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from typing import Callable, Dict, List, Optional
 
@@ -177,21 +178,31 @@ def _cmd_send(device, args) -> int:
     """
     from kws import backup, banks as bk, dumps, messages as m, records as rec
 
-    raw = open(args.file, "rb").read()
+    try:
+        size = os.path.getsize(args.file)
+    except OSError as exc:
+        print(f"{args.file} cannot be read ({exc})")
+        return 2
     packets = [p for p in dumps.read_syx_file(args.file)]
     if not packets:
         print(f"{args.file} holds no Wavestation message kwsed recognises")
         return 2
-    packet = packets[0]
+    sendable = [p for p in packets if p.function in (
+        m.Function.ALL_PATCH_DUMP, m.Function.ALL_PERFORMANCE_DUMP,
+        m.Function.ALL_WAVESEQ_DUMP)]
+    if not sendable:
+        print(f"{args.file} is a {packets[0].function_name}, which kwsed "
+              f"does not send")
+        return 2
+    if len(sendable) > 1:
+        print(f"{args.file} holds {len(sendable)} bank dumps; only the "
+              f"first ({sendable[0].function_name}) will be sent")
+    packet = sendable[0]
     kinds = {
         m.Function.ALL_PATCH_DUMP: bk.Kind.PATCH,
         m.Function.ALL_PERFORMANCE_DUMP: bk.Kind.PERFORMANCE,
         m.Function.ALL_WAVESEQ_DUMP: "waveseq",
     }
-    if packet.function not in kinds:
-        print(f"{args.file} is a {packet.function_name}, which kwsed does "
-              f"not send")
-        return 2
     kind = kinds[packet.function]
     sizes = {bk.Kind.PATCH: bk.PATCHES_PER_BANK * rec.PATCH_SIZE,
              bk.Kind.PERFORMANCE: bk.PERFORMANCES_PER_BANK
@@ -210,11 +221,21 @@ def _cmd_send(device, args) -> int:
               f"{', '.join(b.label for b in bk.writable_banks())}.")
         return 2
 
-    print(f"about to replace: {destination.label}, all "
-          f"{'32 wave sequences' if kind == 'waveseq' else kind + 's'}")
-    print(f"          source: {args.file} ({len(raw)} bytes)")
+    plural = {"patch": "patches", "performance": "performances",
+              "waveseq": "wave sequences"}[kind]
+    print(f"about to replace: {destination.label}, all {plural}")
+    print(f"          source: {args.file} ({size} bytes)")
 
-    if kind != "waveseq":
+    if kind == "waveseq":
+        try:
+            device.read_raw(destination.sysex, m.Function.ALL_WAVESEQ_DUMP)
+        except Exception as exc:
+            print(f"     it now holds: could not be read ({exc})")
+            print("Refusing to write a bank that cannot first be read and "
+                  "backed up.")
+            return 1
+        print("     it now holds: (wave sequence names are not read)")
+    else:
         try:
             current = device.read_bank_names(destination.number)
             _, names = current
