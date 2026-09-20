@@ -595,12 +595,13 @@ class KwsedApp(App):
         item = self._current[row]
         key = favorite_bank_id(item.bank.id, item.kind)
         name = self.catalog.display_name(item.bank.id, item.kind, item.number)
-        if self.favorites.get(key, item.number) is not None:
-            self.favorites.remove(key, item.number)
-            self.notify_status(f"unfavourited {name or item}")
-        else:
-            self.favorites.add(key, item.number, name=name)
-            self.notify_status(f"favourited {name or item}")
+        # Favorites.toggle, not remove-then-add: un-favouriting keeps
+        # the row so a rating, tags, a note and the original date
+        # survive being toggled off and on. As a delete followed by a
+        # fresh add this destroyed all four, and this is one keystroke.
+        now = self.favorites.toggle(key, item.number, name=name)
+        self.notify_status(
+            f"{'favourited' if now else 'unfavourited'} {name or item}")
         self._refill_keeping_place()
 
 
