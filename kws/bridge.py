@@ -197,8 +197,20 @@ class WavestationBridge:
             raise DeviceError(f"no input port named {listen!r}; have {ins}")
         midi_out = _client("out")
         midi_in = _client("in")
-        midi_out.open_port(outs.index(port))
-        midi_in.open_port(ins.index(listen))
+        try:
+            # If the second open_port raises -- the port vanished between
+            # the listing and here, or another program took it -- the first
+            # client is already open and nothing would ever close it.
+            midi_out.open_port(outs.index(port))
+            midi_in.open_port(ins.index(listen))
+        except Exception:
+            for client in (midi_in, midi_out):
+                try:
+                    client.close_port()
+                    client.delete()
+                except Exception:
+                    pass
+            raise
         return cls(midi_in, midi_out, channel=channel,
                    description=f"{port} -> {listen}", timeout=timeout)
 
@@ -297,6 +309,12 @@ class WavestationBridge:
                 fields = None
             if fields is not None and fields.get("is_wavestation"):
                 bridge.channel = fields["channel"]
+                # The discovery timeout is short on purpose -- a port
+                # that is not the instrument should cost as little as
+                # possible -- but it must not become the session's. Every
+                # later request that does not name its own would run at
+                # the probe's timeout rather than the working one.
+                bridge.timeout = DEFAULT_TIMEOUT
                 return bridge
             bridge.close()
         raise DeviceError(

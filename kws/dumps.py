@@ -184,7 +184,8 @@ def read_syx_file(path: str) -> List[m.Packet]:
     Foreign messages are skipped rather than raising: a file somebody
     assembled may carry other devices' data.
     """
-    raw = open(path, "rb").read()
+    with open(path, "rb") as handle:
+        raw = handle.read()
     out: List[m.Packet] = []
     cursor = 0
     while True:

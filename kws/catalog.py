@@ -37,6 +37,7 @@ does not.
 from __future__ import annotations
 
 import json
+import sys
 import os
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Optional, Tuple
@@ -188,13 +189,23 @@ def load(path: Optional[str] = None) -> Catalog:
         return empty()
     try:
         banks_payload = payload.get("banks", {})
-        entries = []
-        for bank_id, rows in banks_payload.items():
-            for row in rows:
+    except AttributeError:
+        return empty()
+    entries = []
+    skipped = 0
+    for bank_id, rows in banks_payload.items():
+        for row in rows:
+            # Per row rather than around the loop: one unreadable row used
+            # to discard every good one with it, which turns a typo in a
+            # generated file into "no names at all".
+            try:
                 entries.append(Entry(bank_id=bank_id, kind=row["kind"],
                                      number=int(row["n"]),
                                      name=row["name"]))
-    except (AttributeError, KeyError, TypeError, ValueError):
-        return empty()
+            except (KeyError, TypeError, ValueError):
+                skipped += 1
+    if skipped:
+        print(f"warning: {target} has {skipped} unreadable row(s), skipped; "
+              f"regenerate it with tools/extract_catalog.py", file=sys.stderr)
     return Catalog(entries, source=payload.get("source", ""),
                    generated=payload.get("generated", ""))

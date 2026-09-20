@@ -1003,7 +1003,14 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     from kws.favorites import Favorites
 
-    store = Favorites(args.favorites)
+    try:
+        store = Favorites(args.favorites)
+    except Exception as exc:
+        # _migrate refuses a database written by a newer build, which is the
+        # right refusal, and sqlite3 raises on a file that is not a database
+        # at all. Every other startup failure here leaves by sys.exit; these
+        # two used to print a traceback.
+        raise SystemExit(f"error: {exc}")
     app = KwsedApp(device, catalog=cat.load(args.catalog),
                    favorites=store, config_path=config_path)
     try:
