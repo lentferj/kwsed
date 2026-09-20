@@ -495,3 +495,20 @@ input cannot occur. A test for a state the transport cannot produce
 asserts only that the test double can produce it.
 
 **Blocked on:** nothing but writing them.
+
+## 20. The MidiQuest `.sqs` format is unread — shared across the projects
+
+**Status:** open, and not specific to this instrument.
+
+The owner's instrument folders hold `.sqs` files alongside the `.syx`
+dumps. They are **MidiQuest's** own bank format, not the instrument's: an
+IFF-style chunked file with `LIST`, `FORM`, `BANK`, `CHNL`, `SHDR`,
+`FILE`, `TRAN`, `RECV`, `XTRA`, `MPIN`, `MPOT`, `BODY`, `AUDI`,
+`BDEF` and `TDEF` chunks, sizes big-endian, and contents that are not
+simply the raw SysEx.
+
+The same format turns up for **every** instrument in the collection, so
+decoding it once would serve rxved, kwsed, p2ked, x5ded and nanosyned
+alike. Worth doing as shared work rather than five times over.
+
+**Blocked on:** nothing but the decoding. Nothing here depends on it.
