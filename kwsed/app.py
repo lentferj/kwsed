@@ -342,7 +342,15 @@ class SendScreen(ModalScreen[Optional[dict]]):
             return
         self._armed = False
         if self._on_send is not None:
-            self._on_send(self._destination, self._kind)
+            try:
+                self._on_send(self._destination, self._kind)
+            except Exception as exc:
+                # A failed write must not dismiss: the screen is the only
+                # feedback the user gets, and the bridge already reported
+                # the backup's read-back mismatch. Leave it open.
+                self.query_one("#send-state", Static).update(
+                    f"[b]write failed[/b] {exc}")
+                return
         self.dismiss({"destination": self._destination.number,
                       "kind": self._kind})
 
@@ -875,6 +883,10 @@ class KwsedApp(App):
         self.notify_status(f"{len(sets)} multisets")
 
     def action_device_info(self) -> None:
+        if self._busy:
+            self.notify_status("busy", refused=True)
+            return
+        self._busy = True
         self._info_worker()
 
     @work(thread=True)
@@ -887,6 +899,8 @@ class KwsedApp(App):
             self.call_from_thread(
                 self.notify_status, f"device: {exc}", refused=True)
             return
+        finally:
+            self._busy = False
         self.call_from_thread(self._show_info, fields)
 
     def _show_info(self, fields) -> None:

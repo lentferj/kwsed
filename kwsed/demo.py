@@ -61,6 +61,7 @@ class DemoDevice:
         self.selected: Optional[banks.Slot] = None
         self.selected_log: List[banks.Slot] = []
         self.received: List[bytes] = []
+        self.identify_calls: int = 0
         self._closed = False
 
     def close(self) -> None:
@@ -71,6 +72,7 @@ class DemoDevice:
             time.sleep(self.latency)
 
     def identify(self, *, timeout: float = 0.5) -> dict:
+        self.identify_calls += 1
         self._tick()
         return {"channel": self.channel, "manufacturer": m.KORG_ID,
                 "family": (m.WAVESTATION_ID, 0), "is_korg": True,

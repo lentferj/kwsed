@@ -160,6 +160,11 @@ class Slot:
 
 def bank(which) -> Bank:
     """A bank by its System Exclusive number or its short id."""
+    # `isinstance(True, int)` is True, and `bank(True)` would return RAM 2 --
+    # the same shape of mistake config.load_channel guards against at the
+    # TOML boundary. A bool is not a bank id here.
+    if isinstance(which, bool):
+        raise LookupError(f"a bank is not a boolean, got {which!r}")
     if isinstance(which, int):
         try:
             return _BY_NUMBER[which]

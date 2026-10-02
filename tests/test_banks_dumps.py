@@ -51,6 +51,15 @@ class TestBanks:
         with pytest.raises(LookupError, match="0-34"):
             banks.slot(0, banks.Kind.PATCH, 35)
 
+    def test_a_bool_is_not_a_bank(self):
+        """`isinstance(True, int)` is True, and `bank(True)` would return RAM 2
+        -- the same shape of mistake config.load_channel guards against at the
+        TOML boundary. A bool is not a bank id."""
+        with pytest.raises(LookupError, match="boolean"):
+            banks.bank(True)
+        with pytest.raises(LookupError, match="boolean"):
+            banks.bank(False)
+
 
 def _bulk(function, bank_number, kind, size, count, names=None):
     raw = bytearray()

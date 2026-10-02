@@ -137,7 +137,12 @@ class Function:
     ALL_DATA_REQUEST = 0x0F          #: no argument -> ALL_DATA_DUMP
     SYSTEM_SETUP_REQUEST = 0x0E      #: no argument -> SYSTEM_SETUP_DUMP
     BULK_REQUEST = PATCH_BANK_REQUEST    #: the old name for the patch one
-    OBJECT_REQUEST = 0x10        #: + bank + number
+    #: Asks for **one patch** specifically -- 0x10 is identical to
+    #: SINGLE_PATCH_REQUEST. The name says "object" because the sibling
+    #: rxved carried a generic per-object request; this project has no
+    #: such abstraction, and the equivalence is intentional. Keep them in
+    #: step.
+    OBJECT_REQUEST = SINGLE_PATCH_REQUEST
 
     # Dumps
     SINGLE_PATCH_DUMP = 0x40     #: one patch: bank, number, 426 bytes

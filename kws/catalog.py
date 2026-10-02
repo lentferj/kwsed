@@ -164,6 +164,9 @@ class Catalog:
                 seen[key] = (entry.bank_id, entry.kind, entry.number, entry.name)
         for key, name in self._live.items():
             if wanted in name.lower():
+                # Bank ids are "RAM1" .. "ROM11" and "CARD" -- no colon.
+                # An id with one would unpack wrong here; the catalog's
+                # bank_id comes from Bank.id, which strips spaces and uppercases.
                 bank_id, kind, number = key.split(":")
                 seen[key] = (bank_id, kind, int(number), name)
         return [seen[key] for key in sorted(seen)]

@@ -456,7 +456,7 @@ class WavestationBridge:
                 f"a patch is {records.PATCH_SIZE} bytes; got {len(data)}")
 
         try:
-            before = self.read_patch(entry.number, number, timeout=timeout)
+            before = self.read_patch(entry.sysex, number, timeout=timeout)
         except Exception as exc:
             raise DeviceError(
                 f"could not read {entry.label} patch {number} before "
@@ -492,7 +492,7 @@ class WavestationBridge:
         if not verify:
             return result
         try:
-            after = self.read_patch(entry.number, number, timeout=timeout)
+            after = self.read_patch(entry.sysex, number, timeout=timeout)
         except Exception as exc:
             result["verified"] = False
             result["mismatch"] = f"could not read it back ({exc})"

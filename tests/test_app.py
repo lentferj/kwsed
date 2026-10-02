@@ -107,3 +107,25 @@ class TestBothKindsAreListed:
             kinds = {kind for _number, kind in app._pairs}
             assert kinds == {banks.Kind.PERFORMANCE, banks.Kind.PATCH}
             assert len(app._pairs) == 24
+
+
+class TestDeviceInfoIsGated:
+    """`_info_worker` must respect `_busy` like the other workers.
+
+    `action_device_info` used to skip the check entirely, so pressing `i`
+    while a read was in flight ran `identify()` concurrently through the
+    same bridge -- which interleaves with the in-flight read and can steal
+    its reply.
+    """
+
+    async def test_pressing_i_while_busy_is_refused(self, app):
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._busy = True
+            before = app.device.identify_calls
+            app.action_device_info()
+            for _ in range(5):
+                await pilot.pause()
+            assert app.device.identify_calls == before, (
+                "identify must not run while the bridge is busy")
+            app._busy = False
