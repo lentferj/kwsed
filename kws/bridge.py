@@ -51,7 +51,7 @@ from __future__ import annotations
 import signal
 import sys
 import time
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import rtmidi  # noqa: E402
 
@@ -127,7 +127,7 @@ class DeviceRefused(DeviceError):
         )
 
 
-def _client(kind: str):
+def _client(kind: str) -> Any:
     try:
         return rtmidi.MidiIn() if kind == "in" else rtmidi.MidiOut()
     except Exception as exc:  # pragma: no cover - depends on the host
@@ -158,7 +158,7 @@ def likely_korg_ports() -> List[str]:
 
 
 def install_clean_exit(on_exit: Optional[Callable[[], None]] = None) -> None:
-    def handler(signum, _frame):  # pragma: no cover - signal path
+    def handler(signum: int, _frame: Any) -> None:  # pragma: no cover
         if on_exit is not None:
             try:
                 on_exit()
@@ -178,8 +178,8 @@ class WavestationBridge:
 
     def __init__(
         self,
-        midi_in,
-        midi_out,
+        midi_in: Any,
+        midi_out: Any,
         *,
         channel: int = 0,
         description: str = "",
@@ -288,7 +288,7 @@ class WavestationBridge:
         self._out.send_message(list(data))
         time.sleep(SEND_GAP)
 
-    def identify(self, *, timeout: float = 0.5) -> Optional[dict]:
+    def identify(self, *, timeout: float = 0.5) -> Optional[Dict[str, Any]]:
         """Ask who is there. One small message; makes no sound.
 
         The reply carries the unit's **global channel**, which every other
@@ -346,7 +346,11 @@ class WavestationBridge:
     # --- operations ----------------------------------------------------------
 
     def read_bank(
-        self, bank, kind: Optional[str] = None, *, timeout: Optional[float] = None
+        self,
+        bank: int | str,
+        kind: Optional[str] = None,
+        *,
+        timeout: Optional[float] = None,
     ) -> dumps.BulkDump:
         """Dump one bank. Read-only, and **makes no sound**.
 
@@ -366,6 +370,10 @@ class WavestationBridge:
         different.
         """
         entry = banks.bank(bank)
+        # A tuple of any length: the kind-less form accepts either dump, the
+        # other accepts exactly one, and the two branches assign different
+        # shapes to the same name.
+        wanted: Tuple[int, ...]
         if kind is None:
             wanted = (m.Function.ALL_PERFORMANCE_DUMP, m.Function.ALL_PATCH_DUMP)
             request = m.bulk_request(entry.sysex, self.channel)
@@ -412,7 +420,7 @@ class WavestationBridge:
         )
 
     def read_patch(
-        self, bank, number: int, *, timeout: Optional[float] = None
+        self, bank: int | str, number: int, *, timeout: Optional[float] = None
     ) -> bytes:
         """One patch's 426 bytes. Read-only, and makes no sound."""
         entry = banks.bank(bank)
@@ -449,14 +457,14 @@ class WavestationBridge:
 
     def write_patch(
         self,
-        bank,
+        bank: int | str,
         number: int,
         data: bytes,
         *,
         backup_dir: str,
         verify: bool = True,
         timeout: Optional[float] = None,
-    ) -> dict:
+    ) -> Dict[str, Any]:
         """Replace **one patch**. Destructive, and fenced like a bank write.
 
         Two messages, because one is not enough: a single patch dump lands
@@ -501,7 +509,7 @@ class WavestationBridge:
         self._send(m.single_patch_dump(entry.sysex, number, data, channel=self.channel))
         self._send(m.patch_write_command(entry.sysex, number, self.channel))
 
-        result = {
+        result: Dict[str, Any] = {
             "bank": entry.label,
             "number": number,
             "backup": saved,
@@ -569,7 +577,11 @@ class WavestationBridge:
         )
 
     def read_bank_names(
-        self, bank, kind: Optional[str] = None, *, timeout: Optional[float] = None
+        self,
+        bank: int | str,
+        kind: Optional[str] = None,
+        *,
+        timeout: Optional[float] = None,
     ) -> Tuple[str, Dict[int, str]]:
         """``(kind, {number: name})`` for one bank of one kind. Silent."""
         dump = self.read_bank(bank, kind, timeout=timeout)
@@ -601,19 +613,19 @@ class WavestationBridge:
     #: Only these banks accept a write. Confirmed twice: kwsed's own bank
     #: table marks RAM 1-3 and the Card writable, and Edisyn's Wavestation
     #: support lists the same four and no others.
-    def writable(self, bank) -> bool:
+    def writable(self, bank: int | str) -> bool:
         return banks.bank(bank).writable
 
     def write_bank(
         self,
-        bank,
+        bank: int | str,
         kind: str,
         data: bytes,
         *,
         backup_dir: str,
         verify: bool = True,
         timeout: Optional[float] = None,
-    ) -> dict:
+    ) -> Dict[str, Any]:
         """Replace a whole bank. **This destroys what is there.**
 
         The only thing in kwsed that writes to the instrument, and it is
@@ -677,7 +689,7 @@ class WavestationBridge:
         self._drain()
         self._send(m.frame_bulk(function, entry.sysex, data, channel=self.channel))
 
-        result = {
+        result: Dict[str, Any] = {
             "bank": entry.label,
             "kind": kind,
             "backup": saved,

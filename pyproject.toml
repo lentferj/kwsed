@@ -111,22 +111,47 @@ known-first-party = ["kws", "kwsed"]
 
 # --- mypy: type checking ----------------------------------------------------
 #
-# Non-strict. No module is --strict clean today, and strict-per-module would
-# mean editing annotated source to add type arguments. The flags below are the
-# strictness that costs nothing today; the rest of --strict is deliberately
-# off and can be dialled in per module later.
+# Strict, on the library. The relaxation below is narrow and deliberate: it
+# covers only the requirement that *every* function carry a signature, and
+# only outside kws/ and kwsed/.
+#
+# Annotating a test is close to no work. `def test_it_behaves():` says nothing
+# a type checker did not already learn from the assert, and requiring
+# `-> None` on 240 of them buys annotation noise and no checking. Inside the
+# library it is the opposite: a Textual callback or a bridge method reached
+# only from the framework is exactly where a wrong signature goes unnoticed,
+# because nothing calls it in a way mypy can see. So the library carries its
+# signatures and is checked for them; the tests are checked for everything
+# else.
 [tool.mypy]
 python_version = "3.11"
 files = ["kws", "kwsed", "tools", "tests"]
+strict = true
 ignore_missing_imports = true
 warn_unused_configs = true
-# These four add no findings on the current tree.
-warn_unused_ignores = true
-warn_redundant_casts = true
-no_implicit_optional = true
-warn_unreachable = true
 show_error_codes = true
 exclude = ['^kws/data/']
+
+[[tool.mypy.overrides]]
+# Listed rather than wildcarded. mypy names these modules after the file --
+# test_app, not tests.test_app, because neither directory is a package -- and
+# `test_*` is accepted as matching without actually being applied, with no
+# "unused section" note to warn that it did nothing. An explicit list cannot
+# fail quietly; a new test file will simply be checked strictly, which is the
+# safe direction to fail in.
+module = [
+    "test_app",
+    "test_bankbuild",
+    "test_banks_dumps",
+    "test_config_paths",
+    "test_favorites",
+    "test_messages",
+    "test_review_fixes",
+    "test_write",
+    "build_bank",
+    "extract_catalog",
+]
+disallow_untyped_defs = false
 
 # --- pytest and coverage ----------------------------------------------------
 [tool.pytest.ini_options]

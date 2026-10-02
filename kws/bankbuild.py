@@ -244,11 +244,22 @@ def build(
         # that only shows once steps quote: one physical step cannot hold
         # two different quote targets, and the second sequence to be written
         # silently took the first one's.
-        moved: dict = {}
+        moved: Dict[Tuple[str, int, int], int] = {}
         for (src_id, wave_bank, seq), slot in sorted(
             made.sequence_map.items(), key=lambda kv: kv[1]
         ):
             holder = sources[src_id]
+            # plan() rejects any patch whose wave sequence bank is missing, so
+            # a Plan reaching build() cannot name a sequence it has no bytes
+            # for. Raising rather than asserting: an assert disappears under
+            # -O, and this is the same "should have been caught while
+            # planning" condition the pool-full check below already raises.
+            if holder.waveseq is None:
+                raise ValueError(
+                    f"{src_id} has no wave sequence bank, but the plan carries "
+                    f"sequence {seq} from it. This should have been caught "
+                    f"while planning."
+                )
             chain = deps.walk_sequence(holder.waveseq, seq, bank_id=src_id)
             pool = (src_id, wave_bank)
             for old in chain.steps:
@@ -342,10 +353,13 @@ def build(
         for part in rec.performance_parts(record):
             if not part.used:
                 continue
-            key = (_bank_key(sources, part.bank, bank_id), part.patch)
-            if key in made.patch_map:
+            patch_key = (_bank_key(sources, part.bank, bank_id), part.patch)
+            if patch_key in made.patch_map:
                 rec.set_performance_part(
-                    record, part.index, bank=destination_bank, patch=made.patch_map[key]
+                    record,
+                    part.index,
+                    bank=destination_bank,
+                    patch=made.patch_map[patch_key],
                 )
         at = slot * rec.PERFORMANCE_SIZE
         performances[at : at + rec.PERFORMANCE_SIZE] = record

@@ -47,6 +47,7 @@ where ALSA reads it from 4, and the library dereferences whatever is there.
 import ctypes
 import ctypes.util
 import time
+from typing import Optional, Tuple
 
 __all__ = ["Sender", "available", "port_address"]
 
@@ -131,18 +132,26 @@ if _lib is not None:
     _lib.snd_strerror.restype = ctypes.c_char_p
 
 
-def _check(code, what):
+def _check(code: int, what: str) -> int:
     if code < 0:
         detail = _lib.snd_strerror(code).decode() if _lib is not None else str(code)
         raise OSError(f"{what}: {detail}")
     return code
 
 
-def _require_lib() -> None:
+def _require_lib() -> ctypes.CDLL:
+    """The loaded library, or a clear refusal.
+
+    **Returns** it rather than only asserting it is not None, so that every
+    ``snd_seq_*`` call below is on a handle the reader can see is real. The
+    check used to be a bare ``_require_lib()`` for its side effect, and
+    ``_lib.snd_seq_open`` was a statement about ``Optional[CDLL]``.
+    """
     if _lib is None:
         raise OSError(
             "no ALSA sequencer on this host; large dumps cannot be sent via kws.alsa"
         )
+    return _lib
 
 
 class Sender:
@@ -155,30 +164,30 @@ class Sender:
         buffer_size: int = 1 << 18,
         name: bytes = b"kwsed",
     ):
-        _require_lib()
-        self._seq = ctypes.c_void_p()
+        lib = _require_lib()
+        self._seq: Optional[ctypes.c_void_p] = ctypes.c_void_p()
         _check(
-            _lib.snd_seq_open(
+            lib.snd_seq_open(
                 ctypes.byref(self._seq), b"default", SND_SEQ_OPEN_OUTPUT, 0
             ),
             "snd_seq_open",
         )
-        _check(_lib.snd_seq_set_client_name(self._seq, name), "set_client_name")
+        _check(lib.snd_seq_set_client_name(self._seq, name), "set_client_name")
         # Two different limits, and both bite. The kernel-side *pool* is
         # how many event cells the client may hold; the userspace *output
         # buffer* is how large a single event may be before
         # snd_seq_event_output refuses it with EINVAL. Raising only the pool
         # leaves a bank dump still rejected.
         _check(
-            _lib.snd_seq_set_client_pool_output(self._seq, pool),
+            lib.snd_seq_set_client_pool_output(self._seq, pool),
             "set_client_pool_output",
         )
         _check(
-            _lib.snd_seq_set_output_buffer_size(self._seq, buffer_size),
+            lib.snd_seq_set_output_buffer_size(self._seq, buffer_size),
             "set_output_buffer_size",
         )
         self._port = _check(
-            _lib.snd_seq_create_simple_port(
+            lib.snd_seq_create_simple_port(
                 self._seq,
                 b"out",
                 SND_SEQ_PORT_CAP_READ | SND_SEQ_PORT_CAP_SUBS_READ,
@@ -187,7 +196,7 @@ class Sender:
             "create_simple_port",
         )
         _check(
-            _lib.snd_seq_connect_to(self._seq, self._port, client, port), "connect_to"
+            lib.snd_seq_connect_to(self._seq, self._port, client, port), "connect_to"
         )
 
     #: Bytes per ALSA event. A System Exclusive message is just a byte
@@ -250,26 +259,31 @@ class Sender:
         # 31250 baud, and the far end drains it no faster than the wire
         # allows. Wait and offer it again rather than failing the write.
         deadline = time.time() + 30.0
+        lib = _require_lib()
         while True:
-            rc = _lib.snd_seq_event_output_direct(self._seq, ctypes.byref(ev))
+            rc = lib.snd_seq_event_output_direct(self._seq, ctypes.byref(ev))
             if rc >= 0:
                 return
             if rc != -11 or time.time() > deadline:  # -EAGAIN
                 _check(rc, "event_output_direct")
             time.sleep(0.002)
 
-    def close(self):
-        if self._seq:
+    def close(self) -> None:
+        if self._seq and _lib is not None:
             _lib.snd_seq_close(self._seq)
             self._seq = None
 
 
-def port_address(name: str):
+def port_address(name: Optional[str]) -> Optional[Tuple[int, int]]:
     """``(client, port)`` from an ALSA port name, or None.
 
     python-rtmidi's ALSA backend ends every port name with the sequencer
     address -- "U6MIDI Pro:U6MIDI Pro MIDI 1 44:0" -- which is the only
     thing tying a name the user typed to a client this module can open.
+
+    ``name`` is Optional because a bridge with no description yields ``""``
+    and a caller may well have nothing at all; both are declined rather than
+    raising.
     """
     import re
 

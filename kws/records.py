@@ -53,7 +53,7 @@ sequence; the real figure is about a fifth.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 __all__ = [
     "PERFORMANCE_SIZE",
@@ -245,7 +245,7 @@ def sequence_names(bank: Sequence[int]) -> List[str]:
     return out
 
 
-def sequence_header(bank: Sequence[int], number: int) -> dict:
+def sequence_header(bank: Sequence[int], number: int) -> Dict[str, Any]:
     """One wave sequence's header, including the step it starts at."""
     if not 0 <= number < SEQUENCES_PER_BANK:
         raise ValueError(f"sequence {number} is outside 0-{SEQUENCES_PER_BANK - 1}")
@@ -260,7 +260,7 @@ def sequence_header(bank: Sequence[int], number: int) -> dict:
     }
 
 
-def step(bank: Sequence[int], index: int) -> dict:
+def step(bank: Sequence[int], index: int) -> Dict[str, Any]:
     """One step out of the bank's shared pool of 501."""
     if not 0 <= index < STEPS_PER_BANK:
         raise ValueError(f"step {index} is outside 0-{STEPS_PER_BANK - 1}")

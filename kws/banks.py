@@ -160,7 +160,7 @@ class Slot:
         return f"{self.bank.label} {self.kind} {self.number:02d}"
 
 
-def bank(which) -> Bank:
+def bank(which: int | str) -> Bank:
     """A bank by its System Exclusive number or its short id."""
     # `isinstance(True, int)` is True, and `bank(True)` would return RAM 2 --
     # the same shape of mistake config.load_channel guards against at the
@@ -196,14 +196,14 @@ def count_for(kind: str) -> int:
     raise LookupError(f"no kind {kind!r}; have {Kind.PERFORMANCE}, {Kind.PATCH}")
 
 
-def slots(which, kind: str) -> List[Slot]:
+def slots(which: int | str, kind: str) -> List[Slot]:
     entry = bank(which)
     return [
         Slot(bank=entry, kind=kind, number=index) for index in range(count_for(kind))
     ]
 
 
-def slot(which, kind: str, number: int) -> Slot:
+def slot(which: int | str, kind: str, number: int) -> Slot:
     entry = bank(which)
     total = count_for(kind)
     if not 0 <= number < total:

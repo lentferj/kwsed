@@ -48,7 +48,7 @@ import datetime
 import json
 import os
 import re
-from typing import Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence
 
 __all__ = [
     "FORMAT",
@@ -169,12 +169,12 @@ def load(path: str) -> bytes:
         return handle.read()
 
 
-def describe(path: str) -> dict:
+def describe(path: str) -> Dict[str, Any]:
     """A backup's sidecar, or what can be worked out without one."""
     sidecar = os.path.splitext(path)[0] + ".json"
     if os.path.exists(sidecar):
         with open(sidecar, encoding="utf-8") as handle:
-            found = json.load(handle)
+            found: Dict[str, Any] = json.load(handle)
         if found.get("format", 0) > FORMAT:
             raise BackupError(
                 f"{sidecar} was written by a newer kwsed (format "
@@ -195,7 +195,7 @@ def describe(path: str) -> dict:
     }
 
 
-def list_backups(directory: str) -> List[dict]:
+def list_backups(directory: str) -> List[Dict[str, Any]]:
     """Every backup in a directory, newest first."""
     if not os.path.isdir(directory):
         return []

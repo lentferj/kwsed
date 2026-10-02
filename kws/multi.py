@@ -84,7 +84,7 @@ class Part:
 class Multiset:
     number: int
     name: str
-    parts: tuple
+    parts: tuple[Part, ...]
 
     @property
     def display(self) -> str:

@@ -36,12 +36,15 @@ from __future__ import annotations
 
 import os
 import sys
-from typing import Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 try:
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
-    tomllib = None
+    # Python 3.11 is the floor in pyproject.toml, so this branch is only here
+    # to say "no cache" rather than crash. mypy cannot see that the name is
+    # rebound to None on purpose.
+    tomllib = None  # type: ignore[assignment]
 
 __all__ = [
     "DEFAULT_PATH",
@@ -58,7 +61,7 @@ DEFAULT_PATH = "config.toml"
 _warned = False
 
 
-def _read(path: str) -> Tuple[dict, str]:
+def _read(path: str) -> Tuple[Dict[str, Any], str]:
     if not os.path.exists(path) or tomllib is None:
         return {}, "ok"
     try:
@@ -105,7 +108,7 @@ def _toml_string(value: str) -> str:
     return "".join(out)
 
 
-def _update(path: str, **changes) -> None:
+def _update(path: str, **changes: Any) -> None:
     global _warned
     data, status = _read(path)
     if status == "unreadable":

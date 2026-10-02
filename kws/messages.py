@@ -53,7 +53,7 @@ and every record then begins with a legible name.
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 __all__ = [
     "SYSEX_START",
@@ -335,7 +335,7 @@ class Packet:
             f"{len(self.payload)} bytes)"
         )
 
-    def __eq__(self, other) -> bool:
+    def __eq__(self, other: object) -> bool:
         return (
             isinstance(other, Packet)
             and other.channel == self.channel
@@ -445,7 +445,7 @@ def identity_request() -> bytes:
     return bytes([SYSEX_START, 0x7E, 0x7F, 0x06, 0x01, SYSEX_END])
 
 
-def identity_reply_fields(message: Sequence[int]) -> Optional[dict]:
+def identity_reply_fields(message: Sequence[int]) -> Optional[Dict[str, Any]]:
     """Fields of an Identity Reply, or ``None``.
 
     Matches the reply sub-ID (``02``) and never the request (``01``), which

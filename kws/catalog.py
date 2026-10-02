@@ -160,7 +160,10 @@ class Catalog:
         wanted = needle.strip().lower()
         if not wanted:
             return []
-        seen: Dict[str, Tuple[str, int, str]] = {}
+        # Four fields, not three: bank id, kind, number, name. The annotation
+        # said Tuple[str, int, str] and so described a tuple the code has never
+        # built -- strict mode found it, and nothing had read it before.
+        seen: Dict[str, Tuple[str, str, int, str]] = {}
         for key, entry in self._entries.items():
             if wanted in entry.name.lower():
                 seen[key] = (entry.bank_id, entry.kind, entry.number, entry.name)

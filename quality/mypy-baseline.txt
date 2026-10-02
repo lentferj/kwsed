@@ -3,33 +3,188 @@
 # Line numbers are excluded on purpose -- see the module
 # docstring. Regenerate with:
 #     python quality/check_mypy.py --write
-kws/alsa.py|union-attr|Item "None" of "CDLL | None" has no attribute "snd_seq_connect_to"
-kws/alsa.py|union-attr|Item "None" of "CDLL | None" has no attribute "snd_seq_create_simple_port"
-kws/alsa.py|union-attr|Item "None" of "CDLL | None" has no attribute "snd_seq_event_output_direct"
-kws/alsa.py|union-attr|Item "None" of "CDLL | None" has no attribute "snd_seq_open"
-kws/alsa.py|union-attr|Item "None" of "CDLL | None" has no attribute "snd_seq_set_client_name"
-kws/alsa.py|union-attr|Item "None" of "CDLL | None" has no attribute "snd_seq_set_client_pool_output"
-kws/alsa.py|union-attr|Item "None" of "CDLL | None" has no attribute "snd_seq_set_output_buffer_size"
-kws/bankbuild.py|arg-type|Argument 1 to "sequence_header" has incompatible type "bytes | None"; expected "Sequence[int]"
-kws/bankbuild.py|arg-type|Argument 1 to "step" has incompatible type "bytes | None"; expected "Sequence[int]"
-kws/bankbuild.py|arg-type|Argument 1 to "walk_sequence" has incompatible type "bytes | None"; expected "Sequence[int]"
-kws/bankbuild.py|assignment|Incompatible types in assignment (expression has type "tuple[str, int]", variable has type "tuple[str, int, int]")
-kws/bankbuild.py|index|Value of type "bytes | None" is not indexable
-kws/bankbuild.py|index|Value of type "bytes | None" is not indexable
-kws/bankbuild.py|index|Value of type "bytes | None" is not indexable
-kws/bankbuild.py|unreachable|Statement is unreachable
-kws/bridge.py|assignment|Incompatible types in assignment (expression has type "bool", target has type "str | None")
-kws/bridge.py|assignment|Incompatible types in assignment (expression has type "bool", target has type "str | None")
-kws/bridge.py|assignment|Incompatible types in assignment (expression has type "tuple[int]", variable has type "tuple[int, int]")
-kws/catalog.py|assignment|Incompatible types in assignment (expression has type "tuple[str, str, int, str]", target has type "tuple[str, int, str]")
-kws/catalog.py|assignment|Incompatible types in assignment (expression has type "tuple[str, str, int, str]", target has type "tuple[str, int, str]")
-kws/catalog.py|misc|List comprehension has incompatible type List[tuple[str, int, str]]; expected List[tuple[str, str, int, str]]
-kws/config.py|assignment|Incompatible types in assignment (expression has type "None", variable has type Module)
+kws/favorites.py|no-any-return|Returning Any from function declared to return "int"
+kws/favorites.py|no-untyped-call|Call to untyped function "fetchone" in typed context
+kws/favorites.py|no-untyped-call|Call to untyped function "fetchone" in typed context
+kws/favorites.py|no-untyped-call|Call to untyped function "fetchone" in typed context
+kws/favorites.py|no-untyped-call|Call to untyped function "fetchone" in typed context
+kws/favorites.py|no-untyped-call|Call to untyped function "fetchone" in typed context
+kws/favorites.py|no-untyped-def|Function is missing a return type annotation
+kws/favorites.py|no-untyped-def|Function is missing a return type annotation
+kws/favorites.py|no-untyped-def|Function is missing a type annotation
+kws/favorites.py|no-untyped-def|Function is missing a type annotation for one or more parameters
+kws/favorites.py|no-untyped-def|Function is missing a type annotation for one or more parameters
+kws/favorites.py|no-untyped-def|Function is missing a type annotation for one or more parameters
+kws/favorites.py|no-untyped-def|Function is missing a type annotation for one or more parameters
+kws/favorites.py|no-untyped-def|Function is missing a type annotation for one or more parameters
+kws/favorites.py|no-untyped-def|Function is missing a type annotation for one or more parameters
+kws/favorites.py|no-untyped-def|Function is missing a type annotation for one or more parameters
+kws/favorites.py|type-arg|Missing type arguments for generic type "dict"
+kws/favorites.py|type-arg|Missing type arguments for generic type "set"
+kws/favorites.py|type-arg|Missing type arguments for generic type "set"
 kws/favorites.py|var-annotated|Need type annotation for "seen" (hint: "seen: list[<type>] = ...")
 kwsed/app.py|arg-type|Argument 2 to "save_channel" has incompatible type "str | None"; expected "str"
 kwsed/app.py|assignment|Incompatible types in assignment (expression has type "WavestationBridge", variable has type "DemoDevice")
 kwsed/app.py|assignment|Incompatible types in assignment (expression has type "WavestationBridge", variable has type "DemoDevice")
+kwsed/app.py|no-any-return|Returning Any from function declared to return "set[Any]"
+kwsed/app.py|no-untyped-call|Call to untyped function "_all_favourites" in typed context
+kwsed/app.py|no-untyped-call|Call to untyped function "_cursor_entry" in typed context
+kwsed/app.py|no-untyped-call|Call to untyped function "_favourite_under_cursor" in typed context
+kwsed/app.py|no-untyped-call|Call to untyped function "_favourite_under_cursor" in typed context
+kwsed/app.py|no-untyped-call|Call to untyped function "_visible" in typed context
+kwsed/app.py|no-untyped-def|Function is missing a return type annotation
+kwsed/app.py|no-untyped-def|Function is missing a return type annotation
+kwsed/app.py|no-untyped-def|Function is missing a return type annotation
+kwsed/app.py|no-untyped-def|Function is missing a type annotation
+kwsed/app.py|no-untyped-def|Function is missing a type annotation
+kwsed/app.py|no-untyped-def|Function is missing a type annotation
+kwsed/app.py|no-untyped-def|Function is missing a type annotation
+kwsed/app.py|no-untyped-def|Function is missing a type annotation for one or more parameters
+kwsed/app.py|no-untyped-def|Function is missing a type annotation for one or more parameters
+kwsed/app.py|no-untyped-def|Function is missing a type annotation for one or more parameters
+kwsed/app.py|no-untyped-def|Function is missing a type annotation for one or more parameters
+kwsed/app.py|no-untyped-def|Function is missing a type annotation for one or more parameters
+kwsed/app.py|no-untyped-def|Function is missing a type annotation for one or more parameters
+kwsed/app.py|no-untyped-def|Function is missing a type annotation for one or more parameters
+kwsed/app.py|no-untyped-def|Function is missing a type annotation for one or more parameters
+kwsed/app.py|no-untyped-def|Function is missing a type annotation for one or more parameters
+kwsed/app.py|no-untyped-def|Function is missing a type annotation for one or more parameters
+kwsed/app.py|type-arg|Missing type arguments for generic type "App"
+kwsed/app.py|type-arg|Missing type arguments for generic type "dict"
+kwsed/app.py|type-arg|Missing type arguments for generic type "set"
+kwsed/app.py|type-arg|Missing type arguments for generic type "tuple"
 kwsed/app.py|union-attr|Item "None" of "Packet | None" has no attribute "data"
+kwsed/app.py|var-annotated|Need type annotation for "out" (hint: "out: list[<type>] = ...")
+kwsed/app.py|var-annotated|Need type annotation for "wanted" (hint: "wanted: dict[<type>, <type>] = ...")
+kwsed/cli.py|no-untyped-call|Call to untyped function "_build_device" in typed context
+kwsed/cli.py|no-untyped-def|Function is missing a type annotation
+kwsed/cli.py|no-untyped-def|Function is missing a type annotation for one or more parameters
+kwsed/cli.py|no-untyped-def|Function is missing a type annotation for one or more parameters
+kwsed/cli.py|no-untyped-def|Function is missing a type annotation for one or more parameters
+kwsed/cli.py|no-untyped-def|Function is missing a type annotation for one or more parameters
+kwsed/cli.py|no-untyped-def|Function is missing a type annotation for one or more parameters
+kwsed/cli.py|no-untyped-def|Function is missing a type annotation for one or more parameters
+kwsed/cli.py|no-untyped-def|Function is missing a type annotation for one or more parameters
+kwsed/cli.py|no-untyped-def|Function is missing a type annotation for one or more parameters
+kwsed/cli.py|no-untyped-def|Function is missing a type annotation for one or more parameters
+kwsed/cli.py|no-untyped-def|Function is missing a type annotation for one or more parameters
+kwsed/cli.py|type-arg|Missing type arguments for generic type "Callable"
 kwsed/cli.py|union-attr|Item "None" of "Packet | None" has no attribute "data"
 kwsed/demo.py|arg-type|Argument 1 to "parse" has incompatible type "bytes | None"; expected "Sequence[int]"
+kwsed/demo.py|no-untyped-def|Function is missing a return type annotation
+kwsed/demo.py|no-untyped-def|Function is missing a type annotation for one or more parameters
+kwsed/demo.py|no-untyped-def|Function is missing a type annotation for one or more parameters
+kwsed/demo.py|type-arg|Missing type arguments for generic type "dict"
+tests/test_bankbuild.py|arg-type|Argument 1 to "step" has incompatible type "bytes | None"; expected "Sequence[int]"
+tests/test_bankbuild.py|arg-type|Argument 1 to "walk_sequence" has incompatible type "bytes | None"; expected "Sequence[int]"
+tests/test_bankbuild.py|no-untyped-call|Call to untyped function "_build" in typed context
+tests/test_bankbuild.py|no-untyped-call|Call to untyped function "_build" in typed context
+tests/test_bankbuild.py|no-untyped-call|Call to untyped function "_build" in typed context
+tests/test_bankbuild.py|no-untyped-call|Call to untyped function "_sources" in typed context
+tests/test_bankbuild.py|no-untyped-call|Call to untyped function "_sources" in typed context
+tests/test_bankbuild.py|no-untyped-call|Call to untyped function "_sources" in typed context
+tests/test_bankbuild.py|no-untyped-call|Call to untyped function "_sources" in typed context
+tests/test_bankbuild.py|no-untyped-call|Call to untyped function "_sources" in typed context
+tests/test_bankbuild.py|no-untyped-call|Call to untyped function "_sources" in typed context
+tests/test_bankbuild.py|no-untyped-call|Call to untyped function "_sources" in typed context
+tests/test_bankbuild.py|no-untyped-call|Call to untyped function "_sources" in typed context
+tests/test_bankbuild.py|no-untyped-call|Call to untyped function "_sources" in typed context
+tests/test_bankbuild.py|no-untyped-call|Call to untyped function "_sources" in typed context
+tests/test_bankbuild.py|no-untyped-call|Call to untyped function "_sources" in typed context
+tests/test_bankbuild.py|no-untyped-call|Call to untyped function "_sources" in typed context
+tests/test_bankbuild.py|no-untyped-call|Call to untyped function "_sources" in typed context
+tests/test_bankbuild.py|no-untyped-call|Call to untyped function "make_patch" in typed context
+tests/test_bankbuild.py|no-untyped-call|Call to untyped function "make_patch" in typed context
+tests/test_bankbuild.py|no-untyped-call|Call to untyped function "make_patch" in typed context
+tests/test_bankbuild.py|no-untyped-call|Call to untyped function "make_patch" in typed context
+tests/test_bankbuild.py|no-untyped-call|Call to untyped function "make_patch" in typed context
+tests/test_bankbuild.py|no-untyped-call|Call to untyped function "make_patch" in typed context
+tests/test_bankbuild.py|no-untyped-call|Call to untyped function "make_patch" in typed context
+tests/test_bankbuild.py|no-untyped-call|Call to untyped function "make_patch" in typed context
+tests/test_bankbuild.py|no-untyped-call|Call to untyped function "make_patch" in typed context
+tests/test_bankbuild.py|no-untyped-call|Call to untyped function "make_performance" in typed context
+tests/test_bankbuild.py|no-untyped-call|Call to untyped function "make_performance" in typed context
+tests/test_bankbuild.py|no-untyped-call|Call to untyped function "make_performance" in typed context
+tests/test_bankbuild.py|no-untyped-call|Call to untyped function "make_performance" in typed context
+tests/test_bankbuild.py|no-untyped-call|Call to untyped function "make_performance" in typed context
+tests/test_bankbuild.py|no-untyped-call|Call to untyped function "make_waveseq" in typed context
+tests/test_bankbuild.py|no-untyped-call|Call to untyped function "make_waveseq" in typed context
+tests/test_bankbuild.py|no-untyped-call|Call to untyped function "make_waveseq" in typed context
+tests/test_bankbuild.py|no-untyped-call|Call to untyped function "make_waveseq" in typed context
+tests/test_bankbuild.py|no-untyped-call|Call to untyped function "make_waveseq" in typed context
+tests/test_bankbuild.py|no-untyped-call|Call to untyped function "make_waveseq" in typed context
+tests/test_bankbuild.py|no-untyped-call|Call to untyped function "make_waveseq" in typed context
+tests/test_banks_dumps.py|arg-type|Argument 1 to "parse_bulk" has incompatible type "Packet | None"; expected "Packet"
+tests/test_banks_dumps.py|arg-type|Argument 1 to "parse_bulk" has incompatible type "Packet | None"; expected "Packet"
+tests/test_banks_dumps.py|arg-type|Argument 1 to "parse_bulk" has incompatible type "Packet | None"; expected "Packet"
+tests/test_banks_dumps.py|no-untyped-call|Call to untyped function "_bulk" in typed context
+tests/test_banks_dumps.py|no-untyped-call|Call to untyped function "_bulk" in typed context
+tests/test_banks_dumps.py|no-untyped-call|Call to untyped function "_bulk" in typed context
+tests/test_banks_dumps.py|no-untyped-call|Call to untyped function "_bulk" in typed context
+tests/test_banks_dumps.py|no-untyped-call|Call to untyped function "_bulk" in typed context
+tests/test_config_paths.py|no-untyped-call|Call to untyped function "_config_saves" in typed context
+tests/test_config_paths.py|no-untyped-call|Call to untyped function "_config_saves" in typed context
+tests/test_config_paths.py|no-untyped-call|Call to untyped function "_test_sources" in typed context
+tests/test_favorites.py|no-untyped-call|Call to untyped function "_loaders" in typed context
+tests/test_favorites.py|no-untyped-call|Call to untyped function "_loaders" in typed context
+tests/test_favorites.py|no-untyped-call|Call to untyped function "_loaders" in typed context
+tests/test_favorites.py|union-attr|Item "None" of "Favorite | None" has no attribute "added"
+tests/test_favorites.py|union-attr|Item "None" of "Favorite | None" has no attribute "name"
+tests/test_favorites.py|union-attr|Item "None" of "Favorite | None" has no attribute "name"
+tests/test_favorites.py|union-attr|Item "None" of "Favorite | None" has no attribute "note"
+tests/test_favorites.py|union-attr|Item "None" of "Favorite | None" has no attribute "rating"
+tests/test_favorites.py|union-attr|Item "None" of "Favorite | None" has no attribute "tags"
+tests/test_favorites.py|union-attr|Item "tuple[str, ...]" of "Binding | tuple[str, str] | tuple[str, str, str]" has no attribute "key"
+tests/test_favorites.py|union-attr|Item "tuple[str, ...]" of "Binding | tuple[str, str] | tuple[str, str, str]" has no attribute "key"
+tests/test_favorites.py|union-attr|Item "tuple[str, ...]" of "Binding | tuple[str, str] | tuple[str, str, str]" has no attribute "key"
+tests/test_messages.py|index|Value of type "dict[str, Any] | None" is not indexable
+tests/test_messages.py|index|Value of type "dict[str, Any] | None" is not indexable
+tests/test_messages.py|union-attr|Item "None" of "Packet | None" has no attribute "bank"
+tests/test_messages.py|union-attr|Item "None" of "Packet | None" has no attribute "data"
+tests/test_messages.py|union-attr|Item "None" of "Packet | None" has no attribute "data"
+tests/test_messages.py|union-attr|Item "None" of "Packet | None" has no attribute "is_error"
+tests/test_review_fixes.py|no-untyped-call|Call to untyped function "_build" in typed context
+tests/test_review_fixes.py|no-untyped-call|Call to untyped function "_build" in typed context
+tests/test_review_fixes.py|no-untyped-call|Call to untyped function "_build" in typed context
+tests/test_review_fixes.py|no-untyped-call|Call to untyped function "_build" in typed context
+tests/test_review_fixes.py|no-untyped-call|Call to untyped function "_occupied" in typed context
+tests/test_review_fixes.py|no-untyped-call|Call to untyped function "_occupied" in typed context
+tests/test_review_fixes.py|no-untyped-call|Call to untyped function "_occupied" in typed context
+tests/test_review_fixes.py|no-untyped-call|Call to untyped function "_patch" in typed context
+tests/test_review_fixes.py|no-untyped-call|Call to untyped function "_patch" in typed context
+tests/test_review_fixes.py|no-untyped-call|Call to untyped function "_patch" in typed context
+tests/test_review_fixes.py|no-untyped-call|Call to untyped function "_sources" in typed context
+tests/test_review_fixes.py|no-untyped-call|Call to untyped function "_sources" in typed context
+tests/test_review_fixes.py|no-untyped-call|Call to untyped function "_sources" in typed context
+tests/test_review_fixes.py|no-untyped-call|Call to untyped function "_waveseq" in typed context
+tests/test_review_fixes.py|no-untyped-call|Call to untyped function "_waveseq" in typed context
+tests/test_review_fixes.py|no-untyped-call|Call to untyped function "_waveseq" in typed context
+tests/test_write.py|attr-defined|"WavestationBridge" has no attribute "DUMP_TIMEOUT"
+tests/test_write.py|method-assign|Cannot assign to a method
+tests/test_write.py|no-untyped-call|Call to untyped function "FakeIn" in typed context
+tests/test_write.py|no-untyped-call|Call to untyped function "FakeOut" in typed context
+tests/test_write.py|no-untyped-call|Call to untyped function "In" in typed context
+tests/test_write.py|no-untyped-call|Call to untyped function "Out" in typed context
+tests/test_write.py|no-untyped-call|Call to untyped function "Unit" in typed context
+tests/test_write.py|no-untyped-call|Call to untyped function "Unit" in typed context
+tests/test_write.py|no-untyped-call|Call to untyped function "_bridge" in typed context
+tests/test_write.py|no-untyped-call|Call to untyped function "_bridge" in typed context
+tests/test_write.py|no-untyped-call|Call to untyped function "_bridge" in typed context
+tests/test_write.py|no-untyped-call|Call to untyped function "_dump" in typed context
+tests/test_write.py|no-untyped-call|Call to untyped function "_dump" in typed context
+tests/test_write.py|no-untyped-call|Call to untyped function "_dump" in typed context
+tests/test_write.py|no-untyped-call|Call to untyped function "_screen" in typed context
+tests/test_write.py|no-untyped-call|Call to untyped function "_screen" in typed context
+tests/test_write.py|no-untyped-call|Call to untyped function "_screen" in typed context
+tests/test_write.py|no-untyped-call|Call to untyped function "_screen" in typed context
+tests/test_write.py|no-untyped-call|Call to untyped function "_unit" in typed context
+tests/test_write.py|no-untyped-call|Call to untyped function "_unit" in typed context
+tests/test_write.py|union-attr|Item "None" of "Packet | None" has no attribute "data"
+tests/test_write.py|union-attr|Item "None" of "Packet | None" has no attribute "data"
+tests/test_write.py|union-attr|Item "tuple[str, ...]" of "Binding | tuple[str, str] | tuple[str, str, str]" has no attribute "action"
+tests/test_write.py|union-attr|Item "tuple[str, ...]" of "Binding | tuple[str, str] | tuple[str, str, str]" has no attribute "key"
+tools/build_bank.py|no-untyped-call|Call to untyped function "_load" in typed context
+tools/build_bank.py|no-untyped-call|Call to untyped function "main" in typed context
+tools/extract_catalog.py|no-untyped-def|Function is missing a return type annotation
+tools/extract_catalog.py|type-arg|Missing type arguments for generic type "dict"
 tools/extract_catalog.py|var-annotated|Need type annotation for "kinds" (hint: "kinds: dict[<type>, <type>] = ...")
