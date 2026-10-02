@@ -35,11 +35,14 @@ def _table(rows: List[List[str]], headers: List[str]) -> str:
     for row in rows:
         for index, cell in enumerate(row):
             widths[index] = max(widths[index], len(cell))
-    out = ["  ".join(h.ljust(widths[i]) for i, h in enumerate(headers)).rstrip(),
-           "  ".join("-" * widths[i] for i in range(len(headers)))]
+    out = [
+        "  ".join(h.ljust(widths[i]) for i, h in enumerate(headers)).rstrip(),
+        "  ".join("-" * widths[i] for i in range(len(headers))),
+    ]
     for row in rows:
-        out.append("  ".join(cell.ljust(widths[i])
-                             for i, cell in enumerate(row)).rstrip())
+        out.append(
+            "  ".join(cell.ljust(widths[i]) for i, cell in enumerate(row)).rstrip()
+        )
     return "\n".join(out)
 
 
@@ -54,14 +57,19 @@ def _cmd_banks(_device, args) -> None:
         named = {}
         for kind in (banks.Kind.PERFORMANCE, banks.Kind.PATCH):
             named[kind] = sum(
-                1 for n in range(banks.count_for(kind))
-                if catalog.name(entry.id, kind, n))
-        rows.append([
-            str(entry.number), entry.label,
-            f"{named[banks.Kind.PERFORMANCE]}/{banks.PERFORMANCES_PER_BANK}",
-            f"{named[banks.Kind.PATCH]}/{banks.PATCHES_PER_BANK}",
-            "writable" if entry.writable else "ROM",
-        ])
+                1
+                for n in range(banks.count_for(kind))
+                if catalog.name(entry.id, kind, n)
+            )
+        rows.append(
+            [
+                str(entry.number),
+                entry.label,
+                f"{named[banks.Kind.PERFORMANCE]}/{banks.PERFORMANCES_PER_BANK}",
+                f"{named[banks.Kind.PATCH]}/{banks.PATCHES_PER_BANK}",
+                "writable" if entry.writable else "ROM",
+            ]
+        )
     print(_table(rows, ["#", "bank", "performances", "patches", ""]))
 
 
@@ -70,8 +78,12 @@ def _cmd_list(_device, args) -> None:
     entry = banks.bank(args.bank)
     rows = []
     for item in banks.slots(entry.number, args.kind):
-        rows.append([f"{item.number:02d}",
-                     catalog.display_name(entry.id, args.kind, item.number)])
+        rows.append(
+            [
+                f"{item.number:02d}",
+                catalog.display_name(entry.id, args.kind, item.number),
+            ]
+        )
     print(f"{entry.label} — {_plural(args.kind)}\n")
     print(_table(rows, ["#", "name"]))
 
@@ -82,8 +94,9 @@ def _cmd_find(_device, args) -> None:
     if not hits:
         print(f"nothing matching {args.name!r}", file=sys.stderr)
         return
-    rows = [[bank_id, kind, f"{number:02d}", name]
-            for bank_id, kind, number, name in hits]
+    rows = [
+        [bank_id, kind, f"{number:02d}", name] for bank_id, kind, number, name in hits
+    ]
     print(_table(rows, ["bank", "kind", "#", "name"]))
 
 
@@ -108,15 +121,19 @@ def _cmd_status(device, _args) -> None:
     if fields is None:
         raise SystemExit("error: nothing answered an Identity Request.")
     print(f"port            {device.description}")
-    print(f"manufacturer    {fields['manufacturer']:#04x}"
-          f"{'  (Korg)' if fields['is_korg'] else ''}")
-    print(f"family          {fields['family']}"
-          f"{'  (Wavestation)' if fields['is_wavestation'] else ''}")
+    print(
+        f"manufacturer    {fields['manufacturer']:#04x}"
+        f"{'  (Korg)' if fields['is_korg'] else ''}"
+    )
+    print(
+        f"family          {fields['family']}"
+        f"{'  (Wavestation)' if fields['is_wavestation'] else ''}"
+    )
     print(f"global channel  {fields['channel'] + 1}")
 
 
 def _plural(kind: str) -> str:
-    """"patch" pluralises to "patches", not "patchs"."""
+    """ "patch" pluralises to "patches", not "patchs"."""
     if kind == "waveseq":
         return "wave sequences"
     return f"{kind}es" if kind.endswith("ch") else f"{kind}s"
@@ -134,24 +151,27 @@ def _cmd_dump(device, args) -> None:
     dump = device.read_bank(args.bank, args.kind)
     catalog = _catalog(args)
     names = dump.names()
-    print(f"{dump.bank.label} — {_plural(dump.kind)} "
-          f"({len(names)} named of {dump.count})")
+    print(
+        f"{dump.bank.label} — {_plural(dump.kind)} ({len(names)} named of {dump.count})"
+    )
     rows = []
     for number in sorted(names):
         printed = catalog.name(dump.bank.id, dump.kind, number) or ""
         live = names[number]
-        rows.append([f"{number:02d}", live, printed,
-                     "*" if printed and printed != live else ""])
+        rows.append(
+            [f"{number:02d}", live, printed, "*" if printed and printed != live else ""]
+        )
     print(_table(rows, ["#", "on the unit", "in the catalog", ""]))
 
 
 def _cmd_select(device, args) -> None:
     """Select a sound. **This changes what the unit is playing.**"""
     item = banks.slot(args.bank, args.kind, args.number)
-    device.select(item, channel=None if args.channel is None
-                  else args.channel - 1)
-    print(f"sent bank select LSB {item.bank.sysex} and program change "
-          f"{item.number} for {item}")
+    device.select(item, channel=None if args.channel is None else args.channel - 1)
+    print(
+        f"sent bank select LSB {item.bank.sysex} and program change "
+        f"{item.number} for {item}"
+    )
     print("Which of the twelve banks a Bank Select actually reaches is NOT")
     print("established (see TODO.md), so treat this as a best effort.")
 
@@ -167,15 +187,19 @@ def _cmd_multi(device, args) -> int:
         used = [p for p in entry.parts if p.used]
         if not used and not args.all:
             continue
-        print(f"\n{entry.number:02d}  {entry.name or '(unnamed)'}"
-              f"   {len(used)} channel(s)")
+        print(
+            f"\n{entry.number:02d}  {entry.name or '(unnamed)'}"
+            f"   {len(used)} channel(s)"
+        )
         for part in used:
             try:
                 label = bk.by_sysex(part.bank).label
             except LookupError:
                 label = f"bank {part.bank}"
-            print(f"    ch {part.channel:2d}  {label:7s} perf "
-                  f"{part.performance:02d}  level {part.level}")
+            print(
+                f"    ch {part.channel:2d}  {label:7s} perf "
+                f"{part.performance:02d}  level {part.level}"
+            )
     return 0
 
 
@@ -198,16 +222,24 @@ def _cmd_send(device, args) -> int:
     if not packets:
         print(f"{args.file} holds no Wavestation message kwsed recognises")
         return 2
-    sendable = [p for p in packets if p.function in (
-        m.Function.ALL_PATCH_DUMP, m.Function.ALL_PERFORMANCE_DUMP,
-        m.Function.ALL_WAVESEQ_DUMP)]
+    sendable = [
+        p
+        for p in packets
+        if p.function
+        in (
+            m.Function.ALL_PATCH_DUMP,
+            m.Function.ALL_PERFORMANCE_DUMP,
+            m.Function.ALL_WAVESEQ_DUMP,
+        )
+    ]
     if not sendable:
-        print(f"{args.file} is a {packets[0].function_name}, which kwsed "
-              f"does not send")
+        print(f"{args.file} is a {packets[0].function_name}, which kwsed does not send")
         return 2
     if len(sendable) > 1:
-        print(f"{args.file} holds {len(sendable)} bank dumps; only the "
-              f"first ({sendable[0].function_name}) will be sent")
+        print(
+            f"{args.file} holds {len(sendable)} bank dumps; only the "
+            f"first ({sendable[0].function_name}) will be sent"
+        )
     packet = sendable[0]
     kinds = {
         m.Function.ALL_PATCH_DUMP: bk.Kind.PATCH,
@@ -215,21 +247,26 @@ def _cmd_send(device, args) -> int:
         m.Function.ALL_WAVESEQ_DUMP: "waveseq",
     }
     kind = kinds[packet.function]
-    sizes = {bk.Kind.PATCH: bk.PATCHES_PER_BANK * rec.PATCH_SIZE,
-             bk.Kind.PERFORMANCE: bk.PERFORMANCES_PER_BANK
-             * rec.PERFORMANCE_SIZE,
-             "waveseq": rec.WAVESEQ_BANK_SIZE}
-    payload = packet.data()[:sizes[kind]]
+    sizes = {
+        bk.Kind.PATCH: bk.PATCHES_PER_BANK * rec.PATCH_SIZE,
+        bk.Kind.PERFORMANCE: bk.PERFORMANCES_PER_BANK * rec.PERFORMANCE_SIZE,
+        "waveseq": rec.WAVESEQ_BANK_SIZE,
+    }
+    payload = packet.data()[: sizes[kind]]
     if len(payload) < sizes[kind]:
-        print(f"{args.file} decodes to {len(payload)} bytes; a {kind} bank "
-              f"is {sizes[kind]}. Refusing to send a short bank.")
+        print(
+            f"{args.file} decodes to {len(payload)} bytes; a {kind} bank "
+            f"is {sizes[kind]}. Refusing to send a short bank."
+        )
         return 2
 
     destination = bk.bank(args.to)
     if not destination.writable:
-        print(f"{destination.label} is ROM and cannot be written. The banks "
-              f"that can are: "
-              f"{', '.join(b.label for b in bk.writable_banks())}.")
+        print(
+            f"{destination.label} is ROM and cannot be written. The banks "
+            f"that can are: "
+            f"{', '.join(b.label for b in bk.writable_banks())}."
+        )
         return 2
 
     plural = _plural(kind)
@@ -241,8 +278,7 @@ def _cmd_send(device, args) -> int:
             device.read_raw(destination.sysex, m.Function.ALL_WAVESEQ_DUMP)
         except Exception as exc:
             print(f"     it now holds: could not be read ({exc})")
-            print("Refusing to write a bank that cannot first be read and "
-                  "backed up.")
+            print("Refusing to write a bank that cannot first be read and backed up.")
             return 1
         print("     it now holds: (wave sequence names are not read)")
     else:
@@ -253,25 +289,26 @@ def _cmd_send(device, args) -> int:
             # list of the wrong objects.
             current = device.read_bank_names(destination.number, kind)
             _, names = current
-            shown = [f"{n:03d} {name}" for n, name in
-                     sorted(names.items())[:6]]
-            print(f"     it now holds: {', '.join(shown)}"
-                  f"{' ...' if len(names) > 6 else ''}")
+            shown = [f"{n:03d} {name}" for n, name in sorted(names.items())[:6]]
+            print(
+                f"     it now holds: {', '.join(shown)}"
+                f"{' ...' if len(names) > 6 else ''}"
+            )
         except Exception as exc:
             print(f"     it now holds: could not be read ({exc})")
-            print("Refusing to write a bank that cannot first be read and "
-                  "backed up.")
+            print("Refusing to write a bank that cannot first be read and backed up.")
             return 1
 
     if not args.yes:
-        print("\nNothing has been sent. Add --yes to write, and be sure: "
-              "this replaces the whole bank and no power cycle brings it "
-              "back.")
+        print(
+            "\nNothing has been sent. Add --yes to write, and be sure: "
+            "this replaces the whole bank and no power cycle brings it "
+            "back."
+        )
         return 0
 
     where = args.backup_dir or backup.default_dir()
-    result = device.write_bank(destination.number, kind, payload,
-                               backup_dir=where)
+    result = device.write_bank(destination.number, kind, payload, backup_dir=where)
     print(f"\nbacked up to: {result['backup']}")
     if result["verified"] is True:
         print("written and verified by reading it back")
@@ -282,9 +319,12 @@ def _cmd_send(device, args) -> int:
 
 
 _COMMANDS: Dict[str, Callable] = {
-    "banks": _cmd_banks, "list": _cmd_list, "find": _cmd_find,
-    "ports": _cmd_ports, "status": _cmd_status, "dump": _cmd_dump,
-
+    "banks": _cmd_banks,
+    "list": _cmd_list,
+    "find": _cmd_find,
+    "ports": _cmd_ports,
+    "status": _cmd_status,
+    "dump": _cmd_dump,
     "select": _cmd_select,
     "send": _cmd_send,
     "multi": _cmd_multi,
@@ -294,12 +334,14 @@ _OFFLINE = {"banks", "list", "find", "ports"}
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="kwscli", description="Browse a Korg Wavestation SR's sounds.")
+        prog="kwscli", description="Browse a Korg Wavestation SR's sounds."
+    )
     parser.add_argument("--port")
     parser.add_argument("--recv-port")
     parser.add_argument("--demo", action="store_true")
-    parser.add_argument("--midi-channel", type=int, default=None,
-                        help="the unit's global channel, 1-16")
+    parser.add_argument(
+        "--midi-channel", type=int, default=None, help="the unit's global channel, 1-16"
+    )
     parser.add_argument("--channel", type=int, default=None)
     parser.add_argument("--catalog", default=None)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -315,24 +357,34 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("status", help="ask the unit who it is")
     sp = sub.add_parser("dump", help="read a bank off the unit (silent)")
     sp.add_argument("bank")
-    sp.add_argument("kind", nargs="?", default=banks.Kind.PATCH,
-                    choices=kinds,
-                    help="which kind to ask for (default: patch)")
+    sp.add_argument(
+        "kind",
+        nargs="?",
+        default=banks.Kind.PATCH,
+        choices=kinds,
+        help="which kind to ask for (default: patch)",
+    )
     sp = sub.add_parser("select", help="select a sound ON THE UNIT")
     sp.add_argument("bank")
     sp.add_argument("kind", choices=kinds)
     sp.add_argument("number", type=int)
     sp = sub.add_parser("multi", help="the 32 Multisets (silent)")
-    sp.add_argument("--all", action="store_true",
-                    help="include Multisets with nothing assigned")
+    sp.add_argument(
+        "--all", action="store_true", help="include Multisets with nothing assigned"
+    )
     sp = sub.add_parser("send", help="WRITE a bank dump INTO the unit")
     sp.add_argument("file", help="a .syx holding one bank dump")
-    sp.add_argument("--to", required=True,
-                    help="destination bank: RAM1, RAM2, RAM3 or CARD")
-    sp.add_argument("--yes", action="store_true",
-                    help="actually write; without it nothing is sent")
-    sp.add_argument("--backup-dir", default=None,
-                    help="where to save the destination before overwriting")
+    sp.add_argument(
+        "--to", required=True, help="destination bank: RAM1, RAM2, RAM3 or CARD"
+    )
+    sp.add_argument(
+        "--yes", action="store_true", help="actually write; without it nothing is sent"
+    )
+    sp.add_argument(
+        "--backup-dir",
+        default=None,
+        help="where to save the destination before overwriting",
+    )
     return parser
 
 
@@ -346,10 +398,13 @@ def _build_device(args):
     b.install_clean_exit()
     if args.port:
         return b.WavestationBridge.open(
-            args.port, recv_port=args.recv_port,
-            channel=(args.midi_channel - 1) if args.midi_channel else 0)
+            args.port,
+            recv_port=args.recv_port,
+            channel=(args.midi_channel - 1) if args.midi_channel else 0,
+        )
     return b.WavestationBridge.autodetect(
-        on_try=lambda name: print(f"  probing {name}...", file=sys.stderr))
+        on_try=lambda name: print(f"  probing {name}...", file=sys.stderr)
+    )
 
 
 def main(argv: Optional[List[str]] = None) -> int:

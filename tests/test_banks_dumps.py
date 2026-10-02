@@ -67,7 +67,7 @@ def _bulk(function, bank_number, kind, size, count, names=None):
         record = bytearray(size)
         label = (names or {}).get(index, f"Slot{index:02d}")
         encoded = label.encode("ascii")
-        record[:len(encoded)] = encoded
+        record[: len(encoded)] = encoded
         record[m.NAME_LEN] = 0x80 | (index & 0x7F)
         raw.extend(record)
     payload = [bank_number] + list(m.to_nibbles(bytes(raw)))
@@ -76,40 +76,60 @@ def _bulk(function, bank_number, kind, size, count, names=None):
 
 class TestBulkDumps:
     def test_a_performance_bank_decodes(self):
-        dump = dumps.parse_bulk(_bulk(
-            m.Function.ALL_PERFORMANCE_DUMP, 0, banks.Kind.PERFORMANCE,
-            dumps.PERFORMANCE_RECORD, 50))
+        dump = dumps.parse_bulk(
+            _bulk(
+                m.Function.ALL_PERFORMANCE_DUMP,
+                0,
+                banks.Kind.PERFORMANCE,
+                dumps.PERFORMANCE_RECORD,
+                50,
+            )
+        )
         assert dump.count == 50
         assert dump.bank.label == "RAM 1"
         assert dump.kind == banks.Kind.PERFORMANCE
 
     def test_a_patch_bank_decodes(self):
-        dump = dumps.parse_bulk(_bulk(
-            m.Function.ALL_PATCH_DUMP, 11, banks.Kind.PATCH,
-            dumps.PATCH_RECORD, 35))
+        dump = dumps.parse_bulk(
+            _bulk(
+                m.Function.ALL_PATCH_DUMP, 11, banks.Kind.PATCH, dumps.PATCH_RECORD, 35
+            )
+        )
         assert dump.count == 35
-        assert dump.bank.label == "ROM 10", \
+        assert dump.bank.label == "ROM 10", (
             "System Exclusive byte 11 is ROM 10; the Card is byte 3"
+        )
 
     def test_names_survive_the_nibble_encoding(self):
-        dump = dumps.parse_bulk(_bulk(
-            m.Function.ALL_PERFORMANCE_DUMP, 0, banks.Kind.PERFORMANCE,
-            dumps.PERFORMANCE_RECORD, 50, {0: "Woven Bell", 49: "Amber Pad"}))
+        dump = dumps.parse_bulk(
+            _bulk(
+                m.Function.ALL_PERFORMANCE_DUMP,
+                0,
+                banks.Kind.PERFORMANCE,
+                dumps.PERFORMANCE_RECORD,
+                50,
+                {0: "Woven Bell", 49: "Amber Pad"},
+            )
+        )
         assert dump.name(0) == "Woven Bell"
         assert dump.name(49) == "Amber Pad"
 
     def test_a_high_bit_byte_survives(self):
         """Records carry one on purpose: all-7-bit data would let a broken
         nibble implementation pass."""
-        dump = dumps.parse_bulk(_bulk(
-            m.Function.ALL_PATCH_DUMP, 0, banks.Kind.PATCH,
-            dumps.PATCH_RECORD, 35))
+        dump = dumps.parse_bulk(
+            _bulk(
+                m.Function.ALL_PATCH_DUMP, 0, banks.Kind.PATCH, dumps.PATCH_RECORD, 35
+            )
+        )
         assert dump.records[3][m.NAME_LEN] == 0x83
 
     def test_the_bank_comes_from_the_dump_not_the_request(self):
-        dump = dumps.parse_bulk(_bulk(
-            m.Function.ALL_PATCH_DUMP, 7, banks.Kind.PATCH,
-            dumps.PATCH_RECORD, 35))
+        dump = dumps.parse_bulk(
+            _bulk(
+                m.Function.ALL_PATCH_DUMP, 7, banks.Kind.PATCH, dumps.PATCH_RECORD, 35
+            )
+        )
         assert dump.bank.sysex == 7
         assert dump.bank.label == "ROM 6"
 
@@ -125,9 +145,20 @@ class TestTheBankNumbering:
 
     #: Confirmed on hardware 2026-09-12: a freshly formatted card reads back
     #: 35 of 35 unnamed patches at byte 3, while byte 11 holds ROM sounds.
-    WIRE = {"RAM 1": 0, "RAM 2": 1, "RAM 3": 4, "ROM 4": 5, "ROM 5": 6,
-            "ROM 6": 7, "ROM 7": 8, "ROM 8": 9, "ROM 9": 10, "ROM 10": 11,
-            "ROM 11": 2, "Card": 3}
+    WIRE = {
+        "RAM 1": 0,
+        "RAM 2": 1,
+        "RAM 3": 4,
+        "ROM 4": 5,
+        "ROM 5": 6,
+        "ROM 6": 7,
+        "ROM 7": 8,
+        "ROM 8": 9,
+        "ROM 9": 10,
+        "ROM 10": 11,
+        "ROM 11": 2,
+        "Card": 3,
+    }
 
     def test_every_bank_has_the_wire_byte_the_instrument_uses(self):
         for entry in banks.BANKS:

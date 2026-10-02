@@ -33,9 +33,16 @@ from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 from kws import records as rec
 
 __all__ = [
-    "PatchId", "SequenceId", "Source", "SequenceChain",
-    "walk_sequence", "patch_dependencies", "performance_dependencies",
-    "SequenceKey", "quoted_closure", "closure",
+    "PatchId",
+    "SequenceId",
+    "Source",
+    "SequenceChain",
+    "walk_sequence",
+    "patch_dependencies",
+    "performance_dependencies",
+    "SequenceKey",
+    "quoted_closure",
+    "closure",
 ]
 
 #: A patch, as (bank id, number).
@@ -65,7 +72,8 @@ class Source:
         except IndexError:
             raise LookupError(
                 f"{self.bank_id} has {len(self.patches)} patches, so "
-                f"{number} is not one of them") from None
+                f"{number} is not one of them"
+            ) from None
 
 
 @dataclass(frozen=True)
@@ -83,8 +91,13 @@ class SequenceChain:
         return len(self.steps)
 
 
-def walk_sequence(bank: Sequence[int], number: int, *, bank_id: str = "",
-                  limit: int = rec.STEPS_PER_BANK) -> SequenceChain:
+def walk_sequence(
+    bank: Sequence[int],
+    number: int,
+    *,
+    bank_id: str = "",
+    limit: int = rec.STEPS_PER_BANK,
+) -> SequenceChain:
     """Follow one wave sequence through the shared step pool.
 
     The chain is followed by forward link, stopping on a link of 0, on a
@@ -112,20 +125,21 @@ def walk_sequence(bank: Sequence[int], number: int, *, bank_id: str = "",
     quotes: List[SequenceId] = []
     seen: Set[int] = set()
     at = header["link"]
-    while (at and at < rec.STEPS_PER_BANK and at not in seen
-           and len(steps) < limit):
+    while at and at < rec.STEPS_PER_BANK and at not in seen and len(steps) < limit:
         seen.add(at)
         steps.append(at)
         info = rec.step(bank, at)
         if info["wave"] < rec.ROM_WAVE_BASE:
             quotes.append((bank_id, info["wave"]))
         at = info["forward"]
-    return SequenceChain(bank_id=bank_id, number=number, steps=tuple(steps),
-                         quotes=tuple(quotes))
+    return SequenceChain(
+        bank_id=bank_id, number=number, steps=tuple(steps), quotes=tuple(quotes)
+    )
 
 
-def patch_dependencies(record: Sequence[int],
-                       bank_id: str) -> List[Tuple[str, int, int]]:
+def patch_dependencies(
+    record: Sequence[int], bank_id: str
+) -> List[Tuple[str, int, int]]:
     """The wave sequences one patch needs, in oscillator order.
 
     Each is ``(source bank, wave bank, sequence)``. A patch's oscillator
@@ -161,11 +175,10 @@ def performance_dependencies(record: Sequence[int]) -> List[Tuple[int, int]]:
 SequenceKey = Tuple[str, int, int]
 
 
-def quoted_closure(sources: Dict[str, Source],
-                   seeds: Iterable[SequenceKey],
-                   ) -> Tuple[List[SequenceKey],
-                              Dict[SequenceKey, SequenceChain],
-                              List[SequenceKey]]:
+def quoted_closure(
+    sources: Dict[str, Source],
+    seeds: Iterable[SequenceKey],
+) -> Tuple[List[SequenceKey], Dict[SequenceKey, SequenceChain], List[SequenceKey]]:
     """Seed sequences plus every sequence they quote, transitively.
 
     A step whose wave number is below :data:`records.ROM_WAVE_BASE` plays
@@ -217,8 +230,9 @@ def quoted_closure(sources: Dict[str, Source],
     return order, chains, unresolved
 
 
-def closure(sources: Dict[str, Source],
-            patches: Iterable[PatchId]) -> Dict[str, object]:
+def closure(
+    sources: Dict[str, Source], patches: Iterable[PatchId]
+) -> Dict[str, object]:
     """Everything a set of patches drags along with it.
 
     Returns the patches themselves, the wave sequences they need, the total
@@ -240,12 +254,14 @@ def closure(sources: Dict[str, Source],
             continue
         want_patches.append((bank_id, number))
         order, chains, unresolved = quoted_closure(
-            sources, patch_dependencies(source.patch(number), bank_id))
+            sources, patch_dependencies(source.patch(number), bank_id)
+        )
         for src_id, wave_bank, seq_num in unresolved:
             missing.append(
                 f"{bank_id}:{number:03d} needs wave sequence "
                 f"{seq_num} from bank {wave_bank}, whose wave sequence "
-                f"bank is not loaded")
+                f"bank is not loaded"
+            )
         for key in order:
             if key in seen_seq:
                 continue
@@ -283,7 +299,7 @@ def load_syx(paths: Iterable[str], bank_id: str) -> Source:
             elif packet.function == WAVESEQ_DUMP:
                 data = packet.data()
                 if len(data) >= rec.WAVESEQ_BANK_SIZE:
-                    source.waveseq = data[:rec.WAVESEQ_BANK_SIZE]
+                    source.waveseq = data[: rec.WAVESEQ_BANK_SIZE]
     return source
 
 

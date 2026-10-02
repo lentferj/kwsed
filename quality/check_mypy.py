@@ -52,8 +52,10 @@ DEFAULT_BASELINE = os.path.join(ROOT, "quality", "mypy-baseline.txt")
 
 #: ``path:line: error: message  [code]`` -- note the ``[code]`` is optional for
 #: syntax-level diagnostics, which is why it is captured separately.
-ERROR_RE = re.compile(r"^(?P<path>[^:]+):(?P<line>\d+):\s+error:\s+"
-                      r"(?P<message>.*?)\s*(?:\[(?P<code>[a-z-]+)\])?$")
+ERROR_RE = re.compile(
+    r"^(?P<path>[^:]+):(?P<line>\d+):\s+error:\s+"
+    r"(?P<message>.*?)\s*(?:\[(?P<code>[a-z-]+)\])?$"
+)
 
 
 def key(path: str, code: str, message: str) -> str:
@@ -64,14 +66,24 @@ def key(path: str, code: str, message: str) -> str:
 def run_mypy() -> list[tuple[str, str, str, int]]:
     """Every finding mypy reports, as ``(path, code, message, line)``."""
     proc = subprocess.run(
-        [sys.executable, "-m", "mypy"], cwd=ROOT, capture_output=True,
-        text=True, check=False)
+        [sys.executable, "-m", "mypy"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
     found = []
     for line in proc.stdout.splitlines():
         match = ERROR_RE.match(line.strip())
         if match is not None:
-            found.append((match["path"], match["code"] or "",
-                          match["message"], int(match["line"])))
+            found.append(
+                (
+                    match["path"],
+                    match["code"] or "",
+                    match["message"],
+                    int(match["line"]),
+                )
+            )
     return found
 
 
@@ -79,8 +91,9 @@ def load(path: str) -> set[str]:
     if not os.path.exists(path):
         return set()
     with open(path, encoding="utf-8") as handle:
-        return {line.strip() for line in handle if line.strip()
-                and not line.startswith("#")}
+        return {
+            line.strip() for line in handle if line.strip() and not line.startswith("#")
+        }
 
 
 def save(path: str, keys: list[str]) -> None:
@@ -98,8 +111,11 @@ def save(path: str, keys: list[str]) -> None:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--baseline", default=DEFAULT_BASELINE)
-    parser.add_argument("--write", action="store_true",
-                        help="rewrite the baseline from the current output")
+    parser.add_argument(
+        "--write",
+        action="store_true",
+        help="rewrite the baseline from the current output",
+    )
     args = parser.parse_args(argv)
 
     found = run_mypy()
@@ -123,15 +139,20 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{path}:{line}: error: {message}  [{code}]", file=sys.stderr)
 
     if stale:
-        print(f"note: {len(stale)} baseline entr"
-              f"{'y is' if len(stale) == 1 else 'ies are'} now stale "
-              f"(the finding is gone). Re-run with --write to prune.",
-              file=sys.stderr)
+        print(
+            f"note: {len(stale)} baseline entr"
+            f"{'y is' if len(stale) == 1 else 'ies are'} now stale "
+            f"(the finding is gone). Re-run with --write to prune.",
+            file=sys.stderr,
+        )
 
     if new:
-        print(f"\ntypecheck: {len(new)} new mypy finding(s) not in the "
-              f"baseline ({len(found) - len(new)} known). Fix them, or add "
-              f"them with --write if they are pre-existing.", file=sys.stderr)
+        print(
+            f"\ntypecheck: {len(new)} new mypy finding(s) not in the "
+            f"baseline ({len(found) - len(new)} known). Fix them, or add "
+            f"them with --write if they are pre-existing.",
+            file=sys.stderr,
+        )
         return 1
 
     print(f"typecheck: {len(found)} known mypy finding(s), no new ones")

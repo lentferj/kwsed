@@ -17,16 +17,16 @@ minimum_pre_commit_version: "4.0.0"
 repos:
   # --- ruff: linting and formatting -----------------------------------------
   #
-  # Only ruff-check is a hook. ruff-format is deliberately NOT wired: the tree
-  # has never been formatted, so the first commit that touched a Python file
-  # would come back with 26 files rewritten and the commit rejected. That is a
-  # whole-tree decision rather than a hook. Run `make format` as its own commit
-  # when you want it, then add the hook back here.
+  # Both hooks are live. The tree was formatted once, as its own commit, so
+  # that adopting the formatter was a reviewable change rather than a surprise
+  # inside a later one.
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: v0.16.10
     hooks:
       - id: ruff-check
         args: [--fix]
+        files: ^(kws|kwsed|tools|tests|quality)/
+      - id: ruff-format
         files: ^(kws|kwsed|tools|tests|quality)/
 
   # --- mypy: type checking ---------------------------------------------------

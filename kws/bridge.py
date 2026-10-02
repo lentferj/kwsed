@@ -123,7 +123,8 @@ class DeviceRefused(DeviceError):
         super().__init__(
             f"the unit replied {m.Function.name(function)!r}. It is "
             f"connected and refused the request -- check the global channel "
-            f"and that System Exclusive reception is enabled.")
+            f"and that System Exclusive reception is enabled."
+        )
 
 
 def _client(kind: str):
@@ -175,9 +176,15 @@ def install_clean_exit(on_exit: Optional[Callable[[], None]] = None) -> None:
 class WavestationBridge:
     """One open conversation with one Wavestation."""
 
-    def __init__(self, midi_in, midi_out, *, channel: int = 0,
-                 description: str = "",
-                 timeout: float = DEFAULT_TIMEOUT) -> None:
+    def __init__(
+        self,
+        midi_in,
+        midi_out,
+        *,
+        channel: int = 0,
+        description: str = "",
+        timeout: float = DEFAULT_TIMEOUT,
+    ) -> None:
         self._in = midi_in
         self._out = midi_out
         self.channel = channel
@@ -186,9 +193,14 @@ class WavestationBridge:
         self._in.ignore_types(sysex=False, timing=True, active_sense=True)
 
     @classmethod
-    def open(cls, port: str, *, recv_port: Optional[str] = None,
-             channel: int = 0,
-             timeout: float = DEFAULT_TIMEOUT) -> "WavestationBridge":
+    def open(
+        cls,
+        port: str,
+        *,
+        recv_port: Optional[str] = None,
+        channel: int = 0,
+        timeout: float = DEFAULT_TIMEOUT,
+    ) -> "WavestationBridge":
         ins, outs = list_ports()
         listen = recv_port or port
         if port not in outs:
@@ -211,8 +223,13 @@ class WavestationBridge:
                 except Exception:
                     pass
             raise
-        return cls(midi_in, midi_out, channel=channel,
-                   description=f"{port} -> {listen}", timeout=timeout)
+        return cls(
+            midi_in,
+            midi_out,
+            channel=channel,
+            description=f"{port} -> {listen}",
+            timeout=timeout,
+        )
 
     def close(self) -> None:
         for client in (self._in, self._out):
@@ -236,8 +253,11 @@ class WavestationBridge:
     def _send(self, data: bytes) -> None:
         data = bytes(data)
         if len(data) > self.RTMIDI_LIMIT:
-            address = (alsa.port_address(self.description.split(" -> ")[0])
-                       if alsa.available() else None)
+            address = (
+                alsa.port_address(self.description.split(" -> ")[0])
+                if alsa.available()
+                else None
+            )
             if address is not None:
                 sender = alsa.Sender(*address, name=b"kwsed")
                 try:
@@ -263,7 +283,8 @@ class WavestationBridge:
                     f"this message is {len(data)} bytes, which "
                     f"python-rtmidi cannot send on ALSA, and no ALSA "
                     f"sequencer address is available for "
-                    f"{self.description!r}. Nothing was sent.")
+                    f"{self.description!r}. Nothing was sent."
+                )
         self._out.send_message(list(data))
         time.sleep(SEND_GAP)
 
@@ -287,13 +308,12 @@ class WavestationBridge:
         return None
 
     @classmethod
-    def autodetect(cls, *, timeout: float = 0.5,
-                   on_try: Optional[Callable[[str], None]] = None
-                   ) -> "WavestationBridge":
+    def autodetect(
+        cls, *, timeout: float = 0.5, on_try: Optional[Callable[[str], None]] = None
+    ) -> "WavestationBridge":
         """Find a Wavestation and adopt the channel it reports."""
         hinted = likely_korg_ports()
-        candidates = hinted + [p for p in bidirectional_ports()
-                               if p not in hinted]
+        candidates = hinted + [p for p in bidirectional_ports() if p not in hinted]
         for port in candidates:
             if "Midi Through" in port:
                 continue
@@ -320,12 +340,14 @@ class WavestationBridge:
         raise DeviceError(
             "no Wavestation answered an Identity Request on any port. Check "
             "the cable, that the unit is on, and that its System Exclusive "
-            "reception is enabled.")
+            "reception is enabled."
+        )
 
     # --- operations ----------------------------------------------------------
 
-    def read_bank(self, bank, kind: Optional[str] = None, *,
-                  timeout: Optional[float] = None) -> dumps.BulkDump:
+    def read_bank(
+        self, bank, kind: Optional[str] = None, *, timeout: Optional[float] = None
+    ) -> dumps.BulkDump:
         """Dump one bank. Read-only, and **makes no sound**.
 
         Each kind has its own request -- ``0x1C`` for patches, ``0x1D``
@@ -345,23 +367,20 @@ class WavestationBridge:
         """
         entry = banks.bank(bank)
         if kind is None:
-            wanted = (m.Function.ALL_PERFORMANCE_DUMP,
-                      m.Function.ALL_PATCH_DUMP)
+            wanted = (m.Function.ALL_PERFORMANCE_DUMP, m.Function.ALL_PATCH_DUMP)
             request = m.bulk_request(entry.sysex, self.channel)
         else:
             try:
                 dump_function = _DUMP_FOR_KIND[kind]
             except KeyError:
                 raise ValueError(
-                    f"cannot read {kind!r}; have "
-                    f"{', '.join(sorted(_DUMP_FOR_KIND))}") from None
+                    f"cannot read {kind!r}; have {', '.join(sorted(_DUMP_FOR_KIND))}"
+                ) from None
             wanted = (dump_function,)
-            request = m.bank_request(entry.sysex, dump_function,
-                                     self.channel)
+            request = m.bank_request(entry.sysex, dump_function, self.channel)
         self._drain()
         self._send(request)
-        deadline = time.time() + (
-            DUMP_TIMEOUT if timeout is None else timeout)
+        deadline = time.time() + (DUMP_TIMEOUT if timeout is None else timeout)
         while time.time() < deadline:
             message = self._in.get_message()
             if message is None:
@@ -392,14 +411,14 @@ class WavestationBridge:
             f"30 kB."
         )
 
-    def read_patch(self, bank, number: int, *,
-                   timeout: Optional[float] = None) -> bytes:
+    def read_patch(
+        self, bank, number: int, *, timeout: Optional[float] = None
+    ) -> bytes:
         """One patch's 426 bytes. Read-only, and makes no sound."""
         entry = banks.bank(bank)
         self._drain()
         self._send(m.single_patch_request(entry.sysex, number, self.channel))
-        deadline = time.time() + (SINGLE_OBJECT_TIMEOUT if timeout is None
-                                  else timeout)
+        deadline = time.time() + (SINGLE_OBJECT_TIMEOUT if timeout is None else timeout)
         while time.time() < deadline:
             message = self._in.get_message()
             if message is None:
@@ -421,15 +440,23 @@ class WavestationBridge:
             raw = bytes(message[0])
             if len(raw) < 7 or raw[5] != entry.sysex or raw[6] != number:
                 continue
-            return packet.data()[:records.PATCH_SIZE]
+            return packet.data()[: records.PATCH_SIZE]
         raise TimeoutError(
             f"no patch came back for {entry.label} {number}. A reply for a "
             f"different slot does not count, so this can also mean the unit "
-            f"is still answering an earlier request.")
+            f"is still answering an earlier request."
+        )
 
-    def write_patch(self, bank, number: int, data: bytes, *,
-                    backup_dir: str, verify: bool = True,
-                    timeout: Optional[float] = None) -> dict:
+    def write_patch(
+        self,
+        bank,
+        number: int,
+        data: bytes,
+        *,
+        backup_dir: str,
+        verify: bool = True,
+        timeout: Optional[float] = None,
+    ) -> dict:
         """Replace **one patch**. Destructive, and fenced like a bank write.
 
         Two messages, because one is not enough: a single patch dump lands
@@ -445,15 +472,14 @@ class WavestationBridge:
         """
         entry = banks.bank(bank)
         if not entry.writable:
-            raise DeviceError(
-                f"{entry.label} is ROM and cannot be written.")
+            raise DeviceError(f"{entry.label} is ROM and cannot be written.")
         if not 0 <= number < banks.PATCHES_PER_BANK:
             raise ValueError(
                 f"a bank holds {banks.PATCHES_PER_BANK} patches, so "
-                f"{number} is not one of them")
+                f"{number} is not one of them"
+            )
         if len(data) != records.PATCH_SIZE:
-            raise ValueError(
-                f"a patch is {records.PATCH_SIZE} bytes; got {len(data)}")
+            raise ValueError(f"a patch is {records.PATCH_SIZE} bytes; got {len(data)}")
 
         try:
             before = self.read_patch(entry.sysex, number, timeout=timeout)
@@ -463,19 +489,26 @@ class WavestationBridge:
                 f"writing it, so nothing was sent ({exc})."
             ) from exc
         saved = backup.save(
-            m.single_patch_dump(entry.sysex, number, before,
-                                channel=self.channel),
-            backup_dir, bank_label=_patch_backup_name(entry.label, number),
-            kind="patch", names=[m.decode_name(before)],
-            channel=self.channel)
+            m.single_patch_dump(entry.sysex, number, before, channel=self.channel),
+            backup_dir,
+            bank_label=_patch_backup_name(entry.label, number),
+            kind="patch",
+            names=[m.decode_name(before)],
+            channel=self.channel,
+        )
 
         self._drain()
-        self._send(m.single_patch_dump(entry.sysex, number, data,
-                                       channel=self.channel))
+        self._send(m.single_patch_dump(entry.sysex, number, data, channel=self.channel))
         self._send(m.patch_write_command(entry.sysex, number, self.channel))
 
-        result = {"bank": entry.label, "number": number, "backup": saved,
-                  "status": None, "verified": None, "mismatch": None}
+        result = {
+            "bank": entry.label,
+            "number": number,
+            "backup": saved,
+            "status": None,
+            "verified": None,
+            "mismatch": None,
+        }
         deadline = time.time() + 2.0
         while time.time() < deadline:
             message = self._in.get_message()
@@ -485,8 +518,7 @@ class WavestationBridge:
             packet = m.parse(message[0])
             if packet is None:
                 continue
-            if packet.function in (m.Function.WRITE_COMPLETED,
-                                   m.Function.WRITE_ERROR):
+            if packet.function in (m.Function.WRITE_COMPLETED, m.Function.WRITE_ERROR):
                 result["status"] = packet.function_name
                 break
         if not verify:
@@ -533,17 +565,17 @@ class WavestationBridge:
         raise TimeoutError(
             "no Multiset dump came back. The request is 0x06 and takes no "
             "argument; check the global channel and that System Exclusive "
-            "reception is enabled.")
+            "reception is enabled."
+        )
 
-    def read_bank_names(self, bank, kind: Optional[str] = None, *,
-                          timeout: Optional[float] = None
-                          ) -> Tuple[str, Dict[int, str]]:
+    def read_bank_names(
+        self, bank, kind: Optional[str] = None, *, timeout: Optional[float] = None
+    ) -> Tuple[str, Dict[int, str]]:
         """``(kind, {number: name})`` for one bank of one kind. Silent."""
         dump = self.read_bank(bank, kind, timeout=timeout)
         return dump.kind, dump.names()
 
-    def select(self, slot: banks.Slot, *, channel: Optional[int] = None
-               ) -> None:
+    def select(self, slot: banks.Slot, *, channel: Optional[int] = None) -> None:
         """Select a performance or patch. **This changes the sound.**
 
         Bank Select MSB/LSB then a Program Change. Which of the twelve banks
@@ -572,10 +604,16 @@ class WavestationBridge:
     def writable(self, bank) -> bool:
         return banks.bank(bank).writable
 
-    def write_bank(self, bank, kind: str, data: bytes, *,
-                   backup_dir: str,
-                   verify: bool = True,
-                   timeout: Optional[float] = None) -> dict:
+    def write_bank(
+        self,
+        bank,
+        kind: str,
+        data: bytes,
+        *,
+        backup_dir: str,
+        verify: bool = True,
+        timeout: Optional[float] = None,
+    ) -> dict:
         """Replace a whole bank. **This destroys what is there.**
 
         The only thing in kwsed that writes to the instrument, and it is
@@ -599,9 +637,9 @@ class WavestationBridge:
             raise DeviceError(
                 f"{entry.label} is ROM and cannot be written. The banks that "
                 f"can are: "
-                f"{', '.join(b.label for b in banks.writable_banks())}.")
-        if kind not in (banks.Kind.PERFORMANCE, banks.Kind.PATCH,
-                        "waveseq"):
+                f"{', '.join(b.label for b in banks.writable_banks())}."
+            )
+        if kind not in (banks.Kind.PERFORMANCE, banks.Kind.PATCH, "waveseq"):
             raise ValueError(f"cannot write {kind!r}")
 
         function = {
@@ -617,7 +655,8 @@ class WavestationBridge:
             raise DeviceError(
                 f"could not read {entry.label} before writing it, so nothing "
                 f"was sent ({exc}). kwsed does not overwrite a bank it has "
-                f"not backed up.") from exc
+                f"not backed up."
+            ) from exc
         names = []
         try:
             packet = m.parse(before)
@@ -625,16 +664,26 @@ class WavestationBridge:
                 names = list(dumps.parse_bulk(packet).names().values())
         except Exception:
             names = []
-        saved = backup.save(before, backup_dir, bank_label=entry.label,
-                            kind=kind, names=names, channel=self.channel)
+        saved = backup.save(
+            before,
+            backup_dir,
+            bank_label=entry.label,
+            kind=kind,
+            names=names,
+            channel=self.channel,
+        )
 
         # --- 3. send -------------------------------------------------------
         self._drain()
-        self._send(m.frame_bulk(function, entry.sysex, data,
-                                channel=self.channel))
+        self._send(m.frame_bulk(function, entry.sysex, data, channel=self.channel))
 
-        result = {"bank": entry.label, "kind": kind, "backup": saved,
-                  "verified": None, "mismatch": None}
+        result = {
+            "bank": entry.label,
+            "kind": kind,
+            "backup": saved,
+            "verified": None,
+            "mismatch": None,
+        }
         if not verify:
             return result
 
@@ -645,17 +694,18 @@ class WavestationBridge:
             result["verified"] = False
             result["mismatch"] = (
                 f"the write was sent but {entry.label} could not be read "
-                f"back to check it ({exc}). Whether it took is unknown.")
+                f"back to check it ({exc}). Whether it took is unknown."
+            )
             return result
-        sent = m.frame_bulk(function, entry.sysex, data,
-                            channel=self.channel)
+        sent = m.frame_bulk(function, entry.sysex, data, channel=self.channel)
         result["verified"] = bytes(after) == bytes(sent)
         if not result["verified"]:
             result["mismatch"] = _first_difference(bytes(sent), bytes(after))
         return result
 
-    def read_raw(self, bank_number: int, function: int, *,
-                 timeout: Optional[float] = None) -> bytes:
+    def read_raw(
+        self, bank_number: int, function: int, *, timeout: Optional[float] = None
+    ) -> bytes:
         """One bank dump of a given kind, as the bytes that arrived."""
         self._drain()
         self._send(m.bank_request(bank_number, function, self.channel))
@@ -681,19 +731,17 @@ class WavestationBridge:
                 continue
             return bytes(message[0])
         raise TimeoutError(
-            f"no {m.Function.name(function)} came back for bank "
-            f"{bank_number}")
+            f"no {m.Function.name(function)} came back for bank {bank_number}"
+        )
 
 
 def _first_difference(sent: bytes, got: bytes) -> str:
     """Where a read-back stopped matching, in words rather than two dumps."""
     if len(sent) != len(got):
-        return (f"the read-back is {len(got)} bytes and {len(sent)} were "
-                f"sent")
+        return f"the read-back is {len(got)} bytes and {len(sent)} were sent"
     for index, (a, b) in enumerate(zip(sent, got)):
         if a != b:
-            return (f"byte {index} differs: sent {a:#04x}, read back "
-                    f"{b:#04x}")
+            return f"byte {index} differs: sent {a:#04x}, read back {b:#04x}"
     return "no difference found, which contradicts the comparison"
 
 

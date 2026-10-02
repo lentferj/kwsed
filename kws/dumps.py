@@ -65,11 +65,12 @@ PERFORMANCE_RECORD = 181
 PATCH_RECORD = 426
 
 _LAYOUT = {
-    m.Function.ALL_PERFORMANCE_DUMP: (banks.Kind.PERFORMANCE,
-                                      PERFORMANCE_RECORD,
-                                      banks.PERFORMANCES_PER_BANK),
-    m.Function.ALL_PATCH_DUMP: (banks.Kind.PATCH, PATCH_RECORD,
-                                banks.PATCHES_PER_BANK),
+    m.Function.ALL_PERFORMANCE_DUMP: (
+        banks.Kind.PERFORMANCE,
+        PERFORMANCE_RECORD,
+        banks.PERFORMANCES_PER_BANK,
+    ),
+    m.Function.ALL_PATCH_DUMP: (banks.Kind.PATCH, PATCH_RECORD, banks.PATCHES_PER_BANK),
 }
 
 
@@ -123,14 +124,12 @@ def parse_bulk(packet: m.Packet) -> BulkDump:
     all -- and a name is exactly the kind of output that looks like success.
     """
     if packet.function not in _LAYOUT:
-        raise m.ProtocolError(
-            f"{packet.function_name} is not a bank dump kwsed reads")
+        raise m.ProtocolError(f"{packet.function_name} is not a bank dump kwsed reads")
     kind, size, expected = _LAYOUT[packet.function]
 
     number = packet.bank
     if number is None:
-        raise m.ProtocolError(
-            f"{packet.function_name} carries no bank byte")
+        raise m.ProtocolError(f"{packet.function_name} carries no bank byte")
     # The dump's bank byte is a wire byte, not a display
     # position: byte 3 is the Card, not ROM 4.
     entry = banks.by_sysex(number)
@@ -142,15 +141,23 @@ def parse_bulk(packet: m.Packet) -> BulkDump:
             f"not a whole number of {size}-byte records "
             f"({len(data) % size} left over). kwsed derived that size from "
             f"dumps it had; this is refused rather than decoded into "
-            f"nonsense.")
-    records = tuple(data[index * size:(index + 1) * size]
-                    for index in range(len(data) // size))
+            f"nonsense."
+        )
+    records = tuple(
+        data[index * size : (index + 1) * size] for index in range(len(data) // size)
+    )
     if len(records) != expected:
         raise m.ProtocolError(
             f"{packet.function_name} holds {len(records)} records; a bank "
-            f"has {expected} {kind}s")
-    return BulkDump(function=packet.function, bank=entry, kind=kind,
-                    record_size=size, records=records)
+            f"has {expected} {kind}s"
+        )
+    return BulkDump(
+        function=packet.function,
+        bank=entry,
+        kind=kind,
+        record_size=size,
+        records=records,
+    )
 
 
 def names_from_dump(packet: m.Packet) -> Tuple[banks.Bank, str, Dict[int, str]]:
@@ -168,13 +175,13 @@ def parse_performance(packet: m.Packet) -> bytes:
     is one place that knows it.
     """
     if packet.function != m.Function.PERFORMANCE_DUMP:
-        raise m.ProtocolError(
-            f"{packet.function_name} is not a performance dump")
+        raise m.ProtocolError(f"{packet.function_name} is not a performance dump")
     data = packet.data()
     if len(data) < PERFORMANCE_RECORD:
         raise m.ProtocolError(
             f"performance dump decoded to {len(data)} bytes, fewer than the "
-            f"{PERFORMANCE_RECORD} a performance occupies")
+            f"{PERFORMANCE_RECORD} a performance occupies"
+        )
     return data[:PERFORMANCE_RECORD]
 
 
@@ -195,7 +202,7 @@ def read_syx_file(path: str) -> List[m.Packet]:
         end = raw.find(b"\xf7", start)
         if end < 0:
             break
-        packet = m.parse(raw[start:end + 1])
+        packet = m.parse(raw[start : end + 1])
         if packet is not None:
             out.append(packet)
         cursor = end + 1

@@ -27,8 +27,7 @@ pytestmark = pytest.mark.asyncio
 
 @pytest.fixture
 def app():
-    catalog = cat.Catalog([
-        cat.Entry("RAM1", banks.Kind.PERFORMANCE, 0, "Book Name")])
+    catalog = cat.Catalog([cat.Entry("RAM1", banks.Kind.PERFORMANCE, 0, "Book Name")])
     return KwsedApp(DemoDevice(), catalog=catalog)
 
 
@@ -127,5 +126,6 @@ class TestDeviceInfoIsGated:
             for _ in range(5):
                 await pilot.pause()
             assert app.device.identify_calls == before, (
-                "identify must not run while the bridge is busy")
+                "identify must not run while the bridge is busy"
+            )
             app._busy = False

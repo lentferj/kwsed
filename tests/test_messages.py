@@ -28,8 +28,7 @@ class TestNibbles:
     """
 
     def test_round_trip(self):
-        for data in (b"", b"\x00", b"\xff", bytes(range(256)),
-                     b"Woven Bell"):
+        for data in (b"", b"\x00", b"\xff", bytes(range(256)), b"Woven Bell"):
             assert m.from_nibbles(m.to_nibbles(data)) == data
 
     def test_low_nibble_comes_first(self):
@@ -95,7 +94,8 @@ class TestChannel:
 class TestFrames:
     def test_the_header_is_the_documented_one(self):
         assert m.frame(m.Function.BULK_REQUEST, [2], channel=4) == bytes(
-            [0xF0, 0x42, 0x34, 0x28, 0x1C, 0x02, 0xF7])
+            [0xF0, 0x42, 0x34, 0x28, 0x1C, 0x02, 0xF7]
+        )
 
     def test_another_korg_model_is_not_ours(self):
         """36h is the X5 family; 28h is the Wavestation."""
@@ -132,14 +132,48 @@ class TestIdentity:
         assert m.identity_reply_fields(m.identity_request()) is None
 
     def test_a_wavestation_reply_is_recognised(self):
-        reply = bytes([0xF0, 0x7E, 0x04, 0x06, 0x02, 0x42, 0x28, 0x00,
-                       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xF7])
+        reply = bytes(
+            [
+                0xF0,
+                0x7E,
+                0x04,
+                0x06,
+                0x02,
+                0x42,
+                0x28,
+                0x00,
+                0x00,
+                0x00,
+                0x00,
+                0x00,
+                0x00,
+                0x00,
+                0xF7,
+            ]
+        )
         fields = m.identity_reply_fields(reply)
         assert fields["channel"] == 4 and fields["is_wavestation"]
 
     def test_another_korg_is_not_a_wavestation(self):
-        reply = bytes([0xF0, 0x7E, 0x02, 0x06, 0x02, 0x42, 0x36, 0x00,
-                       0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xF7])
+        reply = bytes(
+            [
+                0xF0,
+                0x7E,
+                0x02,
+                0x06,
+                0x02,
+                0x42,
+                0x36,
+                0x00,
+                0x00,
+                0x00,
+                0x00,
+                0x00,
+                0x00,
+                0x00,
+                0xF7,
+            ]
+        )
         fields = m.identity_reply_fields(reply)
         assert fields["is_korg"] and not fields["is_wavestation"]
 
@@ -155,12 +189,14 @@ class TestChecksum:
 
     def test_it_is_the_seven_bit_sum(self):
         from kws import messages as m
+
         assert m.checksum([1, 2, 3]) == 6
         assert m.checksum([0x7F, 0x7F]) == 0x7E, "it wraps at seven bits"
         assert m.checksum([]) == 0
 
     def test_a_built_bulk_dump_matches_the_instrument_s_shape(self):
         from kws import messages as m
+
         data = bytes(range(256)) * 4
         frame = m.frame_bulk(m.Function.ALL_PATCH_DUMP, 11, data, channel=4)
         assert frame[0] == m.SYSEX_START and frame[-1] == m.SYSEX_END
@@ -168,14 +204,14 @@ class TestChecksum:
         assert frame[5] == 11, "the bank byte is plain, not nibble encoded"
         body = frame[6:-1]
         assert body[-1] == m.checksum(body[:-1])
-        assert len(frame) == 6 + 2 * len(data) + 1 + 1, \
-            "header, nibbles, checksum, F7"
+        assert len(frame) == 6 + 2 * len(data) + 1 + 1, "header, nibbles, checksum, F7"
 
     def test_it_round_trips_through_the_parser(self):
         from kws import messages as m
+
         data = bytes([9, 8, 7, 6, 5])
         frame = m.frame_bulk(m.Function.ALL_PATCH_DUMP, 3, data)
         packet = m.parse(frame)
         assert packet is not None and packet.bank == 3
         # the checksum rides along in the data, so it is trimmed by length
-        assert packet.data()[:len(data)] == data
+        assert packet.data()[: len(data)] == data

@@ -42,7 +42,12 @@ from dataclasses import dataclass
 from typing import List, Optional, Sequence
 
 __all__ = [
-    "MULTISETS", "MULTISET_SIZE", "CHANNELS", "Part", "Multiset", "parse",
+    "MULTISETS",
+    "MULTISET_SIZE",
+    "CHANNELS",
+    "Part",
+    "Multiset",
+    "parse",
 ]
 
 #: Confirmed twice: 32 name slots in the dump, and Korg's two Multiset
@@ -56,7 +61,7 @@ CHANNELS = 16
 PART_BASE = 22
 PART_SIZE = 4
 
-NAME_BASE = MULTISETS * MULTISET_SIZE      # 2752
+NAME_BASE = MULTISETS * MULTISET_SIZE  # 2752
 NAME_SIZE = 16
 
 
@@ -64,11 +69,11 @@ NAME_SIZE = 16
 class Part:
     """One MIDI channel's assignment within a Multiset."""
 
-    channel: int          #: 1-16, as a person counts them
-    bank: int             #: the performance's bank
-    performance: int      #: 0-49 within that bank
-    level: int            #: 0-127
-    flag: int             #: unidentified; 1 on channels 1-15, 0 on 16
+    channel: int  #: 1-16, as a person counts them
+    bank: int  #: the performance's bank
+    performance: int  #: 0-49 within that bank
+    level: int  #: 0-127
+    flag: int  #: unidentified; 1 on channels 1-15, 0 on 16
 
     @property
     def used(self) -> bool:
@@ -83,8 +88,7 @@ class Multiset:
 
     @property
     def display(self) -> str:
-        return f"{self.number:02d} {self.name}" if self.name \
-            else f"{self.number:02d}"
+        return f"{self.number:02d} {self.name}" if self.name else f"{self.number:02d}"
 
 
 def _name(raw: Sequence[int]) -> str:
@@ -94,8 +98,7 @@ def _name(raw: Sequence[int]) -> str:
             break
         # 0x7F is a space; Korg's appendix says so for parameter change
         # messages and the stored names use it the same way.
-        out.append(" " if byte == 0x7F else
-                   chr(byte) if 32 <= byte <= 126 else " ")
+        out.append(" " if byte == 0x7F else chr(byte) if 32 <= byte <= 126 else " ")
     return "".join(out).rstrip()
 
 
@@ -109,19 +112,27 @@ def parse(data: Sequence[int]) -> List[Multiset]:
     needed = NAME_BASE + MULTISETS * NAME_SIZE
     if len(data) < needed:
         raise ValueError(
-            f"a Multiset dump decodes to at least {needed} bytes; got "
-            f"{len(data)}")
+            f"a Multiset dump decodes to at least {needed} bytes; got {len(data)}"
+        )
     out = []
     for number in range(MULTISETS):
         base = number * MULTISET_SIZE
         parts = []
         for channel in range(CHANNELS):
             at = base + PART_BASE + channel * PART_SIZE
-            parts.append(Part(channel=channel + 1, bank=data[at],
-                              performance=data[at + 1], level=data[at + 2],
-                              flag=data[at + 3]))
+            parts.append(
+                Part(
+                    channel=channel + 1,
+                    bank=data[at],
+                    performance=data[at + 1],
+                    level=data[at + 2],
+                    flag=data[at + 3],
+                )
+            )
         at = NAME_BASE + number * NAME_SIZE
-        out.append(Multiset(number=number,
-                            name=_name(data[at:at + NAME_SIZE]),
-                            parts=tuple(parts)))
+        out.append(
+            Multiset(
+                number=number, name=_name(data[at : at + NAME_SIZE]), parts=tuple(parts)
+            )
+        )
     return out

@@ -37,17 +37,20 @@ def _waveseq(chains):
 
 def _patch(name, wave):
     rec = bytearray(r.PATCH_SIZE)
-    rec[0:len(name)] = name.encode()
+    rec[0 : len(name)] = name.encode()
     for index in range(4):
-        r.set_patch_wave(rec, index, bank=0,
-                         wave=wave if index == 0 else 40)
+        r.set_patch_wave(rec, index, bank=0, wave=wave if index == 0 else 40)
     return bytes(rec)
 
 
 def _occupied(waveseq):
-    return sum(1 for i in range(1, r.STEPS_PER_BANK)
-               if any(waveseq[r.STEP_BASE + i * r.STEP_SIZE:
-                              r.STEP_BASE + (i + 1) * r.STEP_SIZE]))
+    return sum(
+        1
+        for i in range(1, r.STEPS_PER_BANK)
+        if any(
+            waveseq[r.STEP_BASE + i * r.STEP_SIZE : r.STEP_BASE + (i + 1) * r.STEP_SIZE]
+        )
+    )
 
 
 class TestSharedStepsAreCountedAndCopiedOnce:
@@ -62,16 +65,21 @@ class TestSharedStepsAreCountedAndCopiedOnce:
 
     def _sources(self):
         source = deps.Source(
-            bank_id="A", performances=[],
+            bank_id="A",
+            performances=[],
             patches=[_patch("One", 0), _patch("Two", 1)],
-            waveseq=_waveseq({0: [1, 2, 3], 1: [2, 3]}))
+            waveseq=_waveseq({0: [1, 2, 3], 1: [2, 3]}),
+        )
         return {"A": source}
 
     def _build(self, sources, made):
-        return bb.build(sources, made,
-                        template_patches=bytes(35 * r.PATCH_SIZE),
-                        template_performances=bytes(50 * r.PERFORMANCE_SIZE),
-                        template_waveseq=bytes(r.WAVESEQ_BANK_SIZE))
+        return bb.build(
+            sources,
+            made,
+            template_patches=bytes(35 * r.PATCH_SIZE),
+            template_performances=bytes(50 * r.PERFORMANCE_SIZE),
+            template_waveseq=bytes(r.WAVESEQ_BANK_SIZE),
+        )
 
     def test_the_plan_and_the_build_agree(self):
         sources = self._sources()
@@ -94,19 +102,25 @@ class TestSharedStepsAreCountedAndCopiedOnce:
         for (bank_id, _wave_bank, seq), slot in made.sequence_map.items():
             before = deps.walk_sequence(sources[bank_id].waveseq, seq)
             after = deps.walk_sequence(built.waveseq, slot)
-            assert [r.step(sources[bank_id].waveseq, s)["wave"]
-                    for s in before.steps] == \
-                   [r.step(built.waveseq, s)["wave"] for s in after.steps]
+            assert [
+                r.step(sources[bank_id].waveseq, s)["wave"] for s in before.steps
+            ] == [r.step(built.waveseq, s)["wave"] for s in after.steps]
 
     def test_two_source_banks_do_not_share_step_numbers(self):
         """Step 7 of one bank is not step 7 of another."""
         sources = {
-            "A": deps.Source(bank_id="A", performances=[],
-                             patches=[_patch("One", 0)],
-                             waveseq=_waveseq({0: [1, 2]})),
-            "B": deps.Source(bank_id="B", performances=[],
-                             patches=[_patch("Two", 0)],
-                             waveseq=_waveseq({0: [1, 2]})),
+            "A": deps.Source(
+                bank_id="A",
+                performances=[],
+                patches=[_patch("One", 0)],
+                waveseq=_waveseq({0: [1, 2]}),
+            ),
+            "B": deps.Source(
+                bank_id="B",
+                performances=[],
+                patches=[_patch("Two", 0)],
+                waveseq=_waveseq({0: [1, 2]}),
+            ),
         }
         made = bb.plan(sources, [("A", 0), ("B", 0)])
         built = self._build(sources, made)
@@ -118,10 +132,11 @@ class TestTheCommandLineNamesItsKind:
     def test_dump_takes_a_kind_and_defaults_to_patch(self):
         from kwsed.cli import build_parser
 
-        assert build_parser().parse_args(["dump", "CARD"]).kind == \
-            banks.Kind.PATCH
-        assert build_parser().parse_args(
-            ["dump", "CARD", "performance"]).kind == banks.Kind.PERFORMANCE
+        assert build_parser().parse_args(["dump", "CARD"]).kind == banks.Kind.PATCH
+        assert (
+            build_parser().parse_args(["dump", "CARD", "performance"]).kind
+            == banks.Kind.PERFORMANCE
+        )
 
     def test_patch_pluralises_properly(self):
         """It read "all patchs" in the prompt for a destructive write."""
@@ -136,6 +151,7 @@ class TestTheCommandLineNamesItsKind:
         import importlib
 
         import kwsed.cli
+
         importlib.reload(kwsed.cli)
         assert hasattr(kwsed.cli, "main")
 

@@ -87,27 +87,44 @@ class _Data(ctypes.Union):
 
 class _Event(ctypes.Structure):
     _fields_ = [
-        ("type", ctypes.c_ubyte), ("flags", ctypes.c_ubyte),
-        ("tag", ctypes.c_ubyte), ("queue", ctypes.c_ubyte),
+        ("type", ctypes.c_ubyte),
+        ("flags", ctypes.c_ubyte),
+        ("tag", ctypes.c_ubyte),
+        ("queue", ctypes.c_ubyte),
         ("time", ctypes.c_ubyte * 8),
-        ("source", _Addr), ("dest", _Addr),
+        ("source", _Addr),
+        ("dest", _Addr),
         ("data", _Data),
     ]
 
 
 if _lib is not None:
-    _lib.snd_seq_open.argtypes = [ctypes.POINTER(ctypes.c_void_p),
-                                  ctypes.c_char_p, ctypes.c_int, ctypes.c_int]
+    _lib.snd_seq_open.argtypes = [
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_int,
+    ]
     _lib.snd_seq_set_client_name.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
-    _lib.snd_seq_create_simple_port.argtypes = [ctypes.c_void_p, ctypes.c_char_p,
-                                                ctypes.c_uint, ctypes.c_uint]
-    _lib.snd_seq_connect_to.argtypes = [ctypes.c_void_p, ctypes.c_int,
-                                        ctypes.c_int, ctypes.c_int]
+    _lib.snd_seq_create_simple_port.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+        ctypes.c_uint,
+    ]
+    _lib.snd_seq_connect_to.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_int,
+        ctypes.c_int,
+        ctypes.c_int,
+    ]
     _lib.snd_seq_set_client_pool_output.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
     _lib.snd_seq_set_output_buffer_size.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
     _lib.snd_seq_event_output.argtypes = [ctypes.c_void_p, ctypes.POINTER(_Event)]
-    _lib.snd_seq_event_output_direct.argtypes = [ctypes.c_void_p,
-                                                 ctypes.POINTER(_Event)]
+    _lib.snd_seq_event_output_direct.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(_Event),
+    ]
     _lib.snd_seq_drain_output.argtypes = [ctypes.c_void_p]
     _lib.snd_seq_close.argtypes = [ctypes.c_void_p]
     _lib.snd_strerror.argtypes = [ctypes.c_int]
@@ -123,35 +140,55 @@ def _check(code, what):
 
 def _require_lib() -> None:
     if _lib is None:
-        raise OSError("no ALSA sequencer on this host; "
-                      "large dumps cannot be sent via kws.alsa")
+        raise OSError(
+            "no ALSA sequencer on this host; large dumps cannot be sent via kws.alsa"
+        )
 
 
 class Sender:
-    def __init__(self, client: int, port: int, *, pool: int = 2000,
-                 buffer_size: int = 1 << 18, name: bytes = b"kwsed"):
+    def __init__(
+        self,
+        client: int,
+        port: int,
+        *,
+        pool: int = 2000,
+        buffer_size: int = 1 << 18,
+        name: bytes = b"kwsed",
+    ):
         _require_lib()
         self._seq = ctypes.c_void_p()
-        _check(_lib.snd_seq_open(ctypes.byref(self._seq), b"default",
-                                 SND_SEQ_OPEN_OUTPUT, 0), "snd_seq_open")
-        _check(_lib.snd_seq_set_client_name(self._seq, name),
-               "set_client_name")
+        _check(
+            _lib.snd_seq_open(
+                ctypes.byref(self._seq), b"default", SND_SEQ_OPEN_OUTPUT, 0
+            ),
+            "snd_seq_open",
+        )
+        _check(_lib.snd_seq_set_client_name(self._seq, name), "set_client_name")
         # Two different limits, and both bite. The kernel-side *pool* is
         # how many event cells the client may hold; the userspace *output
         # buffer* is how large a single event may be before
         # snd_seq_event_output refuses it with EINVAL. Raising only the pool
         # leaves a bank dump still rejected.
-        _check(_lib.snd_seq_set_client_pool_output(self._seq, pool),
-               "set_client_pool_output")
-        _check(_lib.snd_seq_set_output_buffer_size(self._seq, buffer_size),
-               "set_output_buffer_size")
-        self._port = _check(_lib.snd_seq_create_simple_port(
-            self._seq, b"out",
-            SND_SEQ_PORT_CAP_READ | SND_SEQ_PORT_CAP_SUBS_READ,
-            SND_SEQ_PORT_TYPE_MIDI_GENERIC | SND_SEQ_PORT_TYPE_APPLICATION),
-            "create_simple_port")
-        _check(_lib.snd_seq_connect_to(self._seq, self._port, client, port),
-               "connect_to")
+        _check(
+            _lib.snd_seq_set_client_pool_output(self._seq, pool),
+            "set_client_pool_output",
+        )
+        _check(
+            _lib.snd_seq_set_output_buffer_size(self._seq, buffer_size),
+            "set_output_buffer_size",
+        )
+        self._port = _check(
+            _lib.snd_seq_create_simple_port(
+                self._seq,
+                b"out",
+                SND_SEQ_PORT_CAP_READ | SND_SEQ_PORT_CAP_SUBS_READ,
+                SND_SEQ_PORT_TYPE_MIDI_GENERIC | SND_SEQ_PORT_TYPE_APPLICATION,
+            ),
+            "create_simple_port",
+        )
+        _check(
+            _lib.snd_seq_connect_to(self._seq, self._port, client, port), "connect_to"
+        )
 
     #: Bytes per ALSA event. A System Exclusive message is just a byte
     #: stream once it reaches the wire, so it may be handed to the
@@ -187,7 +224,7 @@ class Sender:
         """Send one message, paced to the speed of the wire."""
         data = bytes(data)
         for start in range(0, len(data), self.CHUNK):
-            chunk = data[start:start + self.CHUNK]
+            chunk = data[start : start + self.CHUNK]
             self._send_one(chunk)
             if start + self.CHUNK < len(data):
                 time.sleep(len(chunk) / self.BYTES_PER_SECOND)
@@ -198,9 +235,9 @@ class Sender:
         ctypes.memset(ctypes.byref(ev), 0, ctypes.sizeof(ev))
         ev.type = SND_SEQ_EVENT_SYSEX
         ev.flags = SND_SEQ_TIME_STAMP_TICK | SND_SEQ_EVENT_LENGTH_VARIABLE
-        ev.queue = 253            # SND_SEQ_QUEUE_DIRECT
+        ev.queue = 253  # SND_SEQ_QUEUE_DIRECT
         ev.source = _Addr(self._port, 0)
-        ev.dest = _Addr(254, 0)   # SND_SEQ_ADDRESS_SUBSCRIBERS
+        ev.dest = _Addr(254, 0)  # SND_SEQ_ADDRESS_SUBSCRIBERS
         ev.data.ext.len = len(data)
         ev.data.ext.ptr = ctypes.cast(buf, ctypes.c_void_p)
         # Direct, not pooled. snd_seq_event_output buffers the event in
@@ -214,11 +251,10 @@ class Sender:
         # allows. Wait and offer it again rather than failing the write.
         deadline = time.time() + 30.0
         while True:
-            rc = _lib.snd_seq_event_output_direct(self._seq,
-                                                  ctypes.byref(ev))
+            rc = _lib.snd_seq_event_output_direct(self._seq, ctypes.byref(ev))
             if rc >= 0:
                 return
-            if rc != -11 or time.time() > deadline:   # -EAGAIN
+            if rc != -11 or time.time() > deadline:  # -EAGAIN
                 _check(rc, "event_output_direct")
             time.sleep(0.002)
 

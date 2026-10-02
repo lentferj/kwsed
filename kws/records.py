@@ -56,15 +56,26 @@ from dataclasses import dataclass
 from typing import List, Optional, Sequence
 
 __all__ = [
-    "PERFORMANCE_SIZE", "PATCH_SIZE", "WAVESEQ_BANK_SIZE",
-    "PARTS_PER_PERFORMANCE", "OSCILLATORS_PER_PATCH",
-    "SEQUENCES_PER_BANK", "STEPS_PER_BANK",
-    "PartRef", "WaveRef",
-    "performance_parts", "set_performance_part",
-    "patch_waves", "set_patch_wave",
-    "sequence_names", "sequence_header", "step", "set_step_links",
+    "PERFORMANCE_SIZE",
+    "PATCH_SIZE",
+    "WAVESEQ_BANK_SIZE",
+    "PARTS_PER_PERFORMANCE",
+    "OSCILLATORS_PER_PATCH",
+    "SEQUENCES_PER_BANK",
+    "STEPS_PER_BANK",
+    "PartRef",
+    "WaveRef",
+    "performance_parts",
+    "set_performance_part",
+    "patch_waves",
+    "set_patch_wave",
+    "sequence_names",
+    "sequence_header",
+    "step",
+    "set_step_links",
     "set_step_wave",
-    "ROM_WAVE_BASE", "UNUSED_PATCH",
+    "ROM_WAVE_BASE",
+    "UNUSED_PATCH",
 ]
 
 # --- sizes -------------------------------------------------------------------
@@ -89,9 +100,9 @@ OSC_SIZE = 84
 #: Wave sequence bank.
 SEQ_BASE = 0
 SEQ_SIZE = 16
-STEP_BASE = SEQUENCES_PER_BANK * SEQ_SIZE          # 512
+STEP_BASE = SEQUENCES_PER_BANK * SEQ_SIZE  # 512
 STEP_SIZE = 16
-SEQNAME_BASE = STEP_BASE + STEPS_PER_BANK * STEP_SIZE   # 8528
+SEQNAME_BASE = STEP_BASE + STEPS_PER_BANK * STEP_SIZE  # 8528
 SEQNAME_SIZE = 8
 
 #: A wave number below this is a **wave sequence** in the oscillator's own
@@ -120,6 +131,7 @@ def _s8(value: int) -> int:
 
 # --- performance -> patch ----------------------------------------------------
 
+
 @dataclass(frozen=True)
 class PartRef:
     """One of a performance's eight parts, and what it points at."""
@@ -137,27 +149,29 @@ def performance_parts(record: Sequence[int]) -> List[PartRef]:
     """The eight parts of a performance, used or not."""
     if len(record) < PERFORMANCE_SIZE:
         raise ValueError(
-            f"a performance is {PERFORMANCE_SIZE} bytes; got {len(record)}")
+            f"a performance is {PERFORMANCE_SIZE} bytes; got {len(record)}"
+        )
     out = []
     for i in range(PARTS_PER_PERFORMANCE):
         at = PART_BASE + i * PART_SIZE
         low = record[at]
         mode = record[at + 4]
-        out.append(PartRef(index=i,
-                           bank=low + ((mode >> 6) & 3) * 4,
-                           patch=record[at + 1]))
+        out.append(
+            PartRef(index=i, bank=low + ((mode >> 6) & 3) * 4, patch=record[at + 1])
+        )
     return out
 
 
-def set_performance_part(record: bytearray, index: int, *,
-                         bank: int, patch: int) -> None:
+def set_performance_part(
+    record: bytearray, index: int, *, bank: int, patch: int
+) -> None:
     """Point one part at ``patch`` in ``bank``, both halves of the bank.
 
     The high two bits of the bank live in ``partMode`` alongside unrelated
     settings, so they are edited in place rather than written over.
     """
     if not 0 <= index < PARTS_PER_PERFORMANCE:
-        raise ValueError(f"part {index} is outside 0-{PARTS_PER_PERFORMANCE-1}")
+        raise ValueError(f"part {index} is outside 0-{PARTS_PER_PERFORMANCE - 1}")
     if not 0 <= bank <= 11:
         raise ValueError(f"bank {bank} is outside 0-11")
     at = PART_BASE + index * PART_SIZE
@@ -167,6 +181,7 @@ def set_performance_part(record: bytearray, index: int, *,
 
 
 # --- patch -> wave / wave sequence -------------------------------------------
+
 
 @dataclass(frozen=True)
 class WaveRef:
@@ -188,14 +203,17 @@ def patch_waves(record: Sequence[int]) -> List[WaveRef]:
     out = []
     for i in range(OSCILLATORS_PER_PATCH):
         at = OSC_BASE + i * OSC_SIZE
-        out.append(WaveRef(index=i,
-                           bank=record[at + 2],
-                           wave=_u16(record, at + 3) + _s8(record[at + 83])))
+        out.append(
+            WaveRef(
+                index=i,
+                bank=record[at + 2],
+                wave=_u16(record, at + 3) + _s8(record[at + 83]),
+            )
+        )
     return out
 
 
-def set_patch_wave(record: bytearray, index: int, *,
-                   bank: int, wave: int) -> None:
+def set_patch_wave(record: bytearray, index: int, *, bank: int, wave: int) -> None:
     """Point one oscillator at ``wave`` in ``bank``.
 
     The split between ``waveNum`` and ``waveNumExp`` is collapsed: the whole
@@ -203,8 +221,7 @@ def set_patch_wave(record: bytearray, index: int, *,
     instrument's own editor does for anything in range.
     """
     if not 0 <= index < OSCILLATORS_PER_PATCH:
-        raise ValueError(
-            f"oscillator {index} is outside 0-{OSCILLATORS_PER_PATCH-1}")
+        raise ValueError(f"oscillator {index} is outside 0-{OSCILLATORS_PER_PATCH - 1}")
     at = OSC_BASE + index * OSC_SIZE
     record[at + 2] = bank & 0xFF
     _put_u16(record, at + 3, wave & 0xFFFF)
@@ -213,26 +230,25 @@ def set_patch_wave(record: bytearray, index: int, *,
 
 # --- wave sequence bank ------------------------------------------------------
 
+
 def sequence_names(bank: Sequence[int]) -> List[str]:
     """The 32 wave-sequence names of a wave-sequence bank."""
     if len(bank) < WAVESEQ_BANK_SIZE:
         raise ValueError(
-            f"a wave sequence bank is {WAVESEQ_BANK_SIZE} bytes; "
-            f"got {len(bank)}")
+            f"a wave sequence bank is {WAVESEQ_BANK_SIZE} bytes; got {len(bank)}"
+        )
     out = []
     for i in range(SEQUENCES_PER_BANK):
         at = SEQNAME_BASE + i * SEQNAME_SIZE
-        raw = bytes(bank[at:at + SEQNAME_SIZE])
-        out.append("".join(chr(b) if 32 <= b <= 126 else " "
-                           for b in raw).rstrip())
+        raw = bytes(bank[at : at + SEQNAME_SIZE])
+        out.append("".join(chr(b) if 32 <= b <= 126 else " " for b in raw).rstrip())
     return out
 
 
 def sequence_header(bank: Sequence[int], number: int) -> dict:
     """One wave sequence's header, including the step it starts at."""
     if not 0 <= number < SEQUENCES_PER_BANK:
-        raise ValueError(
-            f"sequence {number} is outside 0-{SEQUENCES_PER_BANK - 1}")
+        raise ValueError(f"sequence {number} is outside 0-{SEQUENCES_PER_BANK - 1}")
     at = SEQ_BASE + number * SEQ_SIZE
     return {
         "link": _u16(bank, at),
@@ -247,8 +263,7 @@ def sequence_header(bank: Sequence[int], number: int) -> dict:
 def step(bank: Sequence[int], index: int) -> dict:
     """One step out of the bank's shared pool of 501."""
     if not 0 <= index < STEPS_PER_BANK:
-        raise ValueError(
-            f"step {index} is outside 0-{STEPS_PER_BANK - 1}")
+        raise ValueError(f"step {index} is outside 0-{STEPS_PER_BANK - 1}")
     at = STEP_BASE + index * STEP_SIZE
     return {
         "forward": _u16(bank, at),
@@ -270,19 +285,18 @@ def set_step_wave(bank: bytearray, index: int, wave: int) -> None:
     valid, because any value at all is a legal sequence number.
     """
     if not 0 <= index < STEPS_PER_BANK:
-        raise ValueError(
-            f"step {index} is outside 0-{STEPS_PER_BANK - 1}")
+        raise ValueError(f"step {index} is outside 0-{STEPS_PER_BANK - 1}")
     if not 0 <= wave <= 0xFF:
         raise ValueError(f"{wave} does not fit in the step's wave byte")
     bank[STEP_BASE + index * STEP_SIZE + 7] = wave
 
 
-def set_step_links(bank: bytearray, index: int, *, forward: int,
-                   back: int, loop: int) -> None:
+def set_step_links(
+    bank: bytearray, index: int, *, forward: int, back: int, loop: int
+) -> None:
     """Repoint one step. Used when steps are moved into a new pool."""
     if not 0 <= index < STEPS_PER_BANK:
-        raise ValueError(
-            f"step {index} is outside 0-{STEPS_PER_BANK - 1}")
+        raise ValueError(f"step {index} is outside 0-{STEPS_PER_BANK - 1}")
     at = STEP_BASE + index * STEP_SIZE
     _put_u16(bank, at, forward)
     _put_u16(bank, at + 2, back)

@@ -60,20 +60,20 @@ class Unit:
         self.midi_out = FakeOut()
         self.contents = contents
         self.answer = answer
-        self.bridge = WavestationBridge(self.midi_in, self.midi_out,
-                                        channel=0)
+        self.bridge = WavestationBridge(self.midi_in, self.midi_out, channel=0)
         self.midi_out.send_message = self._sent
 
     def _sent(self, data):
         data = bytes(data)
         self.midi_out.sent.append(data)
         if len(data) > 5 and data[4] == m.Function.BULK_REQUEST and self.answer:
-            reply = m.frame_bulk(m.Function.ALL_PATCH_DUMP, data[5],
-                                 self.contents, channel=0)
+            reply = m.frame_bulk(
+                m.Function.ALL_PATCH_DUMP, data[5], self.contents, channel=0
+            )
             self.midi_in.queue.append((list(reply), 0.0))
         elif len(data) > 5 and data[4] == m.Function.ALL_PATCH_DUMP:
             # the instrument stores what it was sent
-            self.contents = bytes(m.parse(data).data()[:len(PATCH_BANK)])
+            self.contents = bytes(m.parse(data).data()[: len(PATCH_BANK)])
 
 
 @pytest.fixture()
@@ -84,8 +84,9 @@ def unit():
 class TestTheFence:
     def test_a_rom_bank_is_refused_before_anything_is_sent(self, unit, tmp_path):
         with pytest.raises(DeviceError) as caught:
-            unit.bridge.write_bank(5, banks.Kind.PATCH, PATCH_BANK,
-                                   backup_dir=str(tmp_path))
+            unit.bridge.write_bank(
+                5, banks.Kind.PATCH, PATCH_BANK, backup_dir=str(tmp_path)
+            )
         assert "ROM" in str(caught.value)
         assert unit.midi_out.sent == [], "a refused write must send nothing"
 
@@ -102,44 +103,49 @@ class TestTheFence:
         silent = Unit(answer=False)
         silent.bridge.DUMP_TIMEOUT = 0.1
         with pytest.raises(DeviceError) as caught:
-            silent.bridge.write_bank(11, banks.Kind.PATCH, PATCH_BANK,
-                                     backup_dir=str(tmp_path), timeout=0.1)
+            silent.bridge.write_bank(
+                11, banks.Kind.PATCH, PATCH_BANK, backup_dir=str(tmp_path), timeout=0.1
+            )
         assert "not backed up" in str(caught.value)
-        assert not any(d[4] == m.Function.ALL_PATCH_DUMP
-                       for d in silent.midi_out.sent if len(d) > 5), \
-            "a dump was sent even though the backup failed"
+        assert not any(
+            d[4] == m.Function.ALL_PATCH_DUMP
+            for d in silent.midi_out.sent
+            if len(d) > 5
+        ), "a dump was sent even though the backup failed"
 
-    def test_no_write_happens_if_the_backup_cannot_be_saved(self, unit,
-                                                            tmp_path):
+    def test_no_write_happens_if_the_backup_cannot_be_saved(self, unit, tmp_path):
         blocked = tmp_path / "not-a-directory"
         blocked.write_text("in the way")
         with pytest.raises(backup.BackupError):
-            unit.bridge.write_bank(11, banks.Kind.PATCH, PATCH_BANK,
-                                   backup_dir=str(blocked / "sub"))
-        assert not any(d[4] == m.Function.ALL_PATCH_DUMP
-                       for d in unit.midi_out.sent if len(d) > 5)
+            unit.bridge.write_bank(
+                11, banks.Kind.PATCH, PATCH_BANK, backup_dir=str(blocked / "sub")
+            )
+        assert not any(
+            d[4] == m.Function.ALL_PATCH_DUMP for d in unit.midi_out.sent if len(d) > 5
+        )
 
     def test_the_backup_holds_what_was_there_before(self, unit, tmp_path):
         was = bytearray(PATCH_BANK)
         was[0:8] = b"Previous"
         unit.contents = bytes(was)
-        result = unit.bridge.write_bank(11, banks.Kind.PATCH, PATCH_BANK,
-                                        backup_dir=str(tmp_path))
+        result = unit.bridge.write_bank(
+            11, banks.Kind.PATCH, PATCH_BANK, backup_dir=str(tmp_path)
+        )
         saved = backup.load(result["backup"])
-        restored = m.parse(saved).data()[:len(PATCH_BANK)]
+        restored = m.parse(saved).data()[: len(PATCH_BANK)]
         assert restored[0:8] == b"Previous"
         assert backup.describe(result["backup"])["bank"] == "Card"
 
     def test_a_write_is_verified_by_reading_it_back(self, unit, tmp_path):
         fresh = bytearray(PATCH_BANK)
         fresh[0:6] = b"Rebuilt"[:6]
-        result = unit.bridge.write_bank(11, banks.Kind.PATCH, bytes(fresh),
-                                        backup_dir=str(tmp_path))
+        result = unit.bridge.write_bank(
+            11, banks.Kind.PATCH, bytes(fresh), backup_dir=str(tmp_path)
+        )
         assert result["verified"] is True
         assert result["mismatch"] is None
 
-    def test_a_bad_read_back_is_reported_not_claimed_as_success(self, unit,
-                                                                tmp_path):
+    def test_a_bad_read_back_is_reported_not_claimed_as_success(self, unit, tmp_path):
         """A bulk dump is unacknowledged, so success must be demonstrated."""
         original = unit._sent
 
@@ -151,8 +157,9 @@ class TestTheFence:
                 unit.contents = bytes(wrong)
 
         unit.midi_out.send_message = lying
-        result = unit.bridge.write_bank(11, banks.Kind.PATCH, PATCH_BANK,
-                                        backup_dir=str(tmp_path))
+        result = unit.bridge.write_bank(
+            11, banks.Kind.PATCH, PATCH_BANK, backup_dir=str(tmp_path)
+        )
         assert result["verified"] is False
         assert "differs" in result["mismatch"]
 
@@ -163,20 +170,23 @@ class TestTheModal:
 
     def _screen(self, bank=11, fired=None):
         from kwsed.app import SendScreen
-        return SendScreen(path="favourites-patch.syx",
-                          kind=banks.Kind.PATCH,
-                          destination=banks.bank(bank),
-                          current={0: "Glass Meridian", 1: "Slow Tideline"},
-                          on_send=fired)
+
+        return SendScreen(
+            path="favourites-patch.syx",
+            kind=banks.Kind.PATCH,
+            destination=banks.bank(bank),
+            current={0: "Glass Meridian", 1: "Slow Tideline"},
+            on_send=fired,
+        )
 
     def test_arming_sends_nothing(self):
         calls = []
         screen = self._screen(fired=lambda *a: calls.append(a))
         screen._armed = False
         try:
-            screen.action_arm()          # needs no mounted widgets to arm
+            screen.action_arm()  # needs no mounted widgets to arm
         except Exception:
-            screen._armed = True         # the state is what is under test
+            screen._armed = True  # the state is what is under test
         assert calls == [], "arming must not write"
         assert screen._armed is True, "arming a writable bank must arm it"
 
@@ -201,14 +211,16 @@ class TestTheModal:
 
     def test_the_fire_key_is_not_the_arm_key_and_not_enter(self):
         from kwsed.app import SendScreen
+
         keys = {b.action: b.key for b in SendScreen.BINDINGS}
         assert keys["arm"] != keys["fire"]
         assert keys["fire"] not in ("enter", "return")
 
     def test_the_screen_names_what_it_will_replace(self):
         text = self._screen()._describe()
-        assert "Glass Meridian" in text, \
+        assert "Glass Meridian" in text, (
             "a destination shown only as a number is how work gets lost"
+        )
         assert "Card" in text
 
 
@@ -221,12 +233,13 @@ class TestLargeMessagesGetTheOtherTransport:
 
     def test_a_port_name_yields_its_sequencer_address(self):
         from kws import alsa
+
         assert alsa.port_address("U6MIDI Pro:U6MIDI Pro MIDI 1 44:0") == (44, 0)
-        assert alsa.port_address("Midi Through:Midi Through Port-0 14:0") \
-            == (14, 0)
+        assert alsa.port_address("Midi Through:Midi Through Port-0 14:0") == (14, 0)
 
     def test_a_name_without_an_address_is_declined(self):
         from kws import alsa
+
         assert alsa.port_address("not an alsa port") is None
         assert alsa.port_address("") is None
         assert alsa.port_address(None) is None
@@ -234,14 +247,17 @@ class TestLargeMessagesGetTheOtherTransport:
     def test_the_threshold_is_below_what_rtmidi_manages(self):
         from kws.bridge import WavestationBridge
         from kws import banks, records as r
+
         assert WavestationBridge.RTMIDI_LIMIT < 8192
         bank = banks.PATCHES_PER_BANK * r.PATCH_SIZE
-        assert bank > WavestationBridge.RTMIDI_LIMIT, \
+        assert bank > WavestationBridge.RTMIDI_LIMIT, (
             "a patch bank must take the other transport"
+        )
 
     def test_the_chunk_is_small_enough_for_one_event(self):
         """A whole dump in one event is refused however large the pool is."""
         from kws import alsa
+
         assert alsa.Sender.CHUNK <= 512
 
 
@@ -255,13 +271,17 @@ class TestTheSendIsPaced:
 
     def test_the_rate_is_below_the_wire_rate(self):
         from kws import alsa
-        assert alsa.Sender.BYTES_PER_SECOND < 3125, \
+
+        assert alsa.Sender.BYTES_PER_SECOND < 3125, (
             "pacing at exactly the wire rate leaves no margin"
-        assert alsa.Sender.BYTES_PER_SECOND > 2000, \
+        )
+        assert alsa.Sender.BYTES_PER_SECOND > 2000, (
             "too slow makes a bank write take minutes"
+        )
 
     def test_a_bank_would_take_about_the_time_the_wire_needs(self):
         from kws import alsa, banks, records as r
+
         size = 2 * banks.PATCHES_PER_BANK * r.PATCH_SIZE  # nibble encoded
         seconds = size / alsa.Sender.BYTES_PER_SECOND
         assert 9 < seconds < 15, f"a patch bank would take {seconds:.1f}s"
@@ -272,6 +292,7 @@ class TestMultisets:
 
     def _dump(self, assignments=None):
         from kws import multi
+
         data = bytearray(multi.NAME_BASE + multi.MULTISETS * multi.NAME_SIZE)
         for number in range(multi.MULTISETS):
             base = number * multi.MULTISET_SIZE
@@ -280,21 +301,22 @@ class TestMultisets:
                 data[at] = 0
                 data[at + 1] = channel
                 data[at + 2] = 127
-            name = f"Invented{number}".encode()[:multi.NAME_SIZE]
+            name = f"Invented{number}".encode()[: multi.NAME_SIZE]
             at = multi.NAME_BASE + number * multi.NAME_SIZE
-            data[at:at + len(name)] = name
+            data[at : at + len(name)] = name
         for at, value in (assignments or {}).items():
             data[at] = value
         return bytes(data)
 
     def test_the_arithmetic_lands_flush(self):
         from kws import multi
-        assert multi.PART_BASE + multi.CHANNELS * multi.PART_SIZE == \
-            multi.MULTISET_SIZE
+
+        assert multi.PART_BASE + multi.CHANNELS * multi.PART_SIZE == multi.MULTISET_SIZE
         assert multi.MULTISETS * multi.MULTISET_SIZE == multi.NAME_BASE
 
     def test_it_parses_all_thirty_two(self):
         from kws import multi
+
         sets = multi.parse(self._dump())
         assert len(sets) == multi.MULTISETS
         assert sets[0].name == "Invented0"
@@ -303,19 +325,22 @@ class TestMultisets:
 
     def test_a_short_dump_is_refused(self):
         from kws import multi
+
         with pytest.raises(ValueError, match="at least"):
             multi.parse(self._dump()[:100])
 
     def test_seven_f_reads_as_a_space(self):
         """Korg's appendix says 0x7F is a space; the names use it too."""
         from kws import multi
+
         data = bytearray(self._dump())
         at = multi.NAME_BASE
-        data[at:at + 16] = b"Two\x7fWords" + bytes(7)
+        data[at : at + 16] = b"Two\x7fWords" + bytes(7)
         assert multi.parse(bytes(data))[0].name == "Two Words"
 
     def test_the_request_is_the_documented_one(self):
         from kws import messages as m
+
         assert m.Function.MULTI_REQUEST == 0x06
         assert m.REQUEST_FOR_DUMP[m.Function.MULTISET_DUMP] == 0x06
 
@@ -334,12 +359,15 @@ class TestReadsMatchTheBankTheyAskedFor:
         from kws import banks as bk, records as r
 
         payload = bytes(bk.PATCHES_PER_BANK * r.PATCH_SIZE)
-        reply = m.frame_bulk(m.Function.ALL_PATCH_DUMP, reply_bank,
-                             payload, channel=0)
+        reply = m.frame_bulk(m.Function.ALL_PATCH_DUMP, reply_bank, payload, channel=0)
 
         class In:
-            def __init__(self): self.queue = []
-            def ignore_types(self, **kw): pass
+            def __init__(self):
+                self.queue = []
+
+            def ignore_types(self, **kw):
+                pass
+
             def get_message(self):
                 return self.queue.pop(0) if self.queue else None
 
@@ -377,13 +405,21 @@ class TestALargeSendIsRefusedWithoutTheAlsaPath:
         from kws import alsa, bridge as b
 
         class Out:
-            def __init__(self): self.sent = []
-            def open_port(self, *a): pass        # looks like a real port
-            def send_message(self, data): self.sent.append(bytes(data))
+            def __init__(self):
+                self.sent = []
+
+            def open_port(self, *a):
+                pass  # looks like a real port
+
+            def send_message(self, data):
+                self.sent.append(bytes(data))
 
         class In:
-            def ignore_types(self, **kw): pass
-            def get_message(self): return None
+            def ignore_types(self, **kw):
+                pass
+
+            def get_message(self):
+                return None
 
         out = Out()
         bridge = WavestationBridge(In(), out, channel=0)
@@ -402,8 +438,7 @@ class TestALargeSendIsRefusedWithoutTheAlsaPath:
         """The case the old nesting skipped."""
         from kws import alsa
 
-        bridge, out, alsa_mod = self._bridge(
-            "U6MIDI Pro:U6MIDI Pro MIDI 1 44:0", False)
+        bridge, out, alsa_mod = self._bridge("U6MIDI Pro:U6MIDI Pro MIDI 1 44:0", False)
         monkeypatch.setattr(alsa_mod, "available", lambda: False)
         with pytest.raises(DeviceError, match="Nothing was sent"):
             bridge._send(bytes(29828))

@@ -44,8 +44,9 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 __all__ = ["Entry", "Catalog", "load", "empty", "DEFAULT_PATH"]
 
-DEFAULT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            "data", "catalog.json")
+DEFAULT_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "data", "catalog.json"
+)
 
 
 @dataclass(frozen=True)
@@ -70,8 +71,9 @@ class Entry:
 class Catalog:
     """Printed names, plus whatever has been read from a unit."""
 
-    def __init__(self, entries: Iterable[Entry] = (), *, source: str = "",
-                 generated: str = "") -> None:
+    def __init__(
+        self, entries: Iterable[Entry] = (), *, source: str = "", generated: str = ""
+    ) -> None:
         self._entries: Dict[str, Entry] = {}
         for entry in entries:
             self._entries[entry.key] = entry
@@ -100,8 +102,7 @@ class Catalog:
 
     # --- live ---------------------------------------------------------------
 
-    def set_live_name(self, bank_id: str, kind: str, number: int,
-                      name: str) -> None:
+    def set_live_name(self, bank_id: str, kind: str, number: int, name: str) -> None:
         self._live[f"{bank_id}:{kind}:{number:03d}"] = name
 
     def live_name(self, bank_id: str, kind: str, number: int) -> Optional[str]:
@@ -132,8 +133,9 @@ class Catalog:
         printed = self.name(bank_id, kind, number)
         return printed is not None and printed != live
 
-    def disagreement(self, bank_id: str, kind: str, number: int,
-                     writable: bool) -> Optional[str]:
+    def disagreement(
+        self, bank_id: str, kind: str, number: int, writable: bool
+    ) -> Optional[str]:
         """Why the unit and the catalog differ here, in words.
 
         ``None`` when they agree or the slot has not been read.
@@ -202,13 +204,24 @@ def load(path: Optional[str] = None) -> Catalog:
             # to discard every good one with it, which turns a typo in a
             # generated file into "no names at all".
             try:
-                entries.append(Entry(bank_id=bank_id, kind=row["kind"],
-                                     number=int(row["n"]),
-                                     name=row["name"]))
+                entries.append(
+                    Entry(
+                        bank_id=bank_id,
+                        kind=row["kind"],
+                        number=int(row["n"]),
+                        name=row["name"],
+                    )
+                )
             except (KeyError, TypeError, ValueError):
                 skipped += 1
     if skipped:
-        print(f"warning: {target} has {skipped} unreadable row(s), skipped; "
-              f"regenerate it with tools/extract_catalog.py", file=sys.stderr)
-    return Catalog(entries, source=payload.get("source", ""),
-                   generated=payload.get("generated", ""))
+        print(
+            f"warning: {target} has {skipped} unreadable row(s), skipped; "
+            f"regenerate it with tools/extract_catalog.py",
+            file=sys.stderr,
+        )
+    return Catalog(
+        entries,
+        source=payload.get("source", ""),
+        generated=payload.get("generated", ""),
+    )

@@ -53,19 +53,41 @@ def _load(spec):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--source", action="append", default=[], metavar="ID=GLOB",
-                    help="a source bank's dumps; repeatable")
-    ap.add_argument("--template", metavar="GLOB", default=None,
-                    help="dumps of an empty bank to build on (recommended: "
-                         "format a bank on the instrument and dump it)")
-    ap.add_argument("--patch", action="append", default=[], metavar="ID:N",
-                    help="a patch to include, in priority order; repeatable")
-    ap.add_argument("--bank", default="CARD",
-                    help="which bank the result is destined for (default CARD)")
-    ap.add_argument("--out", default=None,
-                    help="write <out>-patch.syx etc.; omit for a dry run")
-    ap.add_argument("--channel", type=int, default=1,
-                    help="global channel to frame the output for, 1-16")
+    ap.add_argument(
+        "--source",
+        action="append",
+        default=[],
+        metavar="ID=GLOB",
+        help="a source bank's dumps; repeatable",
+    )
+    ap.add_argument(
+        "--template",
+        metavar="GLOB",
+        default=None,
+        help="dumps of an empty bank to build on (recommended: "
+        "format a bank on the instrument and dump it)",
+    )
+    ap.add_argument(
+        "--patch",
+        action="append",
+        default=[],
+        metavar="ID:N",
+        help="a patch to include, in priority order; repeatable",
+    )
+    ap.add_argument(
+        "--bank",
+        default="CARD",
+        help="which bank the result is destined for (default CARD)",
+    )
+    ap.add_argument(
+        "--out", default=None, help="write <out>-patch.syx etc.; omit for a dry run"
+    )
+    ap.add_argument(
+        "--channel",
+        type=int,
+        default=1,
+        help="global channel to frame the output for, 1-16",
+    )
     args = ap.parse_args(argv)
 
     if not 1 <= args.channel <= 16:
@@ -89,11 +111,12 @@ def main(argv=None):
     made = bankbuild.plan(sources, chosen)
 
     print(f"patches       {len(made.patch_map):3d} / {banks.PATCHES_PER_BANK}")
-    print(f"wave seqs     {len(made.sequence_map):3d} / "
-          f"{rec.SEQUENCES_PER_BANK}")
+    print(f"wave seqs     {len(made.sequence_map):3d} / {rec.SEQUENCES_PER_BANK}")
     print(f"steps         {made.steps_used:3d} / {rec.STEPS_PER_BANK}")
-    print(f"performances  {len(made.performances):3d} / "
-          f"{banks.PERFORMANCES_PER_BANK}   (complete ones)")
+    print(
+        f"performances  {len(made.performances):3d} / "
+        f"{banks.PERFORMANCES_PER_BANK}   (complete ones)"
+    )
     for why in made.rejected:
         print("  left out:", why)
     for note in made.notes:
@@ -109,42 +132,47 @@ def main(argv=None):
             raise SystemExit(f"no files matched {args.template!r}")
         template = deps.load_syx(files, "TEMPLATE")
     else:
-        print("\nno --template: building on empty records. The instrument's "
-              "own initialised records are safer -- format a bank and dump "
-              "it.")
+        print(
+            "\nno --template: building on empty records. The instrument's "
+            "own initialised records are safer -- format a bank and dump "
+            "it."
+        )
         template = deps.Source(bank_id="TEMPLATE")
 
     built = bankbuild.build(
-        sources, made,
-        template_patches=(b"".join(template.patches)
-                          if template.patches
-                          else bytes(banks.PATCHES_PER_BANK * rec.PATCH_SIZE)),
-        template_performances=(b"".join(template.performances)
-                               if template.performances
-                               else bytes(banks.PERFORMANCES_PER_BANK
-                                          * rec.PERFORMANCE_SIZE)),
-        template_waveseq=(template.waveseq
-                          or bytes(rec.WAVESEQ_BANK_SIZE)),
-        destination_bank=destination.sysex)
+        sources,
+        made,
+        template_patches=(
+            b"".join(template.patches)
+            if template.patches
+            else bytes(banks.PATCHES_PER_BANK * rec.PATCH_SIZE)
+        ),
+        template_performances=(
+            b"".join(template.performances)
+            if template.performances
+            else bytes(banks.PERFORMANCES_PER_BANK * rec.PERFORMANCE_SIZE)
+        ),
+        template_waveseq=(template.waveseq or bytes(rec.WAVESEQ_BANK_SIZE)),
+        destination_bank=destination.sysex,
+    )
 
     channel = args.channel - 1
     written = []
     for suffix, function, payload in (
-            ("patch", m.Function.ALL_PATCH_DUMP, built.patches),
-            ("perf", m.Function.ALL_PERFORMANCE_DUMP, built.performances),
-            ("seq", m.Function.ALL_WAVESEQ_DUMP, built.waveseq)):
+        ("patch", m.Function.ALL_PATCH_DUMP, built.patches),
+        ("perf", m.Function.ALL_PERFORMANCE_DUMP, built.performances),
+        ("seq", m.Function.ALL_WAVESEQ_DUMP, built.waveseq),
+    ):
         if payload is None:
             continue
-        frame = m.frame_bulk(function, destination.sysex, payload,
-                             channel=channel)
+        frame = m.frame_bulk(function, destination.sysex, payload, channel=channel)
         path = f"{args.out}-{suffix}.syx"
         with open(path, "wb") as handle:
             handle.write(bytes(frame))
         written.append((path, len(frame)))
     for path, size in written:
         print(f"wrote {path}  ({size} bytes)")
-    print("\nNothing was sent to the instrument. Load these from its front "
-          "panel.")
+    print("\nNothing was sent to the instrument. Load these from its front panel.")
     return 0
 
 

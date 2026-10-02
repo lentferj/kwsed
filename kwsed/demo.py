@@ -35,17 +35,41 @@ from kws import messages as m
 
 __all__ = ["DemoDevice", "demo_name"]
 
-_ADJECTIVES = ("Velvet", "Rusted", "Glass", "Hollow", "Distant", "Folded",
-               "Amber", "Quiet", "Drifting", "Woven", "Paper", "Tidal")
-_NOUNS = ("Bell", "Pad", "Bass", "Lead", "Choir", "Pluck", "Sweep", "Stack",
-          "Drone", "Keys", "Brass", "Wash")
+_ADJECTIVES = (
+    "Velvet",
+    "Rusted",
+    "Glass",
+    "Hollow",
+    "Distant",
+    "Folded",
+    "Amber",
+    "Quiet",
+    "Drifting",
+    "Woven",
+    "Paper",
+    "Tidal",
+)
+_NOUNS = (
+    "Bell",
+    "Pad",
+    "Bass",
+    "Lead",
+    "Choir",
+    "Pluck",
+    "Sweep",
+    "Stack",
+    "Drone",
+    "Keys",
+    "Brass",
+    "Wash",
+)
 
 
 def demo_name(bank_id: str, kind: str, number: int) -> str:
     seed = sum(ord(c) for c in bank_id + kind) * 31 + number * 17
     adjective = _ADJECTIVES[seed % len(_ADJECTIVES)]
     noun = _NOUNS[(seed // len(_ADJECTIVES)) % len(_NOUNS)]
-    return f"{adjective} {noun}"[:m.NAME_LEN - 1]
+    return f"{adjective} {noun}"[: m.NAME_LEN - 1]
 
 
 class DemoDevice:
@@ -74,9 +98,13 @@ class DemoDevice:
     def identify(self, *, timeout: float = 0.5) -> dict:
         self.identify_calls += 1
         self._tick()
-        return {"channel": self.channel, "manufacturer": m.KORG_ID,
-                "family": (m.WAVESTATION_ID, 0), "is_korg": True,
-                "is_wavestation": True}
+        return {
+            "channel": self.channel,
+            "manufacturer": m.KORG_ID,
+            "family": (m.WAVESTATION_ID, 0),
+            "is_korg": True,
+            "is_wavestation": True,
+        }
 
     def handle(self, data: bytes) -> Optional[bytes]:
         self.received.append(bytes(data))
@@ -97,15 +125,14 @@ class DemoDevice:
         # Card, and banks.bank() would resolve it to ROM 4.
         entry = banks.by_sysex(number)
         if kind == banks.Kind.PERFORMANCE:
-            function, size = (m.Function.ALL_PERFORMANCE_DUMP,
-                              dumps.PERFORMANCE_RECORD)
+            function, size = (m.Function.ALL_PERFORMANCE_DUMP, dumps.PERFORMANCE_RECORD)
         else:
             function, size = m.Function.ALL_PATCH_DUMP, dumps.PATCH_RECORD
         raw = bytearray()
         for index in range(banks.count_for(kind)):
             record = bytearray(size)
             name = demo_name(entry.id, kind, index)
-            record[:len(name)] = name.encode("ascii")
+            record[: len(name)] = name.encode("ascii")
             # A byte with bit 7 set, so the nibble encoding is exercised.
             record[m.NAME_LEN] = 0x80 | (index & 0x7F)
             raw.extend(record)
@@ -114,12 +141,14 @@ class DemoDevice:
 
     # --- the operations kwsed uses -------------------------------------------
 
-    def read_bank(self, bank, kind: Optional[str] = None, *,
-                  timeout: Optional[float] = None):
+    def read_bank(
+        self, bank, kind: Optional[str] = None, *, timeout: Optional[float] = None
+    ):
         entry = banks.bank(bank)
         if kind == banks.Kind.PERFORMANCE:
             request = m.bank_request(
-                entry.sysex, m.Function.ALL_PERFORMANCE_DUMP, self.channel)
+                entry.sysex, m.Function.ALL_PERFORMANCE_DUMP, self.channel
+            )
         else:
             request = m.bulk_request(entry.sysex, self.channel)
         reply = self.handle(request)
@@ -128,14 +157,13 @@ class DemoDevice:
             raise RuntimeError("demo device refused its own request")
         return dumps.parse_bulk(packet)
 
-    def read_bank_names(self, bank, kind: Optional[str] = None, *,
-                        timeout: Optional[float] = None
-                        ) -> Tuple[str, Dict[int, str]]:
+    def read_bank_names(
+        self, bank, kind: Optional[str] = None, *, timeout: Optional[float] = None
+    ) -> Tuple[str, Dict[int, str]]:
         dump = self.read_bank(bank, kind)
         return dump.kind, dump.names()
 
-    def select(self, slot: banks.Slot, *, channel: Optional[int] = None
-               ) -> None:
+    def select(self, slot: banks.Slot, *, channel: Optional[int] = None) -> None:
         self._tick()
         self.selected = slot
         self.selected_log.append(slot)

@@ -51,7 +51,10 @@ from kws import messages as m  # noqa: E402
 
 DEFAULT_OUTPUT = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "kws", "data", "catalog.json")
+    "kws",
+    "data",
+    "catalog.json",
+)
 
 
 def build(paths: List[str]):
@@ -68,8 +71,10 @@ def build(paths: List[str]):
             continue
         found = 0
         for packet in packets:
-            if packet.function not in (m.Function.ALL_PERFORMANCE_DUMP,
-                                       m.Function.ALL_PATCH_DUMP):
+            if packet.function not in (
+                m.Function.ALL_PERFORMANCE_DUMP,
+                m.Function.ALL_PATCH_DUMP,
+            ):
                 continue
             try:
                 bank, kind, names = dumps.names_from_dump(packet)
@@ -83,7 +88,8 @@ def build(paths: List[str]):
             seen[marker] = base
             out.setdefault(bank.id, []).extend(
                 {"kind": kind, "n": number, "name": name}
-                for number, name in sorted(names.items()))
+                for number, name in sorted(names.items())
+            )
         if not found:
             notes.append(f"{base}: no Wavestation bank dump in it")
     for rows in out.values():
@@ -107,13 +113,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     if not banks_out:
         raise SystemExit(
             "error: none of those files held a Wavestation bank dump. kwsed "
-            "works without a catalog, showing numbers only.")
+            "works without a catalog, showing numbers only."
+        )
 
     payload = {
         "source": "; ".join(f"{k}={v}" for k, v in sorted(seen.items())),
         "generated": datetime.date.today().isoformat(),
-        "note": ("Generated locally by tools/extract_catalog.py from the "
-                 "user's own dumps. Not distributed with kwsed."),
+        "note": (
+            "Generated locally by tools/extract_catalog.py from the "
+            "user's own dumps. Not distributed with kwsed."
+        ),
         "banks": banks_out,
     }
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
@@ -122,15 +131,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         handle.write("\n")
 
     total = sum(len(rows) for rows in banks_out.values())
-    print(f"wrote {args.output}: {total} names across "
-          f"{len(banks_out)} bank(s)")
+    print(f"wrote {args.output}: {total} names across {len(banks_out)} bank(s)")
     for bank_id in sorted(banks_out, key=lambda b: banks.bank(b).number):
         rows = banks_out[bank_id]
         kinds = {}
         for row in rows:
             kinds[row["kind"]] = kinds.get(row["kind"], 0) + 1
-        detail = ", ".join(f"{n} {k}{'' if n == 1 else 's'}"
-                           for k, n in sorted(kinds.items()))
+        detail = ", ".join(
+            f"{n} {k}{'' if n == 1 else 's'}" for k, n in sorted(kinds.items())
+        )
         print(f"  {banks.bank(bank_id).label:<8} {detail}")
     return 0
 

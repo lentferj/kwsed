@@ -126,17 +126,17 @@ class Function:
     #: Each kind of bank has its **own** request. kwsed had only the patch
     #: one for its whole life and waited for performance dumps that were
     #: never asked for -- which read as "the unit decides what to send".
-    PATCH_BANK_REQUEST = 0x1C        #: + bank -> ALL_PATCH_DUMP
+    PATCH_BANK_REQUEST = 0x1C  #: + bank -> ALL_PATCH_DUMP
     PERFORMANCE_BANK_REQUEST = 0x1D  #: + bank -> ALL_PERFORMANCE_DUMP
-    WAVESEQ_BANK_REQUEST = 0x0C      #: + bank -> ALL_WAVESEQ_DUMP
-    SINGLE_PATCH_REQUEST = 0x10      #: + bank + number -> SINGLE_PATCH_DUMP
+    WAVESEQ_BANK_REQUEST = 0x0C  #: + bank -> ALL_WAVESEQ_DUMP
+    SINGLE_PATCH_REQUEST = 0x10  #: + bank + number -> SINGLE_PATCH_DUMP
     SINGLE_PERFORMANCE_REQUEST = 0x19  #: + bank + number
-    PATCH_WRITE = 0x11               #: + bank + number: commit the buffer
-    PERFORMANCE_WRITE = 0x1A         #: + bank + number: commit the buffer
-    MULTI_REQUEST = 0x06             #: no argument -> 0x55, 0x5E and 0x62
-    ALL_DATA_REQUEST = 0x0F          #: no argument -> ALL_DATA_DUMP
-    SYSTEM_SETUP_REQUEST = 0x0E      #: no argument -> SYSTEM_SETUP_DUMP
-    BULK_REQUEST = PATCH_BANK_REQUEST    #: the old name for the patch one
+    PATCH_WRITE = 0x11  #: + bank + number: commit the buffer
+    PERFORMANCE_WRITE = 0x1A  #: + bank + number: commit the buffer
+    MULTI_REQUEST = 0x06  #: no argument -> 0x55, 0x5E and 0x62
+    ALL_DATA_REQUEST = 0x0F  #: no argument -> ALL_DATA_DUMP
+    SYSTEM_SETUP_REQUEST = 0x0E  #: no argument -> SYSTEM_SETUP_DUMP
+    BULK_REQUEST = PATCH_BANK_REQUEST  #: the old name for the patch one
     #: Asks for **one patch** specifically -- 0x10 is identical to
     #: SINGLE_PATCH_REQUEST. The name says "object" because the sibling
     #: rxved carried a generic per-object request; this project has no
@@ -145,16 +145,16 @@ class Function:
     OBJECT_REQUEST = SINGLE_PATCH_REQUEST
 
     # Dumps
-    SINGLE_PATCH_DUMP = 0x40     #: one patch: bank, number, 426 bytes
-    PERFORMANCE_DUMP = 0x49      #: one performance: bank, number, 181 bytes
-    ALL_PATCH_DUMP = 0x4C        #: one bank: 35 patches of 426
+    SINGLE_PATCH_DUMP = 0x40  #: one patch: bank, number, 426 bytes
+    PERFORMANCE_DUMP = 0x49  #: one performance: bank, number, 181 bytes
+    ALL_PATCH_DUMP = 0x4C  #: one bank: 35 patches of 426
     ALL_PERFORMANCE_DUMP = 0x4D  #: one bank: 50 performances of 181
-    ALL_WAVESEQ_DUMP = 0x54      #: one bank: 32 sequences over a 501-step pool
-    ALL_DATA_DUMP = 0x50         #: system, patches, performances, wave seqs
+    ALL_WAVESEQ_DUMP = 0x54  #: one bank: 32 sequences over a 501-step pool
+    ALL_DATA_DUMP = 0x50  #: system, patches, performances, wave seqs
     SYSTEM_SETUP_DUMP = 0x51
-    MULTI_SETUP_DUMP = 0x55      #: the three multi messages always travel
+    MULTI_SETUP_DUMP = 0x55  #: the three multi messages always travel
     MULTI_SETUP_EXPANDED = 0x5E  #: together, in this order
-    MULTISET_DUMP = 0x62         #: ...and this one carries all 32 Multisets
+    MULTISET_DUMP = 0x62  #: ...and this one carries all 32 Multisets
 
     # Status replies, as Korg's Reference Guide appendix 4 lists them.
     WRITE_COMPLETED = 0x21
@@ -188,7 +188,6 @@ class Function:
         0x22: "write error",
         0x23: "data load completed",
         0x24: "data load error",
-
     }
 
     #: Korg's appendix lists write error and data load error. 0x26 is a
@@ -236,7 +235,8 @@ def channel_of(byte: int) -> int:
     """The 0-based channel a frame's third byte carries."""
     if byte & 0xF0 != FORMAT_NIBBLE:
         raise ProtocolError(
-            f"{byte:#04x} is not a format-3 byte; kwsed speaks format 3 only")
+            f"{byte:#04x} is not a format-3 byte; kwsed speaks format 3 only"
+        )
     return byte & 0x0F
 
 
@@ -255,7 +255,8 @@ def from_nibbles(data: Sequence[int]) -> bytes:
         for part in (low, high):
             if not 0 <= part <= 0x0F:
                 raise ProtocolError(
-                    f"{part:#04x} is not a nibble; nibble data is 0x00-0x0F")
+                    f"{part:#04x} is not a nibble; nibble data is 0x00-0x0F"
+                )
         out.append(low | (high << 4))
     return bytes(out)
 
@@ -302,20 +303,23 @@ class Packet:
             offset = DATA_OFFSET[self.function]
         except KeyError:
             raise ProtocolError(
-                f"{self.function_name} is not a dump kwsed decodes") from None
+                f"{self.function_name} is not a dump kwsed decodes"
+            ) from None
         # payload starts after F0 42 3n 28 fn, so five bytes are already
         # gone; DATA_OFFSET counts from F0.
-        return from_nibbles(self.payload[offset - 5:])
+        return from_nibbles(self.payload[offset - 5 :])
 
     #: Functions whose payload opens with a bank byte. The Multiset dump
     #: is decoded but excluded: its two header bytes are not a bank.
-    _BANKED = frozenset({
-        Function.ALL_PATCH_DUMP,
-        Function.ALL_PERFORMANCE_DUMP,
-        Function.ALL_WAVESEQ_DUMP,
-        Function.PERFORMANCE_DUMP,
-        Function.SINGLE_PATCH_DUMP,
-    })
+    _BANKED = frozenset(
+        {
+            Function.ALL_PATCH_DUMP,
+            Function.ALL_PERFORMANCE_DUMP,
+            Function.ALL_WAVESEQ_DUMP,
+            Function.PERFORMANCE_DUMP,
+            Function.SINGLE_PATCH_DUMP,
+        }
+    )
 
     @property
     def bank(self) -> Optional[int]:
@@ -325,14 +329,19 @@ class Packet:
         return None
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
-        return (f"Packet(channel={self.channel}, "
-                f"function={self.function:#04x} {self.function_name!r}, "
-                f"{len(self.payload)} bytes)")
+        return (
+            f"Packet(channel={self.channel}, "
+            f"function={self.function:#04x} {self.function_name!r}, "
+            f"{len(self.payload)} bytes)"
+        )
 
     def __eq__(self, other) -> bool:
-        return (isinstance(other, Packet) and other.channel == self.channel
-                and other.function == self.function
-                and other.payload == self.payload)
+        return (
+            isinstance(other, Packet)
+            and other.channel == self.channel
+            and other.function == self.function
+            and other.payload == self.payload
+        )
 
 
 def checksum(data: Sequence[int]) -> int:
@@ -350,30 +359,39 @@ def checksum(data: Sequence[int]) -> int:
     return sum(data) & 0x7F
 
 
-def frame_bulk(function: int, bank: int, data: Sequence[int], *,
-               channel: int = 0) -> bytes:
+def frame_bulk(
+    function: int, bank: int, data: Sequence[int], *, channel: int = 0
+) -> bytes:
     """A bulk dump, nibble-encoded and checksummed, ready to save or send.
 
     ``data`` is plain bytes; the nibble encoding and the trailing checksum
     are applied here so that no caller has to remember either.
     """
     nibbles = list(to_nibbles(data))
-    return frame(function, [bank] + nibbles + [checksum(nibbles)],
-                 channel=channel)
+    return frame(function, [bank] + nibbles + [checksum(nibbles)], channel=channel)
 
 
-def frame(function: int, payload: Sequence[int] = (), *,
-          channel: int = 0) -> bytes:
+def frame(function: int, payload: Sequence[int] = (), *, channel: int = 0) -> bytes:
     """Build a Wavestation System Exclusive message."""
     for byte in payload:
         if not 0 <= byte <= 0x7F:
             raise ProtocolError(
                 f"{byte:#04x} is not a 7-bit data byte; every byte between "
-                f"F0 and F7 must have bit 7 clear")
+                f"F0 and F7 must have bit 7 clear"
+            )
     if not 0 <= function <= 0x7F:
         raise ProtocolError(f"function {function:#04x} is not a 7-bit value")
-    return bytes([SYSEX_START, KORG_ID, channel_byte(channel),
-                  WAVESTATION_ID, function, *payload, SYSEX_END])
+    return bytes(
+        [
+            SYSEX_START,
+            KORG_ID,
+            channel_byte(channel),
+            WAVESTATION_ID,
+            function,
+            *payload,
+            SYSEX_END,
+        ]
+    )
 
 
 def parse(message: Sequence[int]) -> Optional[Packet]:
@@ -392,8 +410,7 @@ def parse(message: Sequence[int]) -> Optional[Packet]:
         return None
     if data[2] & 0xF0 != FORMAT_NIBBLE:
         return None
-    return Packet(channel=data[2] & 0x0F, function=data[4],
-                  payload=data[5:-1])
+    return Packet(channel=data[2] & 0x0F, function=data[4], payload=data[5:-1])
 
 
 # --- names -------------------------------------------------------------------
@@ -411,9 +428,7 @@ def decode_name(data: Sequence[int]) -> str:
     end = raw.find(0)
     if end >= 0:
         raw = raw[:end]
-    return "".join(
-        chr(byte) if 32 <= byte <= 126 else " " for byte in raw
-    ).rstrip()
+    return "".join(chr(byte) if 32 <= byte <= 126 else " " for byte in raw).rstrip()
 
 
 def encode_name(name: str, *, length: int = NAME_LEN) -> List[int]:
@@ -465,7 +480,8 @@ def bank_request(bank: int, dump: int, channel: int = 0) -> bytes:
         function = REQUEST_FOR_DUMP[dump]
     except KeyError:
         raise ProtocolError(
-            f"there is no bank request for {Function.name(dump)}") from None
+            f"there is no bank request for {Function.name(dump)}"
+        ) from None
     return frame(function, [bank], channel=channel)
 
 
@@ -485,12 +501,12 @@ def object_request(bank: int, number: int, channel: int = 0) -> bytes:
 
 def single_patch_request(bank: int, number: int, channel: int = 0) -> bytes:
     """Ask for one patch. Read-only, makes no sound."""
-    return frame(Function.SINGLE_PATCH_REQUEST, [bank, number],
-                 channel=channel)
+    return frame(Function.SINGLE_PATCH_REQUEST, [bank, number], channel=channel)
 
 
-def single_patch_dump(bank: int, number: int, data: Sequence[int], *,
-                      channel: int = 0) -> bytes:
+def single_patch_dump(
+    bank: int, number: int, data: Sequence[int], *, channel: int = 0
+) -> bytes:
     """One patch, addressed to a slot. **Lands in the edit buffer.**
 
     On its own this changes nothing in memory: Korg's appendix says a single
@@ -498,9 +514,11 @@ def single_patch_dump(bank: int, number: int, data: Sequence[int], *,
     command to put it in the slot.
     """
     nibbles = list(to_nibbles(data))
-    return frame(Function.SINGLE_PATCH_DUMP,
-                 [bank, number] + nibbles + [checksum(nibbles)],
-                 channel=channel)
+    return frame(
+        Function.SINGLE_PATCH_DUMP,
+        [bank, number] + nibbles + [checksum(nibbles)],
+        channel=channel,
+    )
 
 
 def patch_write_command(bank: int, number: int, channel: int = 0) -> bytes:

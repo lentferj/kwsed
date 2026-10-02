@@ -51,8 +51,14 @@ import re
 from typing import Dict, List, Optional, Sequence
 
 __all__ = [
-    "FORMAT", "APP_NAME", "BackupError", "data_dir", "default_dir",
-    "save", "load", "describe",
+    "FORMAT",
+    "APP_NAME",
+    "BackupError",
+    "data_dir",
+    "default_dir",
+    "save",
+    "load",
+    "describe",
     "list_backups",
 ]
 
@@ -76,6 +82,7 @@ def data_dir() -> str:
     clean` in a checkout. The layout follows the sibling projects'.
     """
     import sys as _sys
+
     if _sys.platform == "win32":
         base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA")
         if base:
@@ -83,8 +90,7 @@ def data_dir() -> str:
     elif _sys.platform == "darwin":
         home = os.path.expanduser("~")
         if home != "~":
-            return os.path.join(home, "Library", "Application Support",
-                                APP_NAME)
+            return os.path.join(home, "Library", "Application Support", APP_NAME)
     base = os.environ.get("XDG_DATA_HOME")
     # XDG requires an absolute path and says a relative one must be ignored.
     if not base or not os.path.isabs(base):
@@ -102,9 +108,15 @@ def _slug(text: str) -> str:
     return cleaned or "bank"
 
 
-def save(raw: bytes, directory: str, *, bank_label: str, kind: str,
-         names: Optional[Sequence[str]] = None,
-         channel: Optional[int] = None) -> str:
+def save(
+    raw: bytes,
+    directory: str,
+    *,
+    bank_label: str,
+    kind: str,
+    names: Optional[Sequence[str]] = None,
+    channel: Optional[int] = None,
+) -> str:
     """Write one bank's dump and its sidecar. Returns the ``.syx`` path.
 
     Raises :class:`BackupError` rather than returning on failure, because
@@ -113,15 +125,17 @@ def save(raw: bytes, directory: str, *, bank_label: str, kind: str,
     if not raw:
         raise BackupError(
             "refusing to record an empty backup: nothing was read back from "
-            "the destination, so there would be nothing to restore")
+            "the destination, so there would be nothing to restore"
+        )
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S-%f")
     stem = f"{stamp}-{_slug(bank_label)}-{_slug(kind)}"
     try:
         os.makedirs(directory, exist_ok=True)
         base = stem
         suffix = 0
-        while (os.path.exists(os.path.join(directory, base + ".syx"))
-               or os.path.exists(os.path.join(directory, base + ".json"))):
+        while os.path.exists(os.path.join(directory, base + ".syx")) or os.path.exists(
+            os.path.join(directory, base + ".json")
+        ):
             suffix += 1
             base = f"{stem}-{suffix:02d}"
         syx = os.path.join(directory, base + ".syx")
@@ -136,14 +150,16 @@ def save(raw: bytes, directory: str, *, bank_label: str, kind: str,
             "bytes": len(raw),
             "names": list(names or []),
         }
-        with open(os.path.join(directory, base + ".json"), "w",
-                  encoding="utf-8") as handle:
+        with open(
+            os.path.join(directory, base + ".json"), "w", encoding="utf-8"
+        ) as handle:
             json.dump(sidecar, handle, indent=2)
             handle.write("\n")
     except OSError as exc:
         raise BackupError(
             f"could not write the backup into {directory}: {exc}. Nothing "
-            f"has been sent to the instrument.") from exc
+            f"has been sent to the instrument."
+        ) from exc
     return syx
 
 
@@ -164,12 +180,19 @@ def describe(path: str) -> dict:
                 f"{sidecar} was written by a newer kwsed (format "
                 f"{found['format']}, this build understands {FORMAT}). The "
                 f"dump beside it is still a plain .syx and can be sent by "
-                f"any tool.")
+                f"any tool."
+            )
         return found
-    return {"format": None, "bank": "?", "kind": "?",
-            "bytes": os.path.getsize(path), "names": [],
-            "saved": datetime.datetime.fromtimestamp(
-                os.path.getmtime(path)).isoformat(timespec="seconds")}
+    return {
+        "format": None,
+        "bank": "?",
+        "kind": "?",
+        "bytes": os.path.getsize(path),
+        "names": [],
+        "saved": datetime.datetime.fromtimestamp(os.path.getmtime(path)).isoformat(
+            timespec="seconds"
+        ),
+    }
 
 
 def list_backups(directory: str) -> List[dict]:

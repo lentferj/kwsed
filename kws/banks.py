@@ -88,9 +88,9 @@ class Bank:
     11 holds a ROM bank's sounds.
     """
 
-    number: int          #: 0-11, the position a person sees it in.
-    sysex: int           #: the byte a request and a dump actually carry.
-    label: str           #: "RAM 1", "ROM 4", "Card".
+    number: int  #: 0-11, the position a person sees it in.
+    sysex: int  #: the byte a request and a dump actually carry.
+    label: str  #: "RAM 1", "ROM 4", "Card".
     writable: bool
 
     @property
@@ -104,18 +104,18 @@ class Bank:
 #: Wavestation support lists the same twelve with the same four writable.
 BANKS: Tuple[Bank, ...] = (
     #    pos  wire  label      writable
-    Bank(0,   0,    "RAM 1",   True),
-    Bank(1,   1,    "RAM 2",   True),
-    Bank(2,   4,    "RAM 3",   True),
-    Bank(3,   5,    "ROM 4",   False),
-    Bank(4,   6,    "ROM 5",   False),
-    Bank(5,   7,    "ROM 6",   False),
-    Bank(6,   8,    "ROM 7",   False),
-    Bank(7,   9,    "ROM 8",   False),
-    Bank(8,   10,   "ROM 9",   False),
-    Bank(9,   11,   "ROM 10",  False),
-    Bank(10,  2,    "ROM 11",  False),
-    Bank(11,  3,    "Card",    True),
+    Bank(0, 0, "RAM 1", True),
+    Bank(1, 1, "RAM 2", True),
+    Bank(2, 4, "RAM 3", True),
+    Bank(3, 5, "ROM 4", False),
+    Bank(4, 6, "ROM 5", False),
+    Bank(5, 7, "ROM 6", False),
+    Bank(6, 8, "ROM 7", False),
+    Bank(7, 9, "ROM 8", False),
+    Bank(8, 10, "ROM 9", False),
+    Bank(9, 11, "ROM 10", False),
+    Bank(10, 2, "ROM 11", False),
+    Bank(11, 3, "Card", True),
 )
 
 #: Wire byte -> bank, for reading a dump's own bank byte back into a bank.
@@ -129,7 +129,9 @@ def by_sysex(byte: int) -> Bank:
     except KeyError:
         raise LookupError(
             f"no bank carries the System Exclusive byte {byte}; the twelve "
-            f"use {sorted(_BY_SYSEX)}") from None
+            f"use {sorted(_BY_SYSEX)}"
+        ) from None
+
 
 _BY_NUMBER: Dict[int, Bank] = {entry.number: entry for entry in BANKS}
 _BY_ID: Dict[str, Bank] = {entry.id: entry for entry in BANKS}
@@ -141,7 +143,7 @@ class Slot:
 
     bank: Bank
     kind: str
-    number: int          #: 0-based within the bank; also the wire number.
+    number: int  #: 0-based within the bank; also the wire number.
 
     @property
     def key(self) -> str:
@@ -170,13 +172,12 @@ def bank(which) -> Bank:
             return _BY_NUMBER[which]
         except KeyError:
             raise LookupError(
-                f"no bank {which}; they are numbered "
-                f"0-{len(BANKS) - 1}") from None
+                f"no bank {which}; they are numbered 0-{len(BANKS) - 1}"
+            ) from None
     try:
         return _BY_ID[str(which).replace(" ", "").upper()]
     except KeyError:
-        raise LookupError(
-            f"no bank {which!r}; have {', '.join(_BY_ID)}") from None
+        raise LookupError(f"no bank {which!r}; have {', '.join(_BY_ID)}") from None
 
 
 def bank_numbers() -> List[int]:
@@ -192,14 +193,14 @@ def count_for(kind: str) -> int:
         return PERFORMANCES_PER_BANK
     if kind == Kind.PATCH:
         return PATCHES_PER_BANK
-    raise LookupError(
-        f"no kind {kind!r}; have {Kind.PERFORMANCE}, {Kind.PATCH}")
+    raise LookupError(f"no kind {kind!r}; have {Kind.PERFORMANCE}, {Kind.PATCH}")
 
 
 def slots(which, kind: str) -> List[Slot]:
     entry = bank(which)
-    return [Slot(bank=entry, kind=kind, number=index)
-            for index in range(count_for(kind))]
+    return [
+        Slot(bank=entry, kind=kind, number=index) for index in range(count_for(kind))
+    ]
 
 
 def slot(which, kind: str, number: int) -> Slot:
@@ -207,6 +208,6 @@ def slot(which, kind: str, number: int) -> Slot:
     total = count_for(kind)
     if not 0 <= number < total:
         raise LookupError(
-            f"{entry.label} holds {total} {kind}s, so {number} is outside "
-            f"0-{total - 1}")
+            f"{entry.label} holds {total} {kind}s, so {number} is outside 0-{total - 1}"
+        )
     return Slot(bank=entry, kind=kind, number=number)

@@ -86,10 +86,21 @@ def favorite_bank_id(bank_id: str, kind: str) -> str:
 
 
 KEY_HINTS = (
-    "↑↓ move", "tab pane", "⏎ select on the unit", "r read names",
-    "/ search", "[ ] channel", "c set channel", "f favourite",
-    "F favourites view", "t tags", "n note", "m multi", "i device",
-    "? help", "q quit",
+    "↑↓ move",
+    "tab pane",
+    "⏎ select on the unit",
+    "r read names",
+    "/ search",
+    "[ ] channel",
+    "c set channel",
+    "f favourite",
+    "F favourites view",
+    "t tags",
+    "n note",
+    "m multi",
+    "i device",
+    "? help",
+    "q quit",
 )
 
 
@@ -143,8 +154,7 @@ class ReportScreen(ModalScreen[None]):
     ReportScreen .body { height: 1fr; overflow-y: auto; }
     """
 
-    BINDINGS = [Binding("escape", "close", "Close"),
-                Binding("q", "close", "Close")]
+    BINDINGS = [Binding("escape", "close", "Close"), Binding("q", "close", "Close")]
 
     def __init__(self, title: str, body: str) -> None:
         super().__init__()
@@ -159,8 +169,6 @@ class ReportScreen(ModalScreen[None]):
 
     def action_close(self) -> None:
         self.dismiss(None)
-
-
 
 
 def _bank_label(sysex_byte: int) -> str:
@@ -195,8 +203,7 @@ class MultiScreen(ModalScreen[None]):
     MultiScreen DataTable { height: 1fr; }
     """
 
-    BINDINGS = [Binding("escape", "close", "Close"),
-                Binding("q", "close", "Close")]
+    BINDINGS = [Binding("escape", "close", "Close"), Binding("q", "close", "Close")]
 
     def __init__(self, multisets, bank_label=None) -> None:
         super().__init__()
@@ -212,13 +219,16 @@ class MultiScreen(ModalScreen[None]):
 
     def on_mount(self) -> None:
         table = self.query_one("#multi-table", DataTable)
-        for label, key in (("#", "num"), ("name", "name"),
-                           ("channels used", "used")):
+        for label, key in (("#", "num"), ("name", "name"), ("channels used", "used")):
             table.add_column(label, key=key)
         for entry in self._multisets:
             used = sum(1 for part in entry.parts if part.used)
-            table.add_row(f"{entry.number:02d}", entry.name or "[dim]--[/dim]",
-                          str(used), key=str(entry.number))
+            table.add_row(
+                f"{entry.number:02d}",
+                entry.name or "[dim]--[/dim]",
+                str(used),
+                key=str(entry.number),
+            )
         self._detail(0)
 
     def on_data_table_row_highlighted(self, event) -> None:
@@ -235,10 +245,10 @@ class MultiScreen(ModalScreen[None]):
                 continue
             lines.append(
                 f"ch {part.channel:2d}  {self._bank_label(part.bank)} "
-                f"perf {part.performance:02d}  level {part.level}")
+                f"perf {part.performance:02d}  level {part.level}"
+            )
         half = (len(lines) + 1) // 2
-        rows = [f"{a:38s}{b}" for a, b in
-                zip(lines[:half], lines[half:] + [""])]
+        rows = [f"{a:38s}{b}" for a, b in zip(lines[:half], lines[half:] + [""])]
         self.query_one("#multi-detail", Static).update("\n".join(rows))
 
     def action_close(self) -> None:
@@ -286,9 +296,15 @@ class SendScreen(ModalScreen[Optional[dict]]):
         Binding("w", "fire", "Write", show=False),
     ]
 
-    def __init__(self, *, path: str, kind: str, destination,
-                 current: Optional[Dict[int, str]] = None,
-                 on_send=None) -> None:
+    def __init__(
+        self,
+        *,
+        path: str,
+        kind: str,
+        destination,
+        current: Optional[Dict[int, str]] = None,
+        on_send=None,
+    ) -> None:
         super().__init__()
         self._path = path
         self._kind = kind
@@ -302,8 +318,7 @@ class SendScreen(ModalScreen[Optional[dict]]):
             yield Label("[b]Write a bank into the instrument[/b]")
             yield Static(self._describe(), classes="what")
             yield Static("", id="send-state")
-            yield Static(
-                "[dim]a to arm, then w to write. esc cancels.[/dim]")
+            yield Static("[dim]a to arm, then w to write. esc cancels.[/dim]")
 
     def _describe(self) -> str:
         lines = [
@@ -313,8 +328,9 @@ class SendScreen(ModalScreen[Optional[dict]]):
             f"kind        {self._kind}",
         ]
         if self._current:
-            shown = ", ".join(f"{n:03d} {name}" for n, name
-                              in sorted(self._current.items())[:5])
+            shown = ", ".join(
+                f"{n:03d} {name}" for n, name in sorted(self._current.items())[:5]
+            )
             more = " ..." if len(self._current) > 5 else ""
             lines.append(f"replacing   {shown}{more}")
         else:
@@ -324,7 +340,8 @@ class SendScreen(ModalScreen[Optional[dict]]):
     def on_mount(self) -> None:
         if not self._destination.writable:
             self.query_one("#send-state", Static).update(
-                "[b]$error[/b] this bank is ROM and cannot be written")
+                "[b]$error[/b] this bank is ROM and cannot be written"
+            )
 
     def action_arm(self) -> None:
         if not self._destination.writable:
@@ -332,13 +349,15 @@ class SendScreen(ModalScreen[Optional[dict]]):
         self._armed = True
         self.query_one("#send-state", Static).update(
             f"[b]ARMED[/b] - w replaces {self._destination.label} "
-            f"{self._kind}s. Nothing has been sent yet.")
+            f"{self._kind}s. Nothing has been sent yet."
+        )
 
     def action_fire(self) -> None:
         """Only while armed, and only once."""
         if not self._armed:
             self.query_one("#send-state", Static).update(
-                "[dim]not armed - press a first[/dim]")
+                "[dim]not armed - press a first[/dim]"
+            )
             return
         self._armed = False
         if self._on_send is not None:
@@ -349,10 +368,10 @@ class SendScreen(ModalScreen[Optional[dict]]):
                 # feedback the user gets, and the bridge already reported
                 # the backup's read-back mismatch. Leave it open.
                 self.query_one("#send-state", Static).update(
-                    f"[b]write failed[/b] {exc}")
+                    f"[b]write failed[/b] {exc}"
+                )
                 return
-        self.dismiss({"destination": self._destination.number,
-                      "kind": self._kind})
+        self.dismiss({"destination": self._destination.number, "kind": self._kind})
 
     def action_close(self) -> None:
         self.dismiss(None)
@@ -429,8 +448,9 @@ class KwsedApp(App):
         Binding("q", "quit", "Quit"),
     ]
 
-    def __init__(self, device, *, catalog=None, favorites=None,
-                 config_path: Optional[str] = None) -> None:
+    def __init__(
+        self, device, *, catalog=None, favorites=None, config_path: Optional[str] = None
+    ) -> None:
         super().__init__()
         self.device = device
         #: Injected, never opened here, so a test cannot write into the
@@ -450,7 +470,8 @@ class KwsedApp(App):
         self._pairs: List[tuple] = [
             (entry.number, kind)
             for entry in banks.BANKS
-            for kind in (banks.Kind.PERFORMANCE, banks.Kind.PATCH)]
+            for kind in (banks.Kind.PERFORMANCE, banks.Kind.PATCH)
+        ]
         self._current_pair = self._pairs[0]
         self._current: List[banks.Slot] = []
         self._busy = False
@@ -468,19 +489,27 @@ class KwsedApp(App):
     def on_mount(self) -> None:
         self.title = "kwsed"
         table = self.query_one("#bank-table", DataTable)
-        for label, key in (("bank", "bank"), ("kind", "kind"), ("n", "n"),
-                           ("", "rw"), ("♥", "fav")):
+        for label, key in (
+            ("bank", "bank"),
+            ("kind", "kind"),
+            ("n", "n"),
+            ("", "rw"),
+            ("♥", "fav"),
+        ):
             table.add_column(label, key=key)
         for number, kind in self._pairs:
             entry = banks.bank(number)
             marked = len(self._favorite_keys(entry.id, kind))
-            table.add_row(entry.label, kind[:4],
-                          str(banks.count_for(kind)),
-                          "" if entry.writable else "ro",
-                          # blank rather than "0": a column of zeroes is
-                          # noise, and the eye wants the few that differ
-                          str(marked) if marked else "",
-                          key=f"{number}:{kind}")
+            table.add_row(
+                entry.label,
+                kind[:4],
+                str(banks.count_for(kind)),
+                "" if entry.writable else "ro",
+                # blank rather than "0": a column of zeroes is
+                # noise, and the eye wants the few that differ
+                str(marked) if marked else "",
+                key=f"{number}:{kind}",
+            )
 
         slots = self.query_one("#slot-table", DataTable)
         # The favourite marker leads the row: a gutter mark the eye runs
@@ -490,9 +519,10 @@ class KwsedApp(App):
         self._fill(self._current_pair)
         table.focus()
         self.notify_status(
-            f"{len(self.catalog)} names from the catalog" if self.catalog
+            f"{len(self.catalog)} names from the catalog"
+            if self.catalog
             else "no catalog -- numbers only. Build one with "
-                 "tools/extract_catalog.py, or press r to read from the unit."
+            "tools/extract_catalog.py, or press r to read from the unit."
         )
 
     # --- filling ------------------------------------------------------------
@@ -515,8 +545,7 @@ class KwsedApp(App):
             numbers = wanted.get(favorite_bank_id(entry.id, kind))
             if not numbers:
                 continue
-            out.extend(s for s in banks.slots(number, kind)
-                       if s.number in numbers)
+            out.extend(s for s in banks.slots(number, kind) if s.number in numbers)
         return out
 
     def _visible(self, pair):
@@ -529,7 +558,6 @@ class KwsedApp(App):
             entries = [e for e in entries if e.number in marked]
         return entries
 
-
     def _cursor_entry(self):
         """The row under the cursor, or None."""
         table = self.query_one("#slot-table", DataTable)
@@ -537,7 +565,6 @@ class KwsedApp(App):
         if not self._current or row is None or row >= len(self._current):
             return None
         return self._current[row]
-
 
     # --- the send channel ---------------------------------------------------
 
@@ -550,8 +577,7 @@ class KwsedApp(App):
         try:
             self.device.channel = channel
         except Exception:
-            self.notify_status("this device has no settable channel",
-                               refused=True)
+            self.notify_status("this device has no settable channel", refused=True)
             return
         self._remember_channel(channel)
         self.notify_status(f"sending on MIDI channel {channel + 1}")
@@ -588,8 +614,8 @@ class KwsedApp(App):
             self._set_channel(value - 1)
 
         self.push_screen(
-            PromptScreen("MIDI channel (1-16):", str(self._channel() + 1)),
-            apply)
+            PromptScreen("MIDI channel (1-16):", str(self._channel() + 1)), apply
+        )
 
     def action_toggle_favorite(self) -> None:
         """Mark or unmark the slot under the cursor. Sends no MIDI."""
@@ -608,10 +634,8 @@ class KwsedApp(App):
         # survive being toggled off and on. As a delete followed by a
         # fresh add this destroyed all four, and this is one keystroke.
         now = self.favorites.toggle(key, item.number, name=name)
-        self.notify_status(
-            f"{'favourited' if now else 'unfavourited'} {name or item}")
+        self.notify_status(f"{'favourited' if now else 'unfavourited'} {name or item}")
         self._refill_keeping_place()
-
 
     def _favourite_under_cursor(self):
         """The favourite row for the slot under the cursor, if there is one.
@@ -632,8 +656,7 @@ class KwsedApp(App):
         if where is None:
             return
         if existing is None:
-            self.notify_status("not a favourite yet -- press f first",
-                               refused=True)
+            self.notify_status("not a favourite yet -- press f first", refused=True)
             return
 
         def apply(value):
@@ -643,16 +666,14 @@ class KwsedApp(App):
             self._refill_keeping_place()
             self.notify_status("tags set")
 
-        self.push_screen(PromptScreen("Tags (comma separated):",
-                                  existing.tags), apply)
+        self.push_screen(PromptScreen("Tags (comma separated):", existing.tags), apply)
 
     def action_edit_note(self) -> None:
         where, existing = self._favourite_under_cursor()
         if where is None:
             return
         if existing is None:
-            self.notify_status("not a favourite yet -- press f first",
-                               refused=True)
+            self.notify_status("not a favourite yet -- press f first", refused=True)
             return
 
         def apply(value):
@@ -679,11 +700,12 @@ class KwsedApp(App):
         if self.view_mode == VIEW_ALL:
             self.notify_status(VIEW_LABELS[self.view_mode])
         elif not shown:
-            where = ("this bank" if self.view_mode == VIEW_BANK_FAVOURITES
-                     else "any bank")
+            where = (
+                "this bank" if self.view_mode == VIEW_BANK_FAVOURITES else "any bank"
+            )
             self.notify_status(
-                f"{VIEW_LABELS[self.view_mode]} - nothing favourited in "
-                f"{where} yet")
+                f"{VIEW_LABELS[self.view_mode]} - nothing favourited in {where} yet"
+            )
         else:
             self.notify_status(f"{VIEW_LABELS[self.view_mode]} - {shown}")
 
@@ -704,23 +726,25 @@ class KwsedApp(App):
         try:
             table.clear()
             for item in self._current:
-                name = self.catalog.display_name(item.bank.id, item.kind,
-                                                 item.number)
+                name = self.catalog.display_name(item.bank.id, item.kind, item.number)
                 if self.catalog.differs(item.bank.id, item.kind, item.number):
                     shown = f"[b]{name}[/b] [dim]*[/dim]"
-                elif self.catalog.is_live(item.bank.id, item.kind,
-                                          item.number):
+                elif self.catalog.is_live(item.bank.id, item.kind, item.number):
                     shown = f"[b]{name}[/b]"
                 else:
                     shown = name
                 marked = self._favorite_keys(item.bank.id, item.kind)
-                label = (f"{item.bank.label} {item.kind[:4]} "
-                         f"{item.number:02d}"
-                         if self.view_mode == VIEW_ALL_FAVOURITES
-                         else f"{item.number:02d}")
+                label = (
+                    f"{item.bank.label} {item.kind[:4]} {item.number:02d}"
+                    if self.view_mode == VIEW_ALL_FAVOURITES
+                    else f"{item.number:02d}"
+                )
                 table.add_row(
                     "[b]♥[/b]" if item.number in marked else "",
-                    label, shown, key=item.key)
+                    label,
+                    shown,
+                    key=item.key,
+                )
         finally:
             self._filling = False
         self._detail(0)
@@ -785,14 +809,14 @@ class KwsedApp(App):
             with self._lock:
                 self.device.select(entry)
         except Exception as exc:
-            self.call_from_thread(
-                self.notify_status, f"select: {exc}", refused=True)
+            self.call_from_thread(self.notify_status, f"select: {exc}", refused=True)
             return
         self.call_from_thread(
             self.notify_status,
             f"bank select LSB {entry.bank.sysex} + program change "
             f"{entry.number} sent for {entry} — which bank a Bank Select "
-            f"actually reaches is not established")
+            f"actually reaches is not established",
+        )
 
     def action_read_names(self) -> None:
         if self._busy:
@@ -807,13 +831,12 @@ class KwsedApp(App):
         try:
             self.call_from_thread(
                 self.notify_status,
-                f"asking for bank {bank_id} {kind}s in one message "
-                f"(silent)...")
+                f"asking for bank {bank_id} {kind}s in one message (silent)...",
+            )
             with self._lock:
                 kind, names = self.device.read_bank_names(bank_id, kind)
         except Exception as exc:
-            self.call_from_thread(
-                self.notify_status, f"read: {exc}", refused=True)
+            self.call_from_thread(self.notify_status, f"read: {exc}", refused=True)
             return
         finally:
             self._busy = False
@@ -823,13 +846,13 @@ class KwsedApp(App):
         entry = banks.bank(bank_id)
         for number, name in names.items():
             self.catalog.set_live_name(entry.id, kind, number, name)
-        differing = sum(1 for n in names
-                        if self.catalog.differs(entry.id, kind, n))
+        differing = sum(1 for n in names if self.catalog.differs(entry.id, kind, n))
         if self._current_pair == (entry.number, kind):
             self._fill(self._current_pair)
         self.notify_status(
             f"read {len(names)} {kind} names from {entry.label}"
-            + (f"; {differing} differ from the catalog" if differing else ""))
+            + (f"; {differing} differ from the catalog" if differing else "")
+        )
 
     def action_search(self) -> None:
         def done(text) -> None:
@@ -863,8 +886,7 @@ class KwsedApp(App):
             with self._lock:
                 raw = self.device.read_multi()
         except Exception as exc:
-            self.call_from_thread(self.notify_status,
-                                  f"multi: {exc}", refused=True)
+            self.call_from_thread(self.notify_status, f"multi: {exc}", refused=True)
             return
         finally:
             self._busy = False
@@ -878,8 +900,7 @@ class KwsedApp(App):
         except Exception as exc:
             self.notify_status(f"multi: {exc}", refused=True)
             return
-        self.push_screen(MultiScreen(
-            sets, bank_label=lambda n: _bank_label(n)))
+        self.push_screen(MultiScreen(sets, bank_label=lambda n: _bank_label(n)))
         self.notify_status(f"{len(sets)} multisets")
 
     def action_device_info(self) -> None:
@@ -896,8 +917,7 @@ class KwsedApp(App):
             with self._lock:
                 fields = self.device.identify()
         except Exception as exc:
-            self.call_from_thread(
-                self.notify_status, f"device: {exc}", refused=True)
+            self.call_from_thread(self.notify_status, f"device: {exc}", refused=True)
             return
         finally:
             self._busy = False
@@ -906,11 +926,14 @@ class KwsedApp(App):
     def _show_info(self, fields) -> None:
         lines = [f"connection      {self.device.description}", ""]
         if fields:
-            lines.append(f"manufacturer    {fields['manufacturer']:#04x}"
-                         + ("  (Korg)" if fields["is_korg"] else ""))
-            lines.append(f"family          {fields['family']}"
-                         + ("  (Wavestation)" if fields.get("is_wavestation")
-                            else ""))
+            lines.append(
+                f"manufacturer    {fields['manufacturer']:#04x}"
+                + ("  (Korg)" if fields["is_korg"] else "")
+            )
+            lines.append(
+                f"family          {fields['family']}"
+                + ("  (Wavestation)" if fields.get("is_wavestation") else "")
+            )
             lines.append(f"global channel  {fields['channel'] + 1}")
             lines.append("")
             lines.append("The global channel comes from the unit. Every")
@@ -918,9 +941,10 @@ class KwsedApp(App):
         else:
             lines.append("nothing answered an Identity Request")
         lines.append("")
-        lines.append(f"catalog         {len(self.catalog)} names"
-                     + (f" from {self.catalog.source}"
-                        if self.catalog.source else ""))
+        lines.append(
+            f"catalog         {len(self.catalog)} names"
+            + (f" from {self.catalog.source}" if self.catalog.source else "")
+        )
         self.push_screen(ReportScreen("Device", "\n".join(lines)))
 
     def action_help(self) -> None:
@@ -959,19 +983,25 @@ Moving the cursor sends nothing at all.
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="kwsed", description="Browse a Korg Wavestation SR's sounds.")
+        prog="kwsed", description="Browse a Korg Wavestation SR's sounds."
+    )
     parser.add_argument("--port")
     parser.add_argument("--recv-port")
-    parser.add_argument("--demo", action="store_true",
-                        help="built-in demo device; opens no MIDI ports")
-    parser.add_argument("--midi-channel", type=int, default=None,
-                        help="the unit's global channel, 1-16")
+    parser.add_argument(
+        "--demo", action="store_true", help="built-in demo device; opens no MIDI ports"
+    )
+    parser.add_argument(
+        "--midi-channel", type=int, default=None, help="the unit's global channel, 1-16"
+    )
     parser.add_argument("--catalog", default=None)
-    parser.add_argument("--config", default=None,
-                        help="settings cache (default: ./config.toml)")
-    parser.add_argument("--favorites", default=None,
-                        help="favourites database (default: "
-                             "the per-platform data directory)")
+    parser.add_argument(
+        "--config", default=None, help="settings cache (default: ./config.toml)"
+    )
+    parser.add_argument(
+        "--favorites",
+        default=None,
+        help="favourites database (default: the per-platform data directory)",
+    )
     return parser
 
 
@@ -997,14 +1027,18 @@ def main(argv: Optional[List[str]] = None) -> int:
         try:
             if args.port:
                 device = b.WavestationBridge.open(
-                    args.port, recv_port=args.recv_port,
-                    channel=((args.midi_channel - 1) if args.midi_channel
-                             else (remembered if remembered is not None
-                                   else 0)))
+                    args.port,
+                    recv_port=args.recv_port,
+                    channel=(
+                        (args.midi_channel - 1)
+                        if args.midi_channel
+                        else (remembered if remembered is not None else 0)
+                    ),
+                )
             else:
                 device = b.WavestationBridge.autodetect(
-                    on_try=lambda n: print(f"  probing {n}...",
-                                           file=sys.stderr))
+                    on_try=lambda n: print(f"  probing {n}...", file=sys.stderr)
+                )
         except Exception as exc:
             sys.exit(f"error: {exc}")
 
@@ -1025,8 +1059,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         # at all. Every other startup failure here leaves by sys.exit; these
         # two used to print a traceback.
         raise SystemExit(f"error: {exc}")
-    app = KwsedApp(device, catalog=cat.load(args.catalog),
-                   favorites=store, config_path=config_path)
+    app = KwsedApp(
+        device, catalog=cat.load(args.catalog), favorites=store, config_path=config_path
+    )
     try:
         app.run()
     finally:

@@ -40,7 +40,7 @@ help:
 	@echo
 	@echo '  make bootstrap     install the project and the pinned toolchain'
 	@echo '  make lint          ruff check          (linting)'
-	@echo '  make format        ruff format         (rewrites files; NOT run by check)'
+	@echo '  make format        ruff format         (rewrites files)'
 	@echo '  make format-check  ruff format --check (fails instead of rewriting)'
 	@echo '  make typecheck     mypy, vs quality/mypy-baseline.txt'
 	@echo '  make test          pytest + coverage (term-missing)'
@@ -63,16 +63,9 @@ lint:
 format:
 	$(RUFF) format $(SRC)
 
-# NOT part of `make check`, on purpose.
-#
-# The tree has never been run through a formatter: 28 of 30 files disagree
-# with ruff's (black-derived) layout, mostly on continuation style. Enforcing
-# it would mean rewriting the whole codebase in one commit, which is a decision
-# for the owner rather than a lint fix. `make format` will do it whenever that
-# is wanted -- as its own commit, so the diff stays reviewable.
-#
-# The gap this leaves: a new badly formatted file passes `make check`.
-# `make format-check` closes that, at the cost above.
+# Formatting is enforced. The tree was reformatted once, as its own commit, so
+# the diff stayed reviewable instead of arriving as a surprise inside some
+# later, unrelated change.
 format-check:
 	$(RUFF) format --check $(SRC)
 
@@ -138,13 +131,12 @@ secrets-baseline:
 
 check:
 	@echo '== lint =='      && $(MAKE) --no-print-directory lint
+	@echo '== format =='    && $(MAKE) --no-print-directory format-check
 	@echo '== typecheck ==' && $(MAKE) --no-print-directory typecheck
 	@echo '== test =='      && $(MAKE) --no-print-directory test
 	@echo '== audit =='     && $(MAKE) --no-print-directory audit
 	@echo
 	@echo 'all checks passed.'
-	@echo '(formatting is not enforced; see `make format-check` and the note' \
-	      'above that target.)'
 
 clean:
 	rm -rf .coverage .pytest_cache .mypy_cache .ruff_cache htmlcov

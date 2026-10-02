@@ -24,7 +24,7 @@ from kws import records as r
 
 def make_patch(name="Invented", waves=((0, 40), (0, 40), (0, 40), (0, 40))):
     rec = bytearray(r.PATCH_SIZE)
-    rec[0:len(name)] = name.encode()
+    rec[0 : len(name)] = name.encode()
     for i, (bank, wave) in enumerate(waves):
         r.set_patch_wave(rec, i, bank=bank, wave=wave)
     return bytes(rec)
@@ -32,7 +32,7 @@ def make_patch(name="Invented", waves=((0, 40), (0, 40), (0, 40), (0, 40))):
 
 def make_performance(name="Invented", parts=((0, 0),)):
     rec = bytearray(r.PERFORMANCE_SIZE)
-    rec[0:len(name)] = name.encode()
+    rec[0 : len(name)] = name.encode()
     for i in range(r.PARTS_PER_PERFORMANCE):
         r.set_performance_part(rec, i, bank=0, patch=r.UNUSED_PATCH)
     for i, (bank, patch) in enumerate(parts):
@@ -55,9 +55,9 @@ def make_waveseq(chains):
             nxt = step + 1 if k + 1 < len(waves) else 0
             r.set_step_links(bank, step, forward=nxt, back=0, loop=0)
             step += 1
-        name = f"Seq{seq}".encode()[:r.SEQNAME_SIZE]
+        name = f"Seq{seq}".encode()[: r.SEQNAME_SIZE]
         at = r.SEQNAME_BASE + seq * r.SEQNAME_SIZE
-        bank[at:at + len(name)] = name
+        bank[at : at + len(name)] = name
     return bytes(bank)
 
 
@@ -65,9 +65,11 @@ class TestRecords:
     def test_sizes_divide_exactly(self):
         assert 16 + 21 + 8 * r.PART_SIZE == r.PERFORMANCE_SIZE
         assert 16 + 74 + 4 * r.OSC_SIZE == r.PATCH_SIZE
-        assert (r.SEQUENCES_PER_BANK * r.SEQ_SIZE
-                + r.STEPS_PER_BANK * r.STEP_SIZE
-                + r.SEQUENCES_PER_BANK * r.SEQNAME_SIZE) == r.WAVESEQ_BANK_SIZE
+        assert (
+            r.SEQUENCES_PER_BANK * r.SEQ_SIZE
+            + r.STEPS_PER_BANK * r.STEP_SIZE
+            + r.SEQUENCES_PER_BANK * r.SEQNAME_SIZE
+        ) == r.WAVESEQ_BANK_SIZE
 
     @pytest.mark.parametrize("bank", range(12))
     def test_part_bank_survives_its_split(self, bank):
@@ -80,7 +82,7 @@ class TestRecords:
     def test_rewriting_a_part_leaves_partmode_settings_alone(self):
         rec = bytearray(make_performance())
         at = r.PART_BASE + 4
-        rec[at] = 0b00111111          # every non-bank bit set
+        rec[at] = 0b00111111  # every non-bank bit set
         r.set_performance_part(rec, 0, bank=11, patch=3)
         assert rec[at] & 0x3F == 0b00111111, "unrelated settings were clobbered"
         assert r.performance_parts(rec)[0].bank == 11
@@ -111,7 +113,7 @@ class TestSequences:
     def test_a_looping_chain_terminates(self):
         """A wave sequence that repeats is normal here, not corruption."""
         bank = bytearray(make_waveseq({0: [40, 41, 42]}))
-        r.set_step_links(bank, 3, forward=1, back=0, loop=0)   # last -> first
+        r.set_step_links(bank, 3, forward=1, back=0, loop=0)  # last -> first
         chain = deps.walk_sequence(bank, 0)
         assert chain.cost == 3, "the walk must stop rather than spin"
 
@@ -121,12 +123,17 @@ class TestPlan:
         seqs = make_waveseq({0: [40, 41], 1: [42, 43, 44]})
         a = deps.Source(
             bank_id="A",
-            patches=[make_patch("One", ((0, 0), (0, 40), (0, 40), (0, 40))),
-                     make_patch("Two", ((0, 1), (0, 40), (0, 40), (0, 40))),
-                     make_patch("Three")],
-            performances=[make_performance("P-ok", ((0, 0), (0, 1))),
-                          make_performance("P-no", ((0, 0), (0, 34)))],
-            waveseq=seqs)
+            patches=[
+                make_patch("One", ((0, 0), (0, 40), (0, 40), (0, 40))),
+                make_patch("Two", ((0, 1), (0, 40), (0, 40), (0, 40))),
+                make_patch("Three"),
+            ],
+            performances=[
+                make_performance("P-ok", ((0, 0), (0, 1))),
+                make_performance("P-no", ((0, 0), (0, 34))),
+            ],
+            waveseq=seqs,
+        )
         return {"A": a}
 
     def test_patches_are_numbered_without_gaps(self):
@@ -159,16 +166,20 @@ class TestBuild:
     def test_references_point_into_the_new_bank(self):
         src = TestPlan()._sources()
         made = bb.plan(src, [("A", 1), ("A", 0)])
-        built = bb.build(src, made,
-                         template_patches=bytes(35 * r.PATCH_SIZE),
-                         template_performances=bytes(50 * r.PERFORMANCE_SIZE),
-                         template_waveseq=bytes(r.WAVESEQ_BANK_SIZE),
-                         destination_bank=11)
+        built = bb.build(
+            src,
+            made,
+            template_patches=bytes(35 * r.PATCH_SIZE),
+            template_performances=bytes(50 * r.PERFORMANCE_SIZE),
+            template_waveseq=bytes(r.WAVESEQ_BANK_SIZE),
+            destination_bank=11,
+        )
         # patch 1 of A was chosen first, so it is patch 0 of the new bank
         assert made.patch_map[("A", 1)] == 0
         slot = 0
-        rec = built.performances[slot * r.PERFORMANCE_SIZE:
-                                 (slot + 1) * r.PERFORMANCE_SIZE]
+        rec = built.performances[
+            slot * r.PERFORMANCE_SIZE : (slot + 1) * r.PERFORMANCE_SIZE
+        ]
         for part in r.performance_parts(rec):
             if part.used:
                 assert part.bank == 11, "a part still points at its old bank"
@@ -177,10 +188,13 @@ class TestBuild:
     def test_relocated_sequences_keep_their_steps(self):
         src = TestPlan()._sources()
         made = bb.plan(src, [("A", 0), ("A", 1)])
-        built = bb.build(src, made,
-                         template_patches=bytes(35 * r.PATCH_SIZE),
-                         template_performances=bytes(50 * r.PERFORMANCE_SIZE),
-                         template_waveseq=bytes(r.WAVESEQ_BANK_SIZE))
+        built = bb.build(
+            src,
+            made,
+            template_patches=bytes(35 * r.PATCH_SIZE),
+            template_performances=bytes(50 * r.PERFORMANCE_SIZE),
+            template_waveseq=bytes(r.WAVESEQ_BANK_SIZE),
+        )
         for (bank_id, wave_bank, seq), slot in made.sequence_map.items():
             before = deps.walk_sequence(src[bank_id].waveseq, seq)
             after = deps.walk_sequence(built.waveseq, slot)
@@ -199,20 +213,26 @@ class TestBuild:
         src = TestPlan()._sources()
         made = bb.plan(src, [("A", 0)])
         template = bytearray(35 * r.PATCH_SIZE)
-        template[34 * r.PATCH_SIZE:34 * r.PATCH_SIZE + 4] = b"KEEP"
-        built = bb.build(src, made,
-                         template_patches=bytes(template),
-                         template_performances=bytes(50 * r.PERFORMANCE_SIZE),
-                         template_waveseq=bytes(r.WAVESEQ_BANK_SIZE))
-        assert built.patches[34 * r.PATCH_SIZE:34 * r.PATCH_SIZE + 4] == b"KEEP"
+        template[34 * r.PATCH_SIZE : 34 * r.PATCH_SIZE + 4] = b"KEEP"
+        built = bb.build(
+            src,
+            made,
+            template_patches=bytes(template),
+            template_performances=bytes(50 * r.PERFORMANCE_SIZE),
+            template_waveseq=bytes(r.WAVESEQ_BANK_SIZE),
+        )
+        assert built.patches[34 * r.PATCH_SIZE : 34 * r.PATCH_SIZE + 4] == b"KEEP"
 
 
 def _build(sources, made):
     """The three templates a build needs, all empty. Invented, as ever."""
-    return bb.build(sources, made,
-                    template_patches=bytes(35 * r.PATCH_SIZE),
-                    template_performances=bytes(50 * r.PERFORMANCE_SIZE),
-                    template_waveseq=bytes(r.WAVESEQ_BANK_SIZE))
+    return bb.build(
+        sources,
+        made,
+        template_patches=bytes(35 * r.PATCH_SIZE),
+        template_performances=bytes(50 * r.PERFORMANCE_SIZE),
+        template_waveseq=bytes(r.WAVESEQ_BANK_SIZE),
+    )
 
 
 class TestASequenceThatQuotesAnother:
@@ -228,32 +248,40 @@ class TestASequenceThatQuotesAnother:
     def _sources(self):
         """Sequence 0 ends by quoting sequence 7; 7 quotes nothing."""
         waveseq = make_waveseq({0: [40, 41, 7], 7: [50, 51]})
-        return {"A": deps.Source(
-            bank_id="A",
-            patches=[make_patch("Quoter", waves=((0, 0),) * 4)],
-            performances=[],
-            waveseq=waveseq)}
+        return {
+            "A": deps.Source(
+                bank_id="A",
+                patches=[make_patch("Quoter", waves=((0, 0),) * 4)],
+                performances=[],
+                waveseq=waveseq,
+            )
+        }
 
     def test_walk_sequence_reports_the_quote_against_its_bank(self):
         src = self._sources()
         chain = deps.walk_sequence(src["A"].waveseq, 0, bank_id="A")
         assert chain.bank_id == "A"
         assert chain.quotes == (("A", 7),), (
-            "a quote is only actionable as 'sequence N of this bank'")
+            "a quote is only actionable as 'sequence N of this bank'"
+        )
 
     def test_the_closure_pulls_in_what_is_quoted(self):
         src = self._sources()
         order, chains, unresolved = deps.quoted_closure(src, [("A", 0, 0)])
         assert not unresolved
         assert order == [("A", 0, 0), ("A", 0, 7)], (
-            "the quoted sequence must travel, and after the one quoting it")
+            "the quoted sequence must travel, and after the one quoting it"
+        )
         assert chains[("A", 0, 7)].steps
 
     def test_a_circular_quote_terminates(self):
         """Two sequences that quote each other are legal and must not hang."""
         waveseq = make_waveseq({0: [40, 7], 7: [50, 0]})
-        src = {"A": deps.Source(bank_id="A", waveseq=waveseq,
-                                patches=[make_patch(waves=((0, 0),) * 4)])}
+        src = {
+            "A": deps.Source(
+                bank_id="A", waveseq=waveseq, patches=[make_patch(waves=((0, 0),) * 4)]
+            )
+        }
         order, _, unresolved = deps.quoted_closure(src, [("A", 0, 0)])
         assert not unresolved
         assert sorted(order) == [("A", 0, 0), ("A", 0, 7)]
@@ -263,7 +291,8 @@ class TestASequenceThatQuotesAnother:
         made = bb.plan(src, [("A", 0)], include_performances=False)
         assert made.fits
         assert ("A", 0, 7) in made.sequence_map, (
-            "the plan took the patch but left a sequence it needs behind")
+            "the plan took the patch but left a sequence it needs behind"
+        )
 
     def test_the_built_quote_points_at_the_quoted_sequences_new_slot(self):
         src = self._sources()
@@ -272,11 +301,15 @@ class TestASequenceThatQuotesAnother:
 
         where = made.sequence_map[("A", 0, 7)]
         chain = deps.walk_sequence(built.waveseq, made.sequence_map[("A", 0, 0)])
-        quotes = [r.step(built.waveseq, s)["wave"] for s in chain.steps
-                  if r.step(built.waveseq, s)["wave"] < r.ROM_WAVE_BASE]
+        quotes = [
+            r.step(built.waveseq, s)["wave"]
+            for s in chain.steps
+            if r.step(built.waveseq, s)["wave"] < r.ROM_WAVE_BASE
+        ]
         assert quotes == [where], (
             f"the step should quote slot {where}, the quoted sequence's new "
-            f"home, not its number in the source bank")
+            f"home, not its number in the source bank"
+        )
 
     def test_no_step_in_a_built_bank_quotes_an_empty_slot(self):
         """The failure this whole class is about, stated as the invariant."""
@@ -291,7 +324,8 @@ class TestASequenceThatQuotesAnother:
                 if wave < r.ROM_WAVE_BASE:
                     assert wave in filled, (
                         f"slot {slot} quotes sequence {wave}, which the build "
-                        f"zeroed; that step plays nothing")
+                        f"zeroed; that step plays nothing"
+                    )
 
     def test_two_wave_banks_do_not_share_one_relocated_step(self):
         """One physical step cannot hold two different quote targets.
@@ -305,10 +339,15 @@ class TestASequenceThatQuotesAnother:
         other's target.
         """
         waveseq = make_waveseq({0: [40, 7], 7: [50, 51]})
-        src = {"A": deps.Source(
-            bank_id="A", waveseq=waveseq,
-            patches=[make_patch("Two banks",
-                                waves=((0, 0), (2, 0), (0, 40), (0, 40)))])}
+        src = {
+            "A": deps.Source(
+                bank_id="A",
+                waveseq=waveseq,
+                patches=[
+                    make_patch("Two banks", waves=((0, 0), (2, 0), (0, 40), (0, 40)))
+                ],
+            )
+        }
         made = bb.plan(src, [("A", 0)], include_performances=False)
         assert ("A", 0, 0) in made.sequence_map
         assert ("A", 2, 0) in made.sequence_map
@@ -317,20 +356,21 @@ class TestASequenceThatQuotesAnother:
         for wave_bank in (0, 2):
             slot = made.sequence_map[("A", wave_bank, 0)]
             want = made.sequence_map[("A", wave_bank, 7)]
-            got = [r.step(built.waveseq, s)["wave"]
-                   for s in deps.walk_sequence(built.waveseq, slot).steps
-                   if r.step(built.waveseq, s)["wave"] < r.ROM_WAVE_BASE]
+            got = [
+                r.step(built.waveseq, s)["wave"]
+                for s in deps.walk_sequence(built.waveseq, slot).steps
+                if r.step(built.waveseq, s)["wave"] < r.ROM_WAVE_BASE
+            ]
             assert got == [want], (
-                f"wave bank {wave_bank}'s copy quotes {got}, not {want}")
+                f"wave bank {wave_bank}'s copy quotes {got}, not {want}"
+            )
 
     def test_the_budget_counts_the_quoted_sequences_steps(self):
         """A quote costs slots and steps, and the plan has to know."""
         src = self._sources()
         tight = bb.Budget(sequences=1)
-        made = bb.plan(src, [("A", 0)], budget=tight,
-                       include_performances=False)
-        assert made.rejected, (
-            "one slot cannot hold a sequence and the one it quotes")
+        made = bb.plan(src, [("A", 0)], budget=tight, include_performances=False)
+        assert made.rejected, "one slot cannot hold a sequence and the one it quotes"
 
 
 class TestAChainThatRunsOffTheEnd:
