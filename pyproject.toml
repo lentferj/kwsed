@@ -139,14 +139,12 @@ exclude = ['^kws/data/']
 # fail quietly; a new test file will simply be checked strictly, which is the
 # safe direction to fail in.
 module = [
-    "test_app",
-    "test_bankbuild",
-    "test_banks_dumps",
-    "test_config_paths",
-    "test_favorites",
-    "test_messages",
-    "test_review_fixes",
-    "test_write",
+    # tests is a package (see tests/__init__.py), so this wildcard really
+    # applies. It did not before that file existed, and mypy gave no
+    # warning that it was not applying it.
+    "tests.*",
+    # tools/ is not a package -- its scripts are run directly by path -- so
+    # these two are named. There are only two, and they change rarely.
     "build_bank",
     "extract_catalog",
 ]

@@ -496,7 +496,41 @@ asserts only that the test double can produce it.
 
 **Blocked on:** nothing but writing them.
 
-## 20. The MidiQuest `.sqs` format is unread — shared across the projects
+## 20. `tests/test_bankbuild.py` sets `first = step` and never uses it
+
+**Status:** open, minor. Recorded 2026-10-02 by the development-checks pass.
+
+```python
+first = step          # in make_waveseq
+for k, wave in enumerate(waves):
+    at = r.STEP_BASE + step * r.STEP_SIZE
+```
+
+`step` is the running counter the loop below advances, and `first`
+snapshots it once before the first iteration — so it holds the step a
+chain *starts* at, which is exactly the thing a wave-sequence fixture
+ought to be checking. Nothing reads it. Ruff reports it (`F841`), and the
+`per-file-ignores` entry for the file is there to say so.
+
+It was kept rather than deleted, because a dead local that looks like the
+remains of an assertion is evidence, and deleting the line would remove the
+evidence without answering the question. Two ways out, and the second is
+the better one:
+
+* delete it, if the fixture genuinely has nothing to say about where a
+  chain starts; or
+* **assert on it** — that a sequence's header links to the first step its
+  chain occupies. That is a real property of the format, and it is already
+  what `plan()` and `build()` assume. `test_relocated_sequences_keep_their_steps`
+  walks the chain but never checks the header that starts it.
+
+This is the only suppression in the tree that records a question about a
+test rather than a choice about the linter, which is why it is written
+down here instead of being resolved by deleting a line.
+
+**Blocked on:** nothing but deciding, and then writing the assertion.
+
+## 21. The MidiQuest `.sqs` format is unread — shared across the projects
 
 **Status:** open, and not specific to this instrument.
 
