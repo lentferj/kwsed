@@ -41,14 +41,21 @@ def make_performance(name="Invented", parts=((0, 0),)):
 
 
 def make_waveseq(chains):
-    """A wave sequence bank: ``chains`` maps sequence -> list of wave numbers."""
+    """A wave sequence bank: ``chains`` maps sequence -> list of wave numbers.
+
+    Returns ``(bank, starts)``, where ``starts`` maps a sequence to the step
+    its chain begins at. The header is what says where a sequence starts, and
+    it is the one field in this fixture that was never checked -- so the
+    caller can assert on it rather than trusting it.
+    """
     bank = bytearray(r.WAVESEQ_BANK_SIZE)
     step = 1
+    starts = {}
     for seq, waves in chains.items():
         head = r.SEQ_BASE + seq * r.SEQ_SIZE
         bank[head] = (step >> 8) & 0xFF
         bank[head + 1] = step & 0xFF
-        first = step
+        starts[seq] = step
         for k, wave in enumerate(waves):
             at = r.STEP_BASE + step * r.STEP_SIZE
             bank[at + 7] = wave
@@ -58,7 +65,7 @@ def make_waveseq(chains):
         name = f"Seq{seq}".encode()[: r.SEQNAME_SIZE]
         at = r.SEQNAME_BASE + seq * r.SEQNAME_SIZE
         bank[at : at + len(name)] = name
-    return bytes(bank)
+    return bytes(bank), starts
 
 
 class TestRecords:
@@ -107,12 +114,73 @@ class TestRecords:
 
 class TestSequences:
     def test_walk_follows_the_chain(self):
-        bank = make_waveseq({0: [40, 41, 42]})
+        bank = make_waveseq({0: [40, 41, 42]})[0]
         assert deps.walk_sequence(bank, 0).cost == 3
+
+
+class TestTheHeaderSaysWhereAChainStarts:
+    """The one field in the wave-sequence fixture that was never checked.
+
+    A sequence's header carries the step its chain begins at, and it is the
+    only thing that says where a sequence starts -- the steps themselves are
+    found by following links from it. `make_waveseq` used to snapshot that
+    number into a local called `first` and never read it, which is the shape
+    of a fixture that was meant to assert something and did not.
+
+    `plan()` and `build()` both assume the header is right: they walk the
+    chain from it and relocate whatever it points at. A header that named
+    the wrong step would not raise -- it would build a bank whose sequence
+    plays the wrong steps, and the read-back would agree, because the bytes
+    that went out are the bytes that came back.
+    """
+
+    def test_the_header_links_to_the_first_step_the_chain_occupies(self):
+        bank, starts = make_waveseq({0: [40, 41, 42]})
+        header = r.sequence_header(bank, 0)
+        assert header["link"] == starts[0], (
+            "the header must name the first step, or every later step is "
+            "reached from the wrong place"
+        )
+
+    def test_a_second_sequence_starts_where_the_first_left_off(self):
+        """Chains are laid out one after another, so the second header must
+        point past the first chain's steps."""
+        bank, starts = make_waveseq({0: [40, 41], 1: [42, 43, 44]})
+        assert starts[1] > starts[0]
+        assert r.sequence_header(bank, 1)["link"] == starts[1]
+
+    def test_a_chain_of_one_step_links_to_itself(self):
+        bank, starts = make_waveseq({0: [40]})
+        assert r.sequence_header(bank, 0)["link"] == starts[0]
+        assert deps.walk_sequence(bank, 0).steps == (starts[0],)
+
+    def test_an_unused_sequence_has_no_start(self):
+        """A sequence with no steps is not a chain, and must not claim one."""
+        bank, starts = make_waveseq({0: [40]})
+        assert 5 not in starts
+        assert r.sequence_header(bank, 5)["link"] == 0
+
+    def test_the_start_survives_a_build(self):
+        """The property that matters: after relocation, the header still
+        points at the first step of the chain it now occupies."""
+        src = TestPlan()._sources()
+        made = bb.plan(src, [("A", 0), ("A", 1)])
+        built = _build(src, made)
+        for (bank_id, _wave_bank, seq), slot in made.sequence_map.items():
+            before = r.sequence_header(src[bank_id].waveseq, seq)["link"]
+            after = r.sequence_header(built.waveseq, slot)["link"]
+            assert after != 0, "a relocated sequence must still start somewhere"
+            assert after in deps.walk_sequence(built.waveseq, slot).steps
+            # Relocation moves steps; it does not change what they play. So
+            # the step the new header names must say what the old one said.
+            assert (
+                r.step(built.waveseq, after)["wave"]
+                == r.step(src[bank_id].waveseq, before)["wave"]
+            )
 
     def test_a_looping_chain_terminates(self):
         """A wave sequence that repeats is normal here, not corruption."""
-        bank = bytearray(make_waveseq({0: [40, 41, 42]}))
+        bank = bytearray(make_waveseq({0: [40, 41, 42]})[0])
         r.set_step_links(bank, 3, forward=1, back=0, loop=0)  # last -> first
         chain = deps.walk_sequence(bank, 0)
         assert chain.cost == 3, "the walk must stop rather than spin"
@@ -120,7 +188,7 @@ class TestSequences:
 
 class TestPlan:
     def _sources(self):
-        seqs = make_waveseq({0: [40, 41], 1: [42, 43, 44]})
+        seqs = make_waveseq({0: [40, 41], 1: [42, 43, 44]})[0]
         a = deps.Source(
             bank_id="A",
             patches=[
@@ -253,7 +321,7 @@ class TestASequenceThatQuotesAnother:
 
     def _sources(self):
         """Sequence 0 ends by quoting sequence 7; 7 quotes nothing."""
-        waveseq = make_waveseq({0: [40, 41, 7], 7: [50, 51]})
+        waveseq = make_waveseq({0: [40, 41, 7], 7: [50, 51]})[0]
         return {
             "A": deps.Source(
                 bank_id="A",
@@ -282,7 +350,7 @@ class TestASequenceThatQuotesAnother:
 
     def test_a_circular_quote_terminates(self):
         """Two sequences that quote each other are legal and must not hang."""
-        waveseq = make_waveseq({0: [40, 7], 7: [50, 0]})
+        waveseq = make_waveseq({0: [40, 7], 7: [50, 0]})[0]
         src = {
             "A": deps.Source(
                 bank_id="A", waveseq=waveseq, patches=[make_patch(waves=((0, 0),) * 4)]
@@ -344,7 +412,7 @@ class TestASequenceThatQuotesAnother:
         gave them one shared step, and whichever was written second took the
         other's target.
         """
-        waveseq = make_waveseq({0: [40, 7], 7: [50, 51]})
+        waveseq = make_waveseq({0: [40, 7], 7: [50, 51]})[0]
         src = {
             "A": deps.Source(
                 bank_id="A",
@@ -387,7 +455,7 @@ class TestAChainThatRunsOffTheEnd:
         banks that are otherwise well formed. Before this stop the walk
         raised out of records.step and took the bank builder with it.
         """
-        bank = bytearray(make_waveseq({0: [40, 41]}))
+        bank = bytearray(make_waveseq({0: [40, 41]})[0])
         last = deps.walk_sequence(bank, 0).steps[-1]
         r.set_step_links(bank, last, forward=0x0700, back=0, loop=0)
 

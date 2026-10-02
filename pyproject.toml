@@ -85,7 +85,6 @@ known-first-party = ["kws", "kwsed"]
 # remains of an assertion this fixture was meant to make about where a chain
 # starts -- deleting it would remove the evidence. See
 # docs/QUALITY_CHECKS.md.
-"tests/test_bankbuild.py" = ["F841"]
 "tests/test_banks_dumps.py" = ["I001"]
 "tests/test_favorites.py" = ["I001"]
 "tests/test_review_fixes.py" = ["I001"]

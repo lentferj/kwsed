@@ -496,9 +496,11 @@ asserts only that the test double can produce it.
 
 **Blocked on:** nothing but writing them.
 
-## 20. `tests/test_bankbuild.py` sets `first = step` and never uses it
+## 20. `tests/test_bankbuild.py` sets `first = step` and never uses it — FIXED
 
-**Status:** open, minor. Recorded 2026-10-02 by the development-checks pass.
+**Status:** resolved 2026-10-03. The fixture now returns the start step and
+asserts on it; see `TestTheHeaderSaysWhereAChainStarts` in
+tests/test_bankbuild.py. The F841 suppression is gone.
 
 ```python
 first = step          # in make_waveseq
@@ -530,10 +532,10 @@ down here instead of being resolved by deleting a line.
 
 **Blocked on:** nothing but deciding, and then writing the assertion.
 
-## 21. `messages.object_request` is never called
+## 21. `messages.object_request` is never called — FIXED
 
-**Status:** open, minor. Found 2026-10-02 while covering the wire-format
-refusals.
+**Status:** resolved 2026-10-03. Deleted, along with the `OBJECT_REQUEST`
+alias it existed to justify. `single_patch_request` says what it is.
 
 `object_request(bank, number, channel)` has no call site outside
 `kws/messages.py`, and it does exactly what `single_patch_request` does --

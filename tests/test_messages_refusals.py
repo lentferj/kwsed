@@ -135,10 +135,6 @@ class TestTheRequestBuilders:
         """The old name for it, kept because callers predate the split."""
         assert m.bulk_request(4) == m.bank_request(4, m.Function.ALL_PATCH_DUMP)
 
-    def test_an_object_request_is_the_single_patch_request(self):
-        """0x10 is the same code either way; see Function.OBJECT_REQUEST."""
-        assert m.object_request(3, 5) == m.single_patch_request(3, 5)
-
     def test_a_single_patch_request_carries_bank_then_number(self):
         frame = m.single_patch_request(3, 5)
         assert frame[4] == m.Function.SINGLE_PATCH_REQUEST
@@ -155,7 +151,7 @@ class TestTheRequestBuilders:
     def test_every_builder_honours_the_channel(self):
         for frame in (
             m.bank_request(0, m.Function.ALL_PATCH_DUMP, 4),
-            m.object_request(0, 0, 4),
+            m.single_patch_request(0, 0, 4),
             m.patch_write_command(0, 0, 4),
         ):
             assert frame[2] == m.channel_byte(4)

@@ -83,7 +83,6 @@ __all__ = [
     "single_patch_dump",
     "patch_write_command",
     "REQUEST_FOR_DUMP",
-    "object_request",
     "DATA_OFFSET",
 ]
 
@@ -137,12 +136,6 @@ class Function:
     ALL_DATA_REQUEST = 0x0F  #: no argument -> ALL_DATA_DUMP
     SYSTEM_SETUP_REQUEST = 0x0E  #: no argument -> SYSTEM_SETUP_DUMP
     BULK_REQUEST = PATCH_BANK_REQUEST  #: the old name for the patch one
-    #: Asks for **one patch** specifically -- 0x10 is identical to
-    #: SINGLE_PATCH_REQUEST. The name says "object" because the sibling
-    #: rxved carried a generic per-object request; this project has no
-    #: such abstraction, and the equivalence is intentional. Keep them in
-    #: step.
-    OBJECT_REQUEST = SINGLE_PATCH_REQUEST
 
     # Dumps
     SINGLE_PATCH_DUMP = 0x40  #: one patch: bank, number, 426 bytes
@@ -492,11 +485,6 @@ def bulk_request(bank: int, channel: int = 0) -> bytes:
     which is what it always did.
     """
     return frame(Function.PATCH_BANK_REQUEST, [bank], channel=channel)
-
-
-def object_request(bank: int, number: int, channel: int = 0) -> bytes:
-    """Ask for one object. Read-only, makes no sound."""
-    return frame(Function.OBJECT_REQUEST, [bank, number], channel=channel)
 
 
 def single_patch_request(bank: int, number: int, channel: int = 0) -> bytes:
