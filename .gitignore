@@ -9,3 +9,12 @@ config.toml
 *.egg-info/
 .pytest_cache/
 CLAUDE.md
+
+# Development-check byproducts. requirements-dev.txt is deliberately NOT
+# ignored: it is the pinned toolchain lockfile and is meant to be committed.
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.mypy_cache/
+.ruff_cache/

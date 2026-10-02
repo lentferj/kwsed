@@ -152,6 +152,34 @@ It writes `.syx` files and **never touches the instrument** -- loading them
 is the machine's own business, through its front panel. See
 [docs/BANK_BUILDER.md](docs/BANK_BUILDER.md).
 
+## Development checks
+
+The toolchain is pinned in `requirements-dev.txt` and installed into the same
+`.venv` the project already uses:
+
+```sh
+make bootstrap   # install the project and the pinned toolchain
+make check       # lint, typecheck, test, audit
+make help        # every target
+```
+
+`make check` runs **ruff** (linting), **mypy** (type checking), **pytest**
+with coverage, and an audit pass of **pip-audit**, **vulture**, **deptry**
+and **detect-secrets**. It stops at the first failure.
+
+Individual pieces: `make lint`, `make typecheck`, `make test`, `make audit`.
+`pre-commit install` runs ruff, mypy and detect-secrets on every commit.
+
+The code predates all of these tools, so a good number of existing findings
+are suppressed rather than fixed — every one of them is listed, with a
+reason, in [docs/QUALITY_CHECKS.md](docs/QUALITY_CHECKS.md). New findings are
+not suppressed: lint and audit are enforced on new code, and mypy is checked
+against a baseline that fails on anything it has not seen.
+
+One thing is deliberately **not** enforced: `ruff format`. The tree has never
+been formatted and adopting a formatter would rewrite all but two files, which
+is a decision rather than a fix. `make format` does it on request.
+
 ## Names are not included
 
 kwsed ships **no** Korg content. The bank table and the numbering are its

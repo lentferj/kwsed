@@ -1,0 +1,69 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# SPDX-FileCopyrightText: Copyright (C) 2026  kwsed contributors
+#
+# kwsed development checks.
+#
+# Install with:  pre-commit install
+# Or run everything:  make check
+#
+# Every hook rev is pinned to a released tag. pre-commit builds its own
+# environments from these, so they are intentionally independent of the
+# versions pinned in requirements-dev.txt; keeping the two in step is not
+# required, because a hook that disagrees with `make check` shows up as a
+# disagreement rather than as silence.
+
+minimum_pre_commit_version: "4.0.0"
+
+repos:
+  # --- ruff: linting and formatting -----------------------------------------
+  #
+  # Only ruff-check is a hook. ruff-format is deliberately NOT wired: the tree
+  # has never been formatted, so the first commit that touched a Python file
+  # would come back with 26 files rewritten and the commit rejected. That is a
+  # whole-tree decision rather than a hook. Run `make format` as its own commit
+  # when you want it, then add the hook back here.
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.10
+    hooks:
+      - id: ruff-check
+        args: [--fix]
+        files: ^(kws|kwsed|tools|tests|quality)/
+
+  # --- mypy: type checking ---------------------------------------------------
+  # Delegates the pass to quality/check_mypy.py, which compares against the
+  # baseline. Without it this hook fails on all 30 pre-existing findings.
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy (vs quality/mypy-baseline.txt)
+        entry: .venv/bin/python quality/check_mypy.py
+        language: system
+        types: [python]
+        pass_filenames: false
+        require_serial: true
+
+  # --- secrets ---------------------------------------------------------------
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args: [--baseline, .secrets.baseline]
+
+  # --- shell -----------------------------------------------------------------
+  # kwsed currently contains no shell scripts: no *.sh and no file with a
+  # bash/sh shebang. These two hooks are wired anyway because they are already
+  # installed system-wide, they cost nothing while there is nothing to check,
+  # and they catch the first script that arrives. Nothing in `make audit` runs
+  # them, because there is currently nothing to run them on.
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.11.0.1
+    hooks:
+      - id: shellcheck
+        files: \.(sh|bash)$|^[^/]+$[\r\n]+\s*#!/(usr/bin/env\s+)?(ba)?sh
+
+  - repo: https://github.com/scop/pre-commit-shfmt
+    rev: v3.14.1-1
+    hooks:
+      - id: shfmt
+        args: [-d]
+        files: \.(sh|bash)$|^[^/]+$[\r\n]+\s*#!/(usr/bin/env\s+)?(ba)?sh

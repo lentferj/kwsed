@@ -18,5 +18,141 @@ kwscli = "kwsed.cli:main"
 [tool.setuptools]
 packages = ["kws", "kwsed"]
 
+# --- ruff: linting and formatting (replaces flake8/isort/black/pyupgrade) ----
+#
+# See docs/QUALITY_CHECKS.md for why each pre-existing suppression exists.
+[tool.ruff]
+line-length = 88
+target-version = "py311"
+# kws/data/ holds the user's generated name catalog and is gitignored.
+extend-exclude = ["kws/data"]
+
+[tool.ruff.lint]
+select = [
+    "E",     # pycodestyle errors
+    "F",     # pyflakes
+    "I",     # isort
+    "B",     # flake8-bugbear
+    "S",     # bandit
+    "SIM",   # flake8-simplify
+    "UP",    # pyupgrade
+    "C4",    # flake8-comprehensions
+    "PL",    # pylint
+    "RUF",   # ruff-specific
+    "C901",  # mccabe complexity
+]
+# Each of these conflicts with a convention this codebase follows on purpose.
+# They are disabled wholesale rather than per-file because they are properties
+# of the whole style, not of particular files; the counts are the number of
+# existing occurrences suppressed project-wide.
+ignore = [
+    # 215 - the project uses typing.Dict/List/Optional consistently under
+    # `from __future__ import annotations`; rewriting every annotation is a
+    # refactor, not a lint fix.
+    "UP006", "UP035", "UP045", "UP037",
+    # 55 - local imports are deliberate: `rtmidi` is imported lazily so
+    # `kwscli banks` works with no MIDI backend, and the tests import inside
+    # functions for pytest.importorskip.
+    "PLC0415",
+    # 96 - protocol offsets, record sizes and function codes are compared as
+    # literals throughout, which is how binary formats read.
+    "PLR2004",
+    # 14 - complexity / argument-count refactor suggestions, not defects.
+    "PLR0911", "PLR0912", "PLR0913", "PLR0915", "PLR0917",
+    # 41 - established stylistic conventions: `[a] + [b]`, class-level constant
+    # tables, and `__all__` ordered by protocol rather than alphabetically.
+    "RUF005", "RUF012", "RUF022",
+    # 6 - an explicit try/except reads better than contextlib.suppress here.
+    "SIM105",
+    # 3 - zip(strict=) changes runtime behaviour; enabling it is a decision.
+    "B905",
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.isort]
+known-first-party = ["kws", "kwsed"]
+
+# Existing findings only. A new file, or a new occurrence in a file not listed
+# here, is still reported.
+[tool.ruff.lint.per-file-ignores]
+# tests: S101 (assert) is what a test is for; F401 covers imports used for
+# registration or availability rather than for a name.
+"tests/*" = ["S101", "F401"]
+"tests/test_bankbuild.py" = ["F841"]
+"tests/test_banks_dumps.py" = ["I001"]
+"tests/test_favorites.py" = ["I001"]
+"tests/test_review_fixes.py" = ["I001", "RUF059"]
+"tests/test_write.py" = ["I001", "S110", "RUF100"]
+"tools/build_bank.py" = ["B904", "C901", "I001", "RUF100"]
+"tools/extract_catalog.py" = ["I001", "RUF100"]
+# dead `typing` imports left over from an earlier revision
+"kws/backup.py" = ["F401"]
+"kws/banks.py" = ["F401"]
+"kws/dumps.py" = ["F401"]
+"kws/favorites.py" = ["E501", "F401", "RUF023", "S608"]
+"kws/messages.py" = ["F401", "PLW1641"]
+"kws/multi.py" = ["F401"]
+"kws/records.py" = ["F401"]
+# C901: the write fence and the bank planner are complex by construction;
+# splitting them would fragment the one place each rule is enforced.
+"kws/bankbuild.py" = ["B007", "B008", "C901", "I001"]
+"kws/bridge.py" = ["C901", "I001", "RUF100", "S110", "S112"]
+"kws/catalog.py" = ["I001"]
+"kws/config.py" = ["PLW0603", "UP031"]
+"kws/deps.py" = ["B007"]
+"kwsed/app.py" = ["B904", "F841", "I001", "PLW0108", "RUF059"]
+"kwsed/cli.py" = ["C416", "C901", "I001"]
+"kwsed/demo.py" = ["I001"]
+
+[tool.ruff.lint.flake8-bugbear]
+# zip() without strict= is pre-existing; B905 is disabled above anyway.
+
+# --- mypy: type checking ----------------------------------------------------
+#
+# Non-strict. No module is --strict clean today, and strict-per-module would
+# mean editing annotated source to add type arguments. The flags below are the
+# strictness that costs nothing today; the rest of --strict is deliberately
+# off and can be dialled in per module later.
+[tool.mypy]
+python_version = "3.11"
+files = ["kws", "kwsed", "tools", "tests"]
+ignore_missing_imports = true
+warn_unused_configs = true
+# These four add no findings on the current tree.
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+warn_unreachable = true
+show_error_codes = true
+exclude = ['^kws/data/']
+
+# --- pytest and coverage ----------------------------------------------------
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+addopts = "--cov=kws --cov=kwsed --cov-report=term-missing"
+
+[tool.coverage.run]
+branch = true
+source = ["kws", "kwsed"]
+
+[tool.coverage.report]
+show_missing = true
+# No fail_under yet: the point of this pass is to start measuring, not to
+# set a gate. Add fail_under once the number is understood.
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+]
+
+# --- vulture: dead code ------------------------------------------------------
+[tool.vulture]
+min_confidence = 80
+paths = ["kws", "kwsed", "tools", "tests"]
+
+# --- deptry: dependency hygiene ---------------------------------------------
+[tool.deptry]
+# kws/data is a data directory, not a package.
+extend_exclude = ["\\.venv"]

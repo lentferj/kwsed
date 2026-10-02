@@ -1,0 +1,35 @@
+# Known mypy findings, one per line:
+#     path|code|message
+# Line numbers are excluded on purpose -- see the module
+# docstring. Regenerate with:
+#     python quality/check_mypy.py --write
+kws/alsa.py|union-attr|Item "None" of "CDLL | None" has no attribute "snd_seq_connect_to"
+kws/alsa.py|union-attr|Item "None" of "CDLL | None" has no attribute "snd_seq_create_simple_port"
+kws/alsa.py|union-attr|Item "None" of "CDLL | None" has no attribute "snd_seq_event_output_direct"
+kws/alsa.py|union-attr|Item "None" of "CDLL | None" has no attribute "snd_seq_open"
+kws/alsa.py|union-attr|Item "None" of "CDLL | None" has no attribute "snd_seq_set_client_name"
+kws/alsa.py|union-attr|Item "None" of "CDLL | None" has no attribute "snd_seq_set_client_pool_output"
+kws/alsa.py|union-attr|Item "None" of "CDLL | None" has no attribute "snd_seq_set_output_buffer_size"
+kws/bankbuild.py|arg-type|Argument 1 to "sequence_header" has incompatible type "bytes | None"; expected "Sequence[int]"
+kws/bankbuild.py|arg-type|Argument 1 to "step" has incompatible type "bytes | None"; expected "Sequence[int]"
+kws/bankbuild.py|arg-type|Argument 1 to "walk_sequence" has incompatible type "bytes | None"; expected "Sequence[int]"
+kws/bankbuild.py|assignment|Incompatible types in assignment (expression has type "tuple[str, int]", variable has type "tuple[str, int, int]")
+kws/bankbuild.py|index|Value of type "bytes | None" is not indexable
+kws/bankbuild.py|index|Value of type "bytes | None" is not indexable
+kws/bankbuild.py|index|Value of type "bytes | None" is not indexable
+kws/bankbuild.py|unreachable|Statement is unreachable
+kws/bridge.py|assignment|Incompatible types in assignment (expression has type "bool", target has type "str | None")
+kws/bridge.py|assignment|Incompatible types in assignment (expression has type "bool", target has type "str | None")
+kws/bridge.py|assignment|Incompatible types in assignment (expression has type "tuple[int]", variable has type "tuple[int, int]")
+kws/catalog.py|assignment|Incompatible types in assignment (expression has type "tuple[str, str, int, str]", target has type "tuple[str, int, str]")
+kws/catalog.py|assignment|Incompatible types in assignment (expression has type "tuple[str, str, int, str]", target has type "tuple[str, int, str]")
+kws/catalog.py|misc|List comprehension has incompatible type List[tuple[str, int, str]]; expected List[tuple[str, str, int, str]]
+kws/config.py|assignment|Incompatible types in assignment (expression has type "None", variable has type Module)
+kws/favorites.py|var-annotated|Need type annotation for "seen" (hint: "seen: list[<type>] = ...")
+kwsed/app.py|arg-type|Argument 2 to "save_channel" has incompatible type "str | None"; expected "str"
+kwsed/app.py|assignment|Incompatible types in assignment (expression has type "WavestationBridge", variable has type "DemoDevice")
+kwsed/app.py|assignment|Incompatible types in assignment (expression has type "WavestationBridge", variable has type "DemoDevice")
+kwsed/app.py|union-attr|Item "None" of "Packet | None" has no attribute "data"
+kwsed/cli.py|union-attr|Item "None" of "Packet | None" has no attribute "data"
+kwsed/demo.py|arg-type|Argument 1 to "parse" has incompatible type "bytes | None"; expected "Sequence[int]"
+tools/extract_catalog.py|var-annotated|Need type annotation for "kinds" (hint: "kinds: dict[<type>, <type>] = ...")
