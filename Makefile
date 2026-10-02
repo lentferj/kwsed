@@ -26,6 +26,8 @@ DETECT    := $(VENV)/bin/detect-secrets
 # ruff's extend-exclude and by detect-secrets' own filters.
 SRC       := kws kwsed tools tests quality
 
+comma     := ,
+
 .DEFAULT_GOAL := help
 .PHONY: help bootstrap lint format format-check typecheck test coverage \
         audit audit-vulns audit-dead audit-deps audit-secrets check clean \
@@ -85,9 +87,42 @@ typecheck-baseline:
 
 test:
 	$(PYTHON) -m pytest
+	$(MAKE) --no-print-directory coverage-floor
 
 coverage:
 	$(PYTHON) -m pytest --cov-report=term-missing
+
+# A floor on the pure-logic modules, which are the ones where an untested
+# branch is a wrong answer rather than a missing feature: a parser that
+# accepts bad input does not look broken, it looks like data.
+#
+# These currently sit between 96% and 100%, so the floor below is well
+# under all of them. It is 92 rather than the 95 it could have been because
+# kws/banks.py is at 96.3% -- barely three missed opportunities -- and 95%
+# would have left roughly one statement of slack there. A floor one
+# statement from failing is a floor that gets deleted.
+#
+# kws/bridge.py and kws/alsa.py are deliberately NOT in this list. Much of
+# what is uncovered in them needs a real MIDI port or a real ALSA
+# sequencer, so a floor there would only measure what the test doubles can
+# reach. Their code is instead gated by the 70% total above.
+LOGIC_MODULES := kws/messages.py,kws/banks.py,kws/records.py,kws/dumps.py,kws/multi.py,kws/deps.py,kws/catalog.py
+LOGIC_FLOOR := 92
+
+coverage-floor:
+	@# Looped rather than one --include over the lot, because coverage's
+	@# --fail-under compares the *total* of whatever report it printed. One
+	@# call over all seven would pass while one of them sat at 60%.
+	@for mod in $(subst $(comma), ,$(LOGIC_MODULES)); do \
+	    $(VENV)/bin/python -m coverage report --include=$$mod \
+	        --fail-under=$(LOGIC_FLOOR) >/dev/null 2>&1 || { \
+	        echo "coverage floor: $$mod is below $(LOGIC_FLOOR)%"; \
+	        $(VENV)/bin/python -m coverage report --include=$$mod; \
+	        exit 1; }; \
+	done
+	@echo 'coverage floor: every logic module at or above $(LOGIC_FLOOR)%'
+	@$(VENV)/bin/python -m coverage report --include=$(LOGIC_MODULES) \
+	    --skip-covered | tail -n 9
 
 # --- audit -------------------------------------------------------------------
 

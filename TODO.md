@@ -530,7 +530,36 @@ down here instead of being resolved by deleting a line.
 
 **Blocked on:** nothing but deciding, and then writing the assertion.
 
-## 21. The MidiQuest `.sqs` format is unread — shared across the projects
+## 21. `messages.object_request` is never called
+
+**Status:** open, minor. Found 2026-10-02 while covering the wire-format
+refusals.
+
+`object_request(bank, number, channel)` has no call site outside
+`kws/messages.py`, and it does exactly what `single_patch_request` does --
+`OBJECT_REQUEST` is `0x10` and `SINGLE_PATCH_REQUEST` is `0x10`, the same
+code under two names. So it is a second spelling of a request the project
+already has a correctly named builder for.
+
+vulture does not flag it, because vulture reports unused *module-level
+definitions* only at a confidence this file sits below; a public function
+in a library module reads as an API rather than as litter.
+
+Two ways out:
+
+* delete `object_request`, and with it the `OBJECT_REQUEST` alias, since
+  `single_patch_request` says what it is and nothing calls the other; or
+* keep it, if a generic per-object request is expected to be used once a
+  single-performance request is implemented -- see item 4, which is still
+  open and would need `SINGLE_PERFORMANCE_REQUEST` (0x19) rather than
+  this.
+
+Deleting it is the tidier of the two, and the alias it drags out with it
+is the thing most likely to be read as meaning something else later.
+
+**Blocked on:** nothing but the decision.
+
+## 22. The MidiQuest `.sqs` format is unread — shared across the projects
 
 **Status:** open, and not specific to this instrument.
 

@@ -165,8 +165,19 @@ source = ["kws", "kwsed"]
 
 [tool.coverage.report]
 show_missing = true
-# No fail_under yet: the point of this pass is to start measuring, not to
-# set a gate. Add fail_under once the number is understood.
+# The floor for the whole tree, statements and branches combined (which is
+# what fail_under compares -- not the headline percentage, and not the
+# statement figure on its own).
+#
+# Current is 75.7%, so this leaves about five points of headroom: roughly
+# 165 statements of slack. Setting it at the current number instead would
+# leave nothing, and the first ordinary commit that added ten uncovered
+# lines would fail the build -- at which point the gate gets deleted rather
+# than the tests get written.
+#
+# Per-module floors for the pure-logic modules are in the Makefile
+# (`make coverage-floor`), because coverage has no way to express them here.
+fail_under = 70
 exclude_also = [
     "if TYPE_CHECKING:",
     "raise NotImplementedError",
