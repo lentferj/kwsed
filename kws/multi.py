@@ -39,7 +39,7 @@ The layout was derived rather than read, and the arithmetic is the evidence:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Sequence
+from typing import List, Sequence
 
 __all__ = [
     "MULTISETS",

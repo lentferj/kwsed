@@ -176,11 +176,11 @@ a baseline. The one relaxation is `disallow_untyped_defs` and
 `disallow_untyped_calls` for `tests/` and `tools/`: annotating a test is close
 to no work, and requiring it there would bury anything real.
 
-Ruff keeps 805 pre-existing findings suppressed rather than fixed — every one
+Ruff keeps 786 pre-existing findings suppressed rather than fixed — every one
 is listed, with a reason, in [docs/QUALITY_CHECKS.md](docs/QUALITY_CHECKS.md).
 None of them suppresses a *new* finding: the rules are all enabled, and the
 per-file exemptions name specific codes, so a long line added to a file whose
-unused imports are ignored is still caught.
+complexity is ignored is still caught.
 
 ## Names are not included
 

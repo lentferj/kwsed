@@ -744,8 +744,6 @@ class KwsedApp(App[None]):
             table.move_cursor(row=min(row, len(self._current) - 1))
 
     def _fill(self, pair: Tuple[int, str]) -> None:
-        number, kind = pair
-        entry = banks.bank(number)
         table = self.query_one("#slot-table", DataTable)
         self._current_pair = pair
         self._current = self._visible(pair)

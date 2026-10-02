@@ -26,10 +26,6 @@ DETECT    := $(VENV)/bin/detect-secrets
 # ruff's extend-exclude and by detect-secrets' own filters.
 SRC       := kws kwsed tools tests quality
 
-# vulture 2.x has no --whitelist flag: a whitelist is supplied by including
-# the file among the scanned paths, so it belongs here.
-WHITELIST := quality/vulture_whitelist.py
-
 .DEFAULT_GOAL := help
 .PHONY: help bootstrap lint format format-check typecheck test coverage \
         audit audit-vulns audit-dead audit-deps audit-secrets check clean \
@@ -106,7 +102,7 @@ audit-vulns:
 	$(PIP_AUDIT) -r requirements-dev.txt --progress-spinner off
 
 audit-dead:
-	$(VULTURE) --min-confidence 80 $(SRC) $(WHITELIST)
+	$(VULTURE) --min-confidence 80 $(SRC)
 
 audit-deps:
 	$(VENV)/bin/deptry .

@@ -53,7 +53,7 @@ and every record then begins with a legible name.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence
 
 __all__ = [
     "SYSEX_START",

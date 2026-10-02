@@ -80,28 +80,28 @@ known-first-party = ["kws", "kwsed"]
 # tests: S101 (assert) is what a test is for; F401 covers imports used for
 # registration or availability rather than for a name.
 "tests/*" = ["S101", "F401"]
+# `first = step` in make_waveseq: a snapshot of the step counter taken before
+# the loop advances it. Kept rather than deleted, because it reads like the
+# remains of an assertion this fixture was meant to make about where a chain
+# starts -- deleting it would remove the evidence. See
+# docs/QUALITY_CHECKS.md.
 "tests/test_bankbuild.py" = ["F841"]
 "tests/test_banks_dumps.py" = ["I001"]
 "tests/test_favorites.py" = ["I001"]
-"tests/test_review_fixes.py" = ["I001", "RUF059"]
-"tests/test_write.py" = ["I001", "S110", "RUF100"]
-"tools/build_bank.py" = ["B904", "C901", "I001", "RUF100"]
-"tools/extract_catalog.py" = ["I001", "RUF100"]
-# dead `typing` imports left over from an earlier revision
-"kws/banks.py" = ["F401"]
-"kws/dumps.py" = ["F401"]
-"kws/favorites.py" = ["E501", "F401", "RUF023", "S608"]
-"kws/messages.py" = ["F401", "PLW1641"]
-"kws/multi.py" = ["F401"]
-"kws/records.py" = ["F401"]
+"tests/test_review_fixes.py" = ["I001"]
+"tests/test_write.py" = ["I001", "S110"]
+"tools/build_bank.py" = ["B904", "C901", "I001"]
+"tools/extract_catalog.py" = ["I001"]
+"kws/favorites.py" = ["E501", "RUF023", "S608"]
+"kws/messages.py" = ["PLW1641"]
 # C901: the write fence and the bank planner are complex by construction;
 # splitting them would fragment the one place each rule is enforced.
 "kws/bankbuild.py" = ["B007", "B008", "C901", "I001"]
-"kws/bridge.py" = ["C901", "I001", "RUF100", "S110", "S112"]
+"kws/bridge.py" = ["C901", "I001", "S110", "S112"]
 "kws/catalog.py" = ["I001"]
 "kws/config.py" = ["PLW0603", "UP031"]
 "kws/deps.py" = ["B007"]
-"kwsed/app.py" = ["B904", "F841", "I001", "PLW0108", "RUF059"]
+"kwsed/app.py" = ["B904", "I001", "PLW0108"]
 "kwsed/cli.py" = ["C416", "C901", "I001"]
 "kwsed/demo.py" = ["I001"]
 

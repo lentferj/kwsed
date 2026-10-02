@@ -45,9 +45,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from kws import banks  # noqa: E402
-from kws import dumps  # noqa: E402
-from kws import messages as m  # noqa: E402
+from kws import banks
+from kws import dumps
+from kws import messages as m
 
 DEFAULT_OUTPUT = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),

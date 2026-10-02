@@ -53,7 +53,7 @@ import sys
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-import rtmidi  # noqa: E402
+import rtmidi
 
 from kws import alsa
 from kws import backup

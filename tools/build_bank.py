@@ -39,7 +39,7 @@ from typing import List, Optional, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from kws import bankbuild, banks, deps, messages as m, records as rec  # noqa: E402
+from kws import bankbuild, banks, deps, messages as m, records as rec
 
 
 def _load(spec: str) -> Tuple[str, deps.Source]:

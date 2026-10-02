@@ -27,7 +27,7 @@ from kws import backup, banks, records as r
 from kws import messages as m
 
 pytest.importorskip("rtmidi")
-from kws.bridge import DeviceError, WavestationBridge  # noqa: E402
+from kws.bridge import DeviceError, WavestationBridge
 
 
 PATCH_BANK = bytes(banks.PATCHES_PER_BANK * r.PATCH_SIZE)

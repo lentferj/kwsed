@@ -53,7 +53,7 @@ sequence; the real figure is about a fifth.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Sequence
 
 __all__ = [
     "PERFORMANCE_SIZE",

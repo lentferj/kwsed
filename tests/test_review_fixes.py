@@ -161,6 +161,6 @@ class TestTheDemoResolvesWireBytes:
         """Byte 3 is the Card; banks.bank() would call it ROM 4."""
         from kwsed.demo import DemoDevice
 
-        kind, names = DemoDevice().read_bank_names("CARD")
+        _, names = DemoDevice().read_bank_names("CARD")
         assert names
         assert banks.by_sysex(3).label == "Card"

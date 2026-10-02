@@ -42,7 +42,7 @@ does not edit, so it does not need it -- see TODO.md.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Sequence, Tuple
 
 from kws import banks
 from kws import messages as m

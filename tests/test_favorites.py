@@ -315,8 +315,6 @@ class TestABoolIsNotANumber:
     """
 
     def _loaders(self):
-        import inspect
-
         import importlib
 
         module = importlib.import_module("kws.config")

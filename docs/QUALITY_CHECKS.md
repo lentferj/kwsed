@@ -104,12 +104,17 @@ say so — a wildcard would have looked like it was working. An explicit list
 cannot fail quietly, and a new test file is simply checked strictly, which is
 the safe direction to fail in.
 
-## vulture needs a whitelist as a path
+## vulture needs no whitelist
 
-vulture 2.x removed `--whitelist`. A whitelist is supplied by passing the file
-among the scanned paths, so `quality/vulture_whitelist.py` is on vulture's
-command line in the Makefile. That makes the file real Python, so ruff lints
-it too; hence the `noqa` on its one line.
+vulture 2.x removed `--whitelist`; a whitelist is supplied by passing the file
+among the scanned paths, which meant a real Python file that ruff then had to
+be persuaded to lint. There was one entry in it — an unused `import inspect`
+in a test — and deleting that import deleted the file, the `WHITELIST`
+variable in the Makefile, and the `noqa` that made the workaround lintable.
+
+vulture now runs on the source tree alone and reports nothing at confidence
+80. At confidence 60 it would report 68 items, which is below the bar worth
+holding a codebase to.
 
 ## Formatting is enforced
 
@@ -126,8 +131,9 @@ Re-measuring every ruff rule against the formatted tree gave the same 720
 findings with byte-identical per-rule counts, so adopting the formatter moved
 no suppression and needed no re-baselining. None of the 720 was a finding about
 layout — `E501` is the one rule that is, and there was still exactly one of
-it. The count is 805 today only because mypy strict added annotations, which
-are themselves findings.
+it. The count is 786 today: mypy strict added annotations, which are
+themselves findings, and deleting the mechanical suppressions took 19 back off
+again.
 
 The mypy baseline came through the reformat unchanged, which was the first real
 test of keying findings on `path | code | message` and leaving line numbers out.
@@ -144,10 +150,11 @@ These are properties of the whole style rather than of particular files, so a
 per-file list would be longer and less honest. A **new** file is still checked
 for all of them.
 
-**805 findings in total: 504 project-wide, 301 per-file.** (The total rose
+**786 findings in total: 502 project-wide, 284 per-file.** (The total rose
 from 720 when mypy strict was turned on, because the annotations it required
 are themselves `UP006`/`UP045`/`UP035` findings. Suppressing those rules is
-what stops that from being a loop.)
+what stops that from being a loop. It then fell back by 19 as the
+mechanical suppressions were deleted rather than kept.)
 
 | Rule | Count | Why |
 |---|---:|---|
@@ -168,49 +175,57 @@ long line added to `kws/records.py` is still caught even though `F401` is not.
 |---|---|---|
 | `tests/*` | `S101`, `F401` | `assert` is what a test is for; `F401` covers imports used for registration or availability rather than a name. |
 | `kws/bankbuild.py` | `C901`, `B007`, `B008`, `I001` | The bank planner is complex by construction; splitting it would fragment the one place the four budgets are enforced. `B008` is a frozen-dataclass default, which is immutable and therefore safe. |
-| `kws/bridge.py` | `C901`, `I001`, `RUF100`, `S110`, `S112` | The write fence is complex by construction. `S110`/`S112` are the deliberate teardown and drain loops. `RUF100` covers retained `# noqa: E402` markers that are unnecessary only because E402 exempts `sys.path` manipulation. |
-| `kws/favorites.py` | `E501`, `F401`, `RUF023`, `S608` | `E501` is an unsplittable SQL string. `S608` is `PRAGMA user_version = {SCHEMA_VERSION}`, an int constant. |
-| `kws/messages.py` | `F401`, `PLW1641` | `Packet` defines `__eq__` and is deliberately unhashable. |
+| `kws/bridge.py` | `C901`, `I001`, `S110`, `S112` | The write fence is complex by construction. `S110`/`S112` are the deliberate teardown and drain loops. |
+| `kws/favorites.py` | `E501`, `RUF023`, `S608` | `E501` is an unsplittable SQL string. `S608` is `PRAGMA user_version = {SCHEMA_VERSION}`, an int constant. |
+| `kws/messages.py` | `PLW1641` | `Packet` defines `__eq__` and is deliberately unhashable. |
 | `kws/config.py` | `PLW0603`, `UP031` | A module-level `_warned` flag for warn-once, and `"\u%04X" % ord(c)`. |
-| `kwsed/app.py` | `B904`, `F841`, `I001`, `PLW0108`, `RUF059` | The Textual event layer. |
+| `kwsed/app.py` | `B904`, `I001`, `PLW0108` | The Textual event layer. |
 | `kwsed/cli.py` | `C416`, `C901`, `I001` | The `send` command is the destructive path and stays in one readable function. |
-| `kws/{banks,dumps,favorites,messages,multi,records}.py` | `F401` | Dead `typing` imports from an earlier revision. |
-| `tools/*`, remaining | `B904`, `C901`, `I001`, `RUF100` | `sys.path` bootstrap imports and argument handling. |
+| `tools/*`, remaining | `B904`, `C901`, `I001` | `sys.path` bootstrap imports and argument handling. |
 
 ### Other tools
 
 | Tool | Suppressed | Where |
 |---|---:|---|
 | mypy | 0 | `quality/mypy-baseline.txt` is empty; strict passes outright |
-| vulture | 1 | `quality/vulture_whitelist.py` (at confidence 80; there are 68 at 60) |
+| vulture | 0 | no whitelist needed; vulture 2.x takes one as a scanned path, and there is nothing left to put in it |
 | deptry | 0 | — |
 | pip-audit | 0 | — |
 | detect-secrets | 0 | `.secrets.baseline` is empty of findings |
 
-### Worth deleting rather than suppressing
+### Deleted rather than suppressed
 
-These are all safe, mechanical removals. They are listed rather than done
-because a suppression that documents a deliberate choice is worth keeping,
-and one that hides a forgotten import is not — so the distinction is worth
-making explicitly rather than leaving to a reader.
+The distinction is worth making explicitly: a suppression that documents a
+deliberate choice is worth keeping, and one that hides a forgotten import is
+not. Sixteen findings were of the second kind and have been deleted.
 
-- **6 dead `typing` imports** — `Optional` in `kws/banks.py`, `kws/dumps.py`,
+- **6 dead `typing` imports** - `Optional` in `kws/banks.py`, `kws/dumps.py`,
   `kws/multi.py` and `kws/records.py`, `Tuple` in `kws/messages.py`,
-  `Iterable` in `kws/favorites.py`. None is re-exported through `__all__`.
-  Two more of the original seven went away on their own when mypy strict
-  made `Dict` and `Any` genuinely used in `kws/backup.py` and
-  `kws/messages.py`.
-- **6 unused `# noqa: E402`** markers — `kws/bridge.py`, `tests/test_write.py`,
-  `tools/build_bank.py`, and three in `tools/extract_catalog.py`. They are
-  unnecessary because E402 itself exempts code after a `sys.path`
-  manipulation, not because the imports are misplaced.
-- **`import inspect`** in `tests/test_favorites.py::_loaders`, unused and kept
-  alive only by `quality/vulture_whitelist.py`.
-- **4 dead locals** — `entry` and `kind` in `kwsed/app.py::_fill`, `first` in
-  `tests/test_bankbuild.py`, `kind` in `tests/test_review_fixes.py`.
+  `Iterable` in `kws/favorites.py`. None was re-exported through `__all__`.
+- **6 `# noqa: E402` markers** - `kws/bridge.py`, `tests/test_write.py`,
+  `tools/build_bank.py`, and three in `tools/extract_catalog.py`. They were
+  never needed: E402 exempts code following a `sys.path` manipulation, which is
+  what those imports follow. Only the comments went; the imports stand.
+- **`import inspect`** in `tests/test_favorites.py::_loaders`, which uses
+  `importlib`. Removing it took `quality/vulture_whitelist.py` with it, since
+  that file existed only to hold the name, and with it the `WHITELIST`
+  variable in the Makefile.
+- **3 dead locals** - `entry` and `kind` in `kwsed/app.py::_fill` (two lines
+  but three dead names: the method calls `_visible(pair)`, which unpacks the
+  pair itself, and every later `kind`/`number`/`entry` is an attribute of the
+  loop variable `item`), and `kind` in `tests/test_review_fixes.py`.
 
-Removing the whitelist entry is part of removing the finding: a whitelist that
-only ever grows stops being read, and stops being an argument for anything.
+That emptied four `per-file-ignores` entries outright and trimmed the code list
+from eight more. vulture needs no whitelist at all now.
+
+### One suppression left on purpose
+
+`tests/test_bankbuild.py` keeps `F841`, for `first = step` in `make_waveseq`: a
+snapshot of the step counter taken before the loop advances it. It is dead
+code, but it reads like the remains of an assertion this fixture was meant to
+make about where a chain starts, and deleting it would remove the evidence.
+That is a question about the test rather than about the linter, so it is
+written down here instead of being answered by deleting a line.
 
 ## CI
 
