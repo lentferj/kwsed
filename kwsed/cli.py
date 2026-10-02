@@ -20,7 +20,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
-from typing import Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from kws import banks
 from kws import catalog as cat
@@ -46,11 +46,11 @@ def _table(rows: List[List[str]], headers: List[str]) -> str:
     return "\n".join(out)
 
 
-def _catalog(args) -> cat.Catalog:
+def _catalog(args: argparse.Namespace) -> cat.Catalog:
     return cat.load(getattr(args, "catalog", None))
 
 
-def _cmd_banks(_device, args) -> None:
+def _cmd_banks(_device: Any, args: argparse.Namespace) -> None:
     catalog = _catalog(args)
     rows = []
     for entry in banks.BANKS:
@@ -73,7 +73,7 @@ def _cmd_banks(_device, args) -> None:
     print(_table(rows, ["#", "bank", "performances", "patches", ""]))
 
 
-def _cmd_list(_device, args) -> None:
+def _cmd_list(_device: Any, args: argparse.Namespace) -> None:
     catalog = _catalog(args)
     entry = banks.bank(args.bank)
     rows = []
@@ -88,7 +88,7 @@ def _cmd_list(_device, args) -> None:
     print(_table(rows, ["#", "name"]))
 
 
-def _cmd_find(_device, args) -> None:
+def _cmd_find(_device: Any, args: argparse.Namespace) -> None:
     catalog = _catalog(args)
     hits = catalog.search(args.name)
     if not hits:
@@ -100,7 +100,7 @@ def _cmd_find(_device, args) -> None:
     print(_table(rows, ["bank", "kind", "#", "name"]))
 
 
-def _cmd_ports(_device, _args) -> None:
+def _cmd_ports(_device: Any, _args: argparse.Namespace) -> None:
     from kws.bridge import MidiUnavailable, list_ports
 
     try:
@@ -116,7 +116,7 @@ def _cmd_ports(_device, _args) -> None:
     print("says nothing about Korg. `kwscli status` asks every port.")
 
 
-def _cmd_status(device, _args) -> None:
+def _cmd_status(device: Any, _args: argparse.Namespace) -> None:
     fields = device.identify()
     if fields is None:
         raise SystemExit("error: nothing answered an Identity Request.")
@@ -139,7 +139,7 @@ def _plural(kind: str) -> str:
     return f"{kind}es" if kind.endswith("ch") else f"{kind}s"
 
 
-def _cmd_dump(device, args) -> None:
+def _cmd_dump(device: Any, args: argparse.Namespace) -> None:
     """Read one bank off the unit. Read-only, **makes no sound**.
 
     The kind is asked for rather than accepted: each has its own request
@@ -164,7 +164,7 @@ def _cmd_dump(device, args) -> None:
     print(_table(rows, ["#", "on the unit", "in the catalog", ""]))
 
 
-def _cmd_select(device, args) -> None:
+def _cmd_select(device: Any, args: argparse.Namespace) -> None:
     """Select a sound. **This changes what the unit is playing.**"""
     item = banks.slot(args.bank, args.kind, args.number)
     device.select(item, channel=None if args.channel is None else args.channel - 1)
@@ -176,12 +176,15 @@ def _cmd_select(device, args) -> None:
     print("established (see TODO.md), so treat this as a best effort.")
 
 
-def _cmd_multi(device, args) -> int:
+def _cmd_multi(device: Any, args: argparse.Namespace) -> int:
     """Show the Multisets. One request; makes no sound."""
     from kws import messages as msg, multi as multi_mod
     from kws import banks as bk
 
-    sets = multi_mod.parse(msg.parse(device.read_multi()).data())
+    packet = msg.parse(device.read_multi())
+    if packet is None:
+        raise ValueError("the reply was not a Wavestation message")
+    sets = multi_mod.parse(packet.data())
     print(f"{len(sets)} multisets")
     for entry in sets:
         used = [p for p in entry.parts if p.used]
@@ -203,7 +206,7 @@ def _cmd_multi(device, args) -> int:
     return 0
 
 
-def _cmd_send(device, args) -> int:
+def _cmd_send(device: Any, args: argparse.Namespace) -> int:
     """Write a bank dump into the instrument. **This destroys a bank.**
 
     The gate here is the command line's equivalent of the TUI's
@@ -318,7 +321,7 @@ def _cmd_send(device, args) -> int:
     return 1
 
 
-_COMMANDS: Dict[str, Callable] = {
+_COMMANDS: Dict[str, Callable[[Any, argparse.Namespace], Any]] = {
     "banks": _cmd_banks,
     "list": _cmd_list,
     "find": _cmd_find,
@@ -388,7 +391,7 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _build_device(args):
+def _build_device(args: argparse.Namespace) -> Any:
     if args.demo:
         from kwsed.demo import DemoDevice
 

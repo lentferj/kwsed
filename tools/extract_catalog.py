@@ -41,7 +41,7 @@ import datetime
 import json
 import os
 import sys
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -57,8 +57,10 @@ DEFAULT_OUTPUT = os.path.join(
 )
 
 
-def build(paths: List[str]):
-    out: Dict[str, List[dict]] = {}
+def build(
+    paths: List[str],
+) -> Tuple[Dict[str, List[Dict[str, Any]]], Dict[str, str], List[str]]:
+    out: Dict[str, List[Dict[str, Any]]] = {}
     seen: Dict[str, str] = {}
     notes: List[str] = []
 
@@ -134,7 +136,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"wrote {args.output}: {total} names across {len(banks_out)} bank(s)")
     for bank_id in sorted(banks_out, key=lambda b: banks.bank(b).number):
         rows = banks_out[bank_id]
-        kinds = {}
+        kinds: Dict[str, int] = {}
         for row in rows:
             kinds[row["kind"]] = kinds.get(row["kind"], 0) + 1
         detail = ", ".join(

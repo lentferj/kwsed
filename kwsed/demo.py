@@ -27,7 +27,7 @@ per CLAUDE.md, from a pool obviously not Korg's.
 from __future__ import annotations
 
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from kws import banks
 from kws import dumps
@@ -95,7 +95,7 @@ class DemoDevice:
         if self.latency:
             time.sleep(self.latency)
 
-    def identify(self, *, timeout: float = 0.5) -> dict:
+    def identify(self, *, timeout: float = 0.5) -> Dict[str, Any]:
         self.identify_calls += 1
         self._tick()
         return {
@@ -142,8 +142,12 @@ class DemoDevice:
     # --- the operations kwsed uses -------------------------------------------
 
     def read_bank(
-        self, bank, kind: Optional[str] = None, *, timeout: Optional[float] = None
-    ):
+        self,
+        bank: int | str,
+        kind: Optional[str] = None,
+        *,
+        timeout: Optional[float] = None,
+    ) -> dumps.BulkDump:
         entry = banks.bank(bank)
         if kind == banks.Kind.PERFORMANCE:
             request = m.bank_request(
@@ -152,13 +156,22 @@ class DemoDevice:
         else:
             request = m.bulk_request(entry.sysex, self.channel)
         reply = self.handle(request)
+        # handle() returns None when it declines the message -- a channel
+        # mismatch, say -- which used to reach m.parse as a None and only
+        # be caught by the isinstance test inside it.
+        if reply is None:
+            raise RuntimeError("demo device declined its own request")
         packet = m.parse(reply)
         if packet is None or packet.is_error:
             raise RuntimeError("demo device refused its own request")
         return dumps.parse_bulk(packet)
 
     def read_bank_names(
-        self, bank, kind: Optional[str] = None, *, timeout: Optional[float] = None
+        self,
+        bank: int | str,
+        kind: Optional[str] = None,
+        *,
+        timeout: Optional[float] = None,
     ) -> Tuple[str, Dict[int, str]]:
         dump = self.read_bank(bank, kind)
         return dump.kind, dump.names()

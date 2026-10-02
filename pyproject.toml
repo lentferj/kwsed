@@ -151,7 +151,11 @@ module = [
     "build_bank",
     "extract_catalog",
 ]
+# The two go together. Allowing an untyped def while still forbidding calls to
+# it would leave every test that calls a local helper reporting the helper
+# rather than the code under test, which is noise pointing the wrong way.
 disallow_untyped_defs = false
+disallow_untyped_calls = false
 
 # --- pytest and coverage ----------------------------------------------------
 [tool.pytest.ini_options]

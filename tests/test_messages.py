@@ -67,11 +67,13 @@ class TestDataOffset:
     def test_the_packet_uses_the_right_one(self):
         payload = [3] + list(m.to_nibbles(b"Woven Bell"))
         packet = m.parse(m.frame(m.Function.ALL_PERFORMANCE_DUMP, payload))
+        assert packet is not None
         assert packet.data()[:10] == b"Woven Bell"
         assert packet.bank == 3
 
     def test_a_non_dump_has_no_offset(self):
         packet = m.parse(m.frame(m.Function.WRITE_COMPLETED))
+        assert packet is not None
         with pytest.raises(m.ProtocolError):
             packet.data()
 
@@ -107,7 +109,9 @@ class TestFrames:
 
     def test_errors_are_recognised(self):
         for code in (0x22, 0x24, 0x26):
-            assert m.parse(m.frame(code)).is_error
+            packet = m.parse(m.frame(code))
+            assert packet is not None
+            assert packet.is_error
 
 
 class TestNames:
@@ -152,6 +156,7 @@ class TestIdentity:
             ]
         )
         fields = m.identity_reply_fields(reply)
+        assert fields is not None
         assert fields["channel"] == 4 and fields["is_wavestation"]
 
     def test_another_korg_is_not_a_wavestation(self):
@@ -175,6 +180,7 @@ class TestIdentity:
             ]
         )
         fields = m.identity_reply_fields(reply)
+        assert fields is not None
         assert fields["is_korg"] and not fields["is_wavestation"]
 
 

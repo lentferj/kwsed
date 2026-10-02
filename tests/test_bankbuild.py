@@ -196,12 +196,18 @@ class TestBuild:
             template_waveseq=bytes(r.WAVESEQ_BANK_SIZE),
         )
         for (bank_id, wave_bank, seq), slot in made.sequence_map.items():
-            before = deps.walk_sequence(src[bank_id].waveseq, seq)
-            after = deps.walk_sequence(built.waveseq, slot)
+            # Bound once: narrowing a repeated src[bank_id].waveseq
+            # lookup is not something a reader -- or mypy -- can carry
+            # from one line to the next.
+            source_waveseq = src[bank_id].waveseq
+            built_waveseq = built.waveseq
+            assert source_waveseq is not None and built_waveseq is not None
+            before = deps.walk_sequence(source_waveseq, seq)
+            after = deps.walk_sequence(built_waveseq, slot)
             assert before.cost == after.cost
             for old, new in zip(before.steps, after.steps):
-                was = r.step(src[bank_id].waveseq, old)["wave"]
-                now = r.step(built.waveseq, new)["wave"]
+                was = r.step(source_waveseq, old)["wave"]
+                now = r.step(built_waveseq, new)["wave"]
                 if was < r.ROM_WAVE_BASE:
                     # not a wave at all: a quote of another sequence, which
                     # is renumbered with everything else it points at

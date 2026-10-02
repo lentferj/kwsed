@@ -53,7 +53,17 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Iterable,
+    Iterator,
+    List,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 __all__ = [
     "Favorite",
@@ -151,17 +161,17 @@ class _Result:
 
     __slots__ = ("rows", "rowcount")
 
-    def __init__(self, rows, rowcount: int) -> None:
+    def __init__(self, rows: List[sqlite3.Row], rowcount: int) -> None:
         self.rows = rows
         self.rowcount = rowcount
 
-    def fetchone(self):
+    def fetchone(self) -> Optional[sqlite3.Row]:
         return self.rows[0] if self.rows else None
 
-    def fetchall(self):
+    def fetchall(self) -> List[sqlite3.Row]:
         return self.rows
 
-    def __iter__(self):
+    def __iter__(self) -> Iterator[sqlite3.Row]:
         return iter(self.rows)
 
 
@@ -189,7 +199,7 @@ class _LockedConnection:
         self._db = sqlite3.connect(path, check_same_thread=False)
         self._db.row_factory = sqlite3.Row
 
-    def execute(self, sql: str, parameters=()) -> _Result:
+    def execute(self, sql: str, parameters: Sequence[Any] = ()) -> _Result:
         with self._lock:
             cursor = self._db.execute(sql, parameters)
             rows = cursor.fetchall()
@@ -256,7 +266,8 @@ class Favorites:
         integer in the database header, costs no row, and cannot itself be
         the thing that is missing when we go looking for the version.
         """
-        current = self._db.execute("PRAGMA user_version").fetchone()[0]
+        version_row = self._db.execute("PRAGMA user_version").fetchone()
+        current = int(version_row[0]) if version_row is not None else 0
         if current > SCHEMA_VERSION:
             raise RuntimeError(
                 f"{self.path} was written by a newer kwsed (schema "
@@ -315,12 +326,12 @@ class Favorites:
     def __enter__(self) -> "Favorites":
         return self
 
-    def __exit__(self, *_exc) -> None:
+    def __exit__(self, *_exc: object) -> None:
         self.close()
 
     # --- reading ------------------------------------------------------------
 
-    def __contains__(self, key) -> bool:
+    def __contains__(self, key: str | tuple[str, int]) -> bool:
         bank_id, number = _split(key)
         row = self._db.execute(
             "SELECT 1 FROM favorites WHERE bank_id = ? AND number = ? AND active = 1",
@@ -329,9 +340,10 @@ class Favorites:
         return row is not None
 
     def __len__(self) -> int:
-        return self._db.execute(
+        count = self._db.execute(
             "SELECT COUNT(*) FROM favorites WHERE active = 1"
-        ).fetchone()[0]
+        ).fetchone()
+        return int(count[0]) if count is not None else 0
 
     def get(self, bank_id: str, number: int) -> Optional[Favorite]:
         row = self._db.execute(
@@ -352,7 +364,7 @@ class Favorites:
         ).fetchone()
         return _to_favorite(row) if row is not None else None
 
-    def keys(self) -> set:
+    def keys(self) -> set[str]:
         """Every favourited slot, as ``BANK:NNN`` strings.
 
         One query for the whole set rather than a ``__contains__`` per row:
@@ -366,7 +378,7 @@ class Favorites:
             )
         }
 
-    def keys_for_bank(self, bank_id: str) -> set:
+    def keys_for_bank(self, bank_id: str) -> set[int]:
         return {
             row["number"]
             for row in self._db.execute(
@@ -549,7 +561,7 @@ class Favorites:
     def set_note(self, bank_id: str, number: int, note: str) -> None:
         self.add(bank_id, number, **_merge(self.get(bank_id, number), note=note))
 
-    def refresh_names(self, lookup) -> int:
+    def refresh_names(self, lookup: Callable[[str, int], Optional[str]]) -> int:
         """Re-label favourites from a name source. Returns how many changed.
 
         Used after a catalog is generated or a bank is read from the device,
@@ -573,7 +585,7 @@ class Favorites:
 # --- helpers ----------------------------------------------------------------
 
 
-def _split(key) -> Tuple[str, int]:
+def _split(key: str | tuple[str, int]) -> Tuple[str, int]:
     """Accept either 'RAM1' with a number, or ``"RAM1:007"``."""
     if isinstance(key, tuple):
         return key[0], int(key[1])
@@ -593,7 +605,7 @@ def _to_favorite(row: sqlite3.Row) -> Favorite:
     )
 
 
-def _merge(existing: Optional[Favorite], **changes) -> dict:
+def _merge(existing: Optional[Favorite], **changes: Any) -> Dict[str, Any]:
     """Fields for :meth:`Favorites.add` that change one thing and keep the rest.
 
     Without this, setting a rating on a favourite would blank its tags and
@@ -612,7 +624,7 @@ def _merge(existing: Optional[Favorite], **changes) -> dict:
 
 def _clean_tags(tags: str) -> str:
     """Normalise a comma-separated tag string: trimmed, de-duplicated."""
-    seen = []
+    seen: List[str] = []
     for part in tags.split(","):
         tag = part.strip()
         if tag and tag.lower() not in {t.lower() for t in seen}:

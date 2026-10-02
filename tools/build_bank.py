@@ -35,13 +35,14 @@ import argparse
 import glob
 import os
 import sys
+from typing import List, Optional, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from kws import bankbuild, banks, deps, messages as m, records as rec  # noqa: E402
 
 
-def _load(spec):
+def _load(spec: str) -> Tuple[str, deps.Source]:
     if "=" not in spec:
         raise SystemExit(f"--source wants ID=glob, got {spec!r}")
     bank_id, pattern = spec.split("=", 1)
@@ -51,7 +52,7 @@ def _load(spec):
     return bank_id, deps.load_syx(files, bank_id)
 
 
-def main(argv=None):
+def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument(
         "--source",
@@ -97,7 +98,7 @@ def main(argv=None):
     if not sources:
         raise SystemExit("no --source given")
 
-    chosen = []
+    chosen: List[Tuple[str, int]] = []
     for spec in args.patch:
         if ":" not in spec:
             raise SystemExit(f"--patch wants ID:N, got {spec!r}")

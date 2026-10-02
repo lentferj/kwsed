@@ -182,17 +182,21 @@ class TestTheBankNumbering:
 
 class TestRefusals:
     def test_a_wrong_function_is_refused(self):
+        packet = m.parse(m.frame(m.Function.WRITE_COMPLETED, [0]))
+        assert packet is not None
         with pytest.raises(m.ProtocolError, match="not a bank dump"):
-            dumps.parse_bulk(m.parse(m.frame(m.Function.WRITE_COMPLETED, [0])))
+            dumps.parse_bulk(packet)
 
     def test_a_dump_that_does_not_divide_is_refused(self):
         payload = [0] + list(m.to_nibbles(bytes(50 * 181 + 7)))
         packet = m.parse(m.frame(m.Function.ALL_PERFORMANCE_DUMP, payload))
+        assert packet is not None
         with pytest.raises(m.ProtocolError, match="whole number"):
             dumps.parse_bulk(packet)
 
     def test_a_short_dump_is_refused(self):
         payload = [0] + list(m.to_nibbles(bytes(10 * 181)))
         packet = m.parse(m.frame(m.Function.ALL_PERFORMANCE_DUMP, payload))
+        assert packet is not None
         with pytest.raises(m.ProtocolError, match="has 50"):
             dumps.parse_bulk(packet)

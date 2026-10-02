@@ -44,7 +44,17 @@ from __future__ import annotations
 import argparse
 import sys
 import threading
-from typing import Dict, List, Optional
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Sequence,
+    Set,
+    Tuple,
+)
 
 from textual import work
 from textual.app import App, ComposeResult
@@ -56,6 +66,9 @@ from textual.widgets import DataTable, Header, Input, Label, Static
 from kws import banks
 from kws import messages as m
 from kws import catalog as cat
+
+if TYPE_CHECKING:  # pragma: no cover - typing only
+    from kws.favorites import Favorite, Favorites
 
 __all__ = ["KwsedApp", "main", "build_parser", "KEY_HINTS", "wrap_blocks"]
 
@@ -104,7 +117,7 @@ KEY_HINTS = (
 )
 
 
-def wrap_blocks(blocks, width: int, sep: str = _SEP) -> str:
+def wrap_blocks(blocks: Sequence[str], width: int, sep: str = _SEP) -> str:
     """Pack hints into lines no wider than ``width``.
 
     Ported from the siblings. Breaks happen only between blocks, so a hint
@@ -205,7 +218,11 @@ class MultiScreen(ModalScreen[None]):
 
     BINDINGS = [Binding("escape", "close", "Close"), Binding("q", "close", "Close")]
 
-    def __init__(self, multisets, bank_label=None) -> None:
+    def __init__(
+        self,
+        multisets: Sequence[Any],
+        bank_label: Optional[Callable[[int], str]] = None,
+    ) -> None:
         super().__init__()
         self._multisets = list(multisets)
         self._bank_label = bank_label or (lambda n: str(n))
@@ -231,7 +248,7 @@ class MultiScreen(ModalScreen[None]):
             )
         self._detail(0)
 
-    def on_data_table_row_highlighted(self, event) -> None:
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         self._detail(event.cursor_row)
 
     def _detail(self, row: int) -> None:
@@ -255,7 +272,7 @@ class MultiScreen(ModalScreen[None]):
         self.dismiss(None)
 
 
-class SendScreen(ModalScreen[Optional[dict]]):
+class SendScreen(ModalScreen[Optional[Dict[str, Any]]]):
     """Write a bank dump into the instrument. **Destructive.**
 
     The only screen in kwsed that can destroy anything. Writing a bank
@@ -301,9 +318,9 @@ class SendScreen(ModalScreen[Optional[dict]]):
         *,
         path: str,
         kind: str,
-        destination,
+        destination: banks.Bank,
         current: Optional[Dict[int, str]] = None,
-        on_send=None,
+        on_send: Optional[Callable[[banks.Bank, str], None]] = None,
     ) -> None:
         super().__init__()
         self._path = path
@@ -410,7 +427,7 @@ class PromptScreen(ModalScreen[Optional[str]]):
         self.dismiss(None)
 
 
-class KwsedApp(App):
+class KwsedApp(App[None]):
     """The browser."""
 
     CSS = """
@@ -449,7 +466,12 @@ class KwsedApp(App):
     ]
 
     def __init__(
-        self, device, *, catalog=None, favorites=None, config_path: Optional[str] = None
+        self,
+        device: Any,
+        *,
+        catalog: Optional[cat.Catalog] = None,
+        favorites: Optional[Favorites] = None,
+        config_path: Optional[str] = None,
     ) -> None:
         super().__init__()
         self.device = device
@@ -467,7 +489,7 @@ class KwsedApp(App):
         #: bank holds 50 performances *and* 35 patches and they are
         #: different things. A pane listing banks alone would need a second
         #: control to say which kind, for no gain.
-        self._pairs: List[tuple] = [
+        self._pairs: List[Tuple[int, str]] = [
             (entry.number, kind)
             for entry in banks.BANKS
             for kind in (banks.Kind.PERFORMANCE, banks.Kind.PATCH)
@@ -527,19 +549,19 @@ class KwsedApp(App):
 
     # --- filling ------------------------------------------------------------
 
-    def _favorite_keys(self, bank_id: str, kind: str) -> set:
+    def _favorite_keys(self, bank_id: str, kind: str) -> Set[int]:
         if self.favorites is None:
             return set()
         return self.favorites.keys_for_bank(favorite_bank_id(bank_id, kind))
 
-    def _all_favourites(self):
+    def _all_favourites(self) -> List[banks.Slot]:
         """Every favourite in every bank and kind, in listing order."""
         if self.favorites is None:
             return []
-        wanted = {}
+        wanted: Dict[str, Set[int]] = {}
         for favourite in self.favorites.all(order="bank"):
             wanted.setdefault(favourite.bank_id, set()).add(favourite.number)
-        out = []
+        out: List[banks.Slot] = []
         for number, kind in self._pairs:
             entry = banks.bank(number)
             numbers = wanted.get(favorite_bank_id(entry.id, kind))
@@ -548,7 +570,7 @@ class KwsedApp(App):
             out.extend(s for s in banks.slots(number, kind) if s.number in numbers)
         return out
 
-    def _visible(self, pair):
+    def _visible(self, pair: Tuple[int, str]) -> List[banks.Slot]:
         number, kind = pair
         if self.view_mode == VIEW_ALL_FAVOURITES:
             return self._all_favourites()
@@ -558,7 +580,7 @@ class KwsedApp(App):
             entries = [e for e in entries if e.number in marked]
         return entries
 
-    def _cursor_entry(self):
+    def _cursor_entry(self) -> Optional[banks.Slot]:
         """The row under the cursor, or None."""
         table = self.query_one("#slot-table", DataTable)
         row = table.cursor_row
@@ -584,7 +606,10 @@ class KwsedApp(App):
 
     def _remember_channel(self, channel: int) -> None:
         """Save it for next time. Only OSError is swallowed."""
-        if getattr(self, "_config_path", None) is None:
+        # __init__ always assigns _config_path, so the getattr guard that used
+        # to stand here was defending against an attribute that cannot be
+        # missing -- and it hid the type from everything downstream.
+        if self._config_path is None:
             return
         from kws import config
 
@@ -600,7 +625,7 @@ class KwsedApp(App):
         self._set_channel(self._channel() - 1)
 
     def action_pick_channel(self) -> None:
-        def apply(text):
+        def apply(text: Optional[str]) -> None:
             if not text:
                 return
             try:
@@ -637,7 +662,9 @@ class KwsedApp(App):
         self.notify_status(f"{'favourited' if now else 'unfavourited'} {name or item}")
         self._refill_keeping_place()
 
-    def _favourite_under_cursor(self):
+    def _favourite_under_cursor(
+        self,
+    ) -> Tuple[Optional[Tuple[str, int]], Optional[Favorite]]:
         """The favourite row for the slot under the cursor, if there is one.
 
         Tags and notes hang off a favourite, so there is nothing to attach
@@ -659,8 +686,8 @@ class KwsedApp(App):
             self.notify_status("not a favourite yet -- press f first", refused=True)
             return
 
-        def apply(value):
-            if value is None:
+        def apply(value: Optional[str]) -> None:
+            if value is None or self.favorites is None:
                 return
             self.favorites.set_tags(where[0], where[1], value)
             self._refill_keeping_place()
@@ -676,8 +703,8 @@ class KwsedApp(App):
             self.notify_status("not a favourite yet -- press f first", refused=True)
             return
 
-        def apply(value):
-            if value is None:
+        def apply(value: Optional[str]) -> None:
+            if value is None or self.favorites is None:
                 return
             self.favorites.set_note(where[0], where[1], value)
             self._refill_keeping_place()
@@ -716,7 +743,7 @@ class KwsedApp(App):
         if self._current:
             table.move_cursor(row=min(row, len(self._current) - 1))
 
-    def _fill(self, pair) -> None:
+    def _fill(self, pair: Tuple[int, str]) -> None:
         number, kind = pair
         entry = banks.bank(number)
         table = self.query_one("#slot-table", DataTable)
@@ -770,7 +797,7 @@ class KwsedApp(App):
 
     # --- navigation ---------------------------------------------------------
 
-    def on_data_table_row_highlighted(self, event) -> None:
+    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
         if self._filling:
             return
         if event.data_table.id == "bank-table":
@@ -780,7 +807,7 @@ class KwsedApp(App):
         elif event.data_table.id == "slot-table":
             self._detail(event.cursor_row)
 
-    def on_data_table_row_selected(self, event) -> None:
+    def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         """Enter on a slot. It arrives here, not as a binding."""
         if event.data_table.id == "slot-table":
             self.action_select()
@@ -855,7 +882,7 @@ class KwsedApp(App):
         )
 
     def action_search(self) -> None:
-        def done(text) -> None:
+        def done(text: Optional[str]) -> None:
             if not text:
                 return
             hits = self.catalog.search(text)
@@ -895,8 +922,14 @@ class KwsedApp(App):
     def _show_multi(self, raw: bytes) -> None:
         from kws import multi as multi_mod
 
+        packet = m.parse(raw)
+        if packet is None:
+            self.notify_status(
+                "multi: the reply was not a Wavestation message", refused=True
+            )
+            return
         try:
-            sets = multi_mod.parse(m.parse(raw).data())
+            sets = multi_mod.parse(packet.data())
         except Exception as exc:
             self.notify_status(f"multi: {exc}", refused=True)
             return
@@ -923,7 +956,7 @@ class KwsedApp(App):
             self._busy = False
         self.call_from_thread(self._show_info, fields)
 
-    def _show_info(self, fields) -> None:
+    def _show_info(self, fields: Optional[Dict[str, Any]]) -> None:
         lines = [f"connection      {self.device.description}", ""]
         if fields:
             lines.append(
@@ -1013,6 +1046,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.midi_channel is not None and not 1 <= args.midi_channel <= 16:
         sys.exit("error: --midi-channel is 1-16")
 
+    # Either a DemoDevice or a WavestationBridge: the two share the handful
+    # of operations the browser calls, and neither is a base of the other.
+    device: Any
     if args.demo:
         from kwsed.demo import DemoDevice
 

@@ -16,6 +16,7 @@
 """Favourites. Names here are invented."""
 
 import pytest
+from textual.binding import Binding
 
 from kws.favorites import Favorites
 from kws import config
@@ -81,8 +82,10 @@ class TestKindIsPartOfTheKey:
             store.add(perf, 7, name="a performance")
             store.add(patch, 7, name="a patch")
             assert len(store) == 2
-            assert store.get(perf, 7).name == "a performance"
-            assert store.get(patch, 7).name == "a patch"
+            kept_perf = store.get(perf, 7)
+            kept_patch = store.get(patch, 7)
+            assert kept_perf is not None and kept_perf.name == "a performance"
+            assert kept_patch is not None and kept_patch.name == "a patch"
 
 
 class TestTheChannelIsRemembered:
@@ -147,6 +150,10 @@ class TestTheLegendIsComplete:
         legend = " ".join(KEY_HINTS)
         missing = []
         for binding in KwsedApp.BINDINGS:
+            # Textual allows a plain tuple here as well as a Binding;
+            # only the Binding has a key worth checking.
+            if not isinstance(binding, Binding):
+                continue
             if binding.key in self.IMPLIED:
                 continue
             shown = self.SHOWN_AS.get(binding.key, binding.key)
@@ -175,7 +182,9 @@ class TestUnfavouritingKeepsWhatTheUserTyped:
             assert store.toggle("BANK", 5) is True
 
             after = store.get("BANK", 5)
+            assert after is not None
             assert (after.rating, after.tags, after.note) == (4, "a, b", "hello")
+            assert before is not None
             assert after.added == before.added
 
     def test_an_unfavourited_slot_is_not_a_favourite(self, tmp_path):

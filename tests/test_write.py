@@ -61,7 +61,8 @@ class Unit:
         self.contents = contents
         self.answer = answer
         self.bridge = WavestationBridge(self.midi_in, self.midi_out, channel=0)
-        self.midi_out.send_message = self._sent
+        # Replacing a method on the instance is the point of this double.
+        self.midi_out.send_message = self._sent  # type: ignore[method-assign]
 
     def _sent(self, data):
         data = bytes(data)
@@ -73,7 +74,9 @@ class Unit:
             self.midi_in.queue.append((list(reply), 0.0))
         elif len(data) > 5 and data[4] == m.Function.ALL_PATCH_DUMP:
             # the instrument stores what it was sent
-            self.contents = bytes(m.parse(data).data()[: len(PATCH_BANK)])
+            packet = m.parse(data)
+            assert packet is not None
+            self.contents = bytes(packet.data()[: len(PATCH_BANK)])
 
 
 @pytest.fixture()
@@ -101,7 +104,10 @@ class TestTheFence:
     def test_no_write_happens_if_the_destination_cannot_be_read(self, tmp_path):
         """The backup is the undo. Without it, kwsed does not write."""
         silent = Unit(answer=False)
-        silent.bridge.DUMP_TIMEOUT = 0.1
+        # No timeout is patched onto the bridge: DUMP_TIMEOUT is a module
+        # constant in kws.bridge, read by name, so setting it on the instance
+        # never shortened anything. The explicit timeout below is what does
+        # the work -- which is why the test passed while saying nothing.
         with pytest.raises(DeviceError) as caught:
             silent.bridge.write_bank(
                 11, banks.Kind.PATCH, PATCH_BANK, backup_dir=str(tmp_path), timeout=0.1
@@ -132,7 +138,9 @@ class TestTheFence:
             11, banks.Kind.PATCH, PATCH_BANK, backup_dir=str(tmp_path)
         )
         saved = backup.load(result["backup"])
-        restored = m.parse(saved).data()[: len(PATCH_BANK)]
+        saved_packet = m.parse(saved)
+        assert saved_packet is not None
+        restored = saved_packet.data()[: len(PATCH_BANK)]
         assert restored[0:8] == b"Previous"
         assert backup.describe(result["backup"])["bank"] == "Card"
 
@@ -212,7 +220,9 @@ class TestTheModal:
     def test_the_fire_key_is_not_the_arm_key_and_not_enter(self):
         from kwsed.app import SendScreen
 
-        keys = {b.action: b.key for b in SendScreen.BINDINGS}
+        from textual.binding import Binding
+
+        keys = {b.action: b.key for b in SendScreen.BINDINGS if isinstance(b, Binding)}
         assert keys["arm"] != keys["fire"]
         assert keys["fire"] not in ("enter", "return")
 
