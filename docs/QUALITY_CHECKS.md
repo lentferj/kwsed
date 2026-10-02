@@ -30,8 +30,8 @@ README already tells you to create with `--system-site-packages` so the system
 |---|---|---|
 | `lint` | ruff | `ruff check` over `kws kwsed tools tests quality` |
 | `format` | ruff | `ruff format`, rewriting files |
-| `format-check` | ruff | the same without rewriting — **not in `check`**, see below |
-| `typecheck` | mypy | via `quality/check_mypy.py`, against a baseline |
+| `format-check` | ruff | the same without rewriting; run by `check` |
+| `typecheck` | mypy | `--strict`, via `quality/check_mypy.py` |
 | `test` | pytest + pytest-cov | 163 tests, coverage with `term-missing` |
 | `audit-vulns` | pip-audit | the dependency closure this project installs |
 | `audit-dead` | vulture | unused code at confidence ≥ 80 |
@@ -53,9 +53,10 @@ So the target audits `requirements-dev.txt`, which resolves the closure of the
 project's own dependencies plus the toolchain. The one thing it skips is
 `kwsed` itself, which is not on PyPI.
 
-## mypy has a baseline
+## mypy runs strict, behind a baseline that is empty
 
-mypy has no baseline of its own, and both built-in alternatives are worse:
+The checker exists because mypy has no baseline of its own, and both built-in
+alternatives are worse:
 
 - `ignore_errors` per module hides **new** errors of any kind in that module,
   which defeats the point of running a type checker at all.
@@ -77,14 +78,31 @@ make typecheck            # fail on anything not already known
 make typecheck-baseline   # accept the current output as the new baseline
 ```
 
-**Strictness.** The project runs non-strict with four flags that cost nothing
-today: `warn_unused_ignores`, `warn_redundant_casts`, `no_implicit_optional`
-and `warn_unreachable`.
+**Strictness.** The project runs `strict = true`. mypy --strict passes on all
+28 source files, so the baseline above is currently **empty**: there is nothing
+being tolerated.
 
-No module is `--strict` clean — `kws/messages.py` needs 2 fixes, `kws/multi.py`
-1, `kws/records.py` 2, and so on — so strict-per-module is not configured.
-Making it so means editing annotated source, which is out of scope for a
-tooling pass. Strict can be dialled in per module later.
+One flag is turned off outside the library, by an explicit list of module names
+in `pyproject.toml` — `disallow_untyped_defs` and `disallow_untyped_calls`, for
+`tests/` and `tools/` only. The line drawn is annotation debt against checking
+value:
+
+- Annotating a test is close to no work. `def test_it_behaves():` says nothing
+  a type checker did not already learn from the assert, and requiring `-> None`
+  on 240 of them buys noise rather than checking.
+- Inside the library it is the opposite. A Textual callback or a bridge method
+  reached only by the framework is exactly where a wrong signature goes
+  unnoticed, because nothing calls it in a way mypy can see.
+
+The two flags have to move together. Allowing an untyped def while still
+forbidding calls to it makes every test that calls a local helper report the
+helper instead of the code under test.
+
+The module names are listed rather than wildcarded on purpose. mypy accepts
+`test_*` as matching without applying it, and emits no "unused section" note to
+say so — a wildcard would have looked like it was working. An explicit list
+cannot fail quietly, and a new test file is simply checked strictly, which is
+the safe direction to fail in.
 
 ## vulture needs a whitelist as a path
 
@@ -93,21 +111,28 @@ among the scanned paths, so `quality/vulture_whitelist.py` is on vulture's
 command line in the Makefile. That makes the file real Python, so ruff lints
 it too; hence the `noqa` on its one line.
 
-## Formatting is not enforced
+## Formatting is enforced
 
-The tree has never been through a formatter. `ruff format` would rewrite **28
-of 30 files**, mostly on continuation style. Enforcing that in `check` or in a
-pre-commit hook would mean rewriting the whole codebase in one commit, which
-is a decision for the owner and not a lint fix.
+`ruff format` is run by `make check` (`format-check`) and wired into
+pre-commit as `ruff-format`.
 
-`make format` will do it whenever that is wanted, as its own commit so the
-diff stays reviewable. Until then the gap is real and worth naming: **a badly
-formatted new file passes `make check`.** `make format-check` closes that at
-the cost above.
+Adopting it rewrote **28 of 30 files** on a single occasion, almost entirely on
+continuation style. That was done as its own commit, so the diff stayed
+reviewable rather than arriving as a surprise inside a later change — which is
+why the rule is worth stating: a whole-tree reformat is a commit of its own, not
+something to discover inside a feature.
 
-For the same reason `ruff-format` is not wired into `.pre-commit-config.yaml`
-even though `ruff-check` is. The first commit touching a Python file would
-otherwise come back with 26 rewritten files and be rejected.
+Re-measuring every ruff rule against the formatted tree gave the same 720
+findings with byte-identical per-rule counts, so adopting the formatter moved
+no suppression and needed no re-baselining. None of the 720 was a finding about
+layout — `E501` is the one rule that is, and there was still exactly one of
+it. The count is 805 today only because mypy strict added annotations, which
+are themselves findings.
+
+The mypy baseline came through the reformat unchanged, which was the first real
+test of keying findings on `path | code | message` and leaving line numbers out.
+A baseline keyed on line numbers would have needed regenerating, and would
+break again on the next edit that shifts a line.
 
 ## Suppressed findings
 
@@ -119,10 +144,15 @@ These are properties of the whole style rather than of particular files, so a
 per-file list would be longer and less honest. A **new** file is still checked
 for all of them.
 
+**805 findings in total: 504 project-wide, 301 per-file.** (The total rose
+from 720 when mypy strict was turned on, because the annotations it required
+are themselves `UP006`/`UP045`/`UP035` findings. Suppressing those rules is
+what stops that from being a loop.)
+
 | Rule | Count | Why |
 |---|---:|---|
-| `UP006` `UP035` `UP045` `UP037` | 215 | The project uses `typing.Dict/List/Optional` consistently under `from __future__ import annotations`. Rewriting every annotation is a refactor. |
-| `PLC0415` | 55 | Local imports are deliberate: `rtmidi` is imported lazily so `kwscli banks` works with no MIDI backend; the tests import inside functions for `pytest.importorskip`. |
+| `UP006` `UP035` `UP045` `UP037` | 288 | The project uses `typing.Dict/List/Optional` consistently under `from __future__ import annotations`. Rewriting every annotation is a refactor, and mypy strict made 73 more of them. |
+| `PLC0415` | 56 | Local imports are deliberate: `rtmidi` is imported lazily so `kwscli banks` works with no MIDI backend; the tests import inside functions for `pytest.importorskip`. |
 | `PLR2004` | 96 | Protocol offsets, record sizes and function codes are compared as literals throughout. That is how binary formats read; naming every constant is a different project. |
 | `PLR0911/0912/0913/0915/0917` | 14 | Complexity and argument-count refactor suggestions, not defects. |
 | `RUF005` `RUF012` `RUF022` | 41 | Established conventions: `[a] + [b]`, class-level constant tables, `__all__` ordered by protocol rather than alphabetically. |
@@ -144,14 +174,14 @@ long line added to `kws/records.py` is still caught even though `F401` is not.
 | `kws/config.py` | `PLW0603`, `UP031` | A module-level `_warned` flag for warn-once, and `"\u%04X" % ord(c)`. |
 | `kwsed/app.py` | `B904`, `F841`, `I001`, `PLW0108`, `RUF059` | The Textual event layer. |
 | `kwsed/cli.py` | `C416`, `C901`, `I001` | The `send` command is the destructive path and stays in one readable function. |
-| `kws/{backup,banks,dumps,multi,records}.py` | `F401` | Dead `typing` imports from an earlier revision. |
+| `kws/{banks,dumps,favorites,messages,multi,records}.py` | `F401` | Dead `typing` imports from an earlier revision. |
 | `tools/*`, remaining | `B904`, `C901`, `I001`, `RUF100` | `sys.path` bootstrap imports and argument handling. |
 
 ### Other tools
 
 | Tool | Suppressed | Where |
 |---|---:|---|
-| mypy | 30 | `quality/mypy-baseline.txt` |
+| mypy | 0 | `quality/mypy-baseline.txt` is empty; strict passes outright |
 | vulture | 1 | `quality/vulture_whitelist.py` (at confidence 80; there are 68 at 60) |
 | deptry | 0 | — |
 | pip-audit | 0 | — |
@@ -159,21 +189,28 @@ long line added to `kws/records.py` is still caught even though `F401` is not.
 
 ### Worth deleting rather than suppressing
 
-These are suppressed only because this pass does not edit application source.
-Each is a safe, mechanical removal the owner may prefer to make:
+These are all safe, mechanical removals. They are listed rather than done
+because a suppression that documents a deliberate choice is worth keeping,
+and one that hides a forgotten import is not — so the distinction is worth
+making explicitly rather than leaving to a reader.
 
-- **7 dead `typing` imports** — `Dict` in `kws/backup.py` and `kws/messages.py`,
-  `Optional` in `kws/banks.py`, `kws/dumps.py`, `kws/multi.py`,
-  `kws/records.py`, `Iterable`/`Sequence` in `kws/favorites.py`. None is
-  re-exported through `__all__`.
-- **6 unused `# noqa: E402`** markers in `kws/bridge.py`,
-  `tests/test_write.py` and `tools/`.
-- **`import inspect`** in `tests/test_favorites.py::_loaders`, which is unused.
-- **The 6 stale `# noqa: E402`** plus the `F841`/`RUF059` dead locals in
-  `kwsed/app.py`, `tests/test_bankbuild.py` and `tests/test_review_fixes.py`.
+- **6 dead `typing` imports** — `Optional` in `kws/banks.py`, `kws/dumps.py`,
+  `kws/multi.py` and `kws/records.py`, `Tuple` in `kws/messages.py`,
+  `Iterable` in `kws/favorites.py`. None is re-exported through `__all__`.
+  Two more of the original seven went away on their own when mypy strict
+  made `Dict` and `Any` genuinely used in `kws/backup.py` and
+  `kws/messages.py`.
+- **6 unused `# noqa: E402`** markers — `kws/bridge.py`, `tests/test_write.py`,
+  `tools/build_bank.py`, and three in `tools/extract_catalog.py`. They are
+  unnecessary because E402 itself exempts code after a `sys.path`
+  manipulation, not because the imports are misplaced.
+- **`import inspect`** in `tests/test_favorites.py::_loaders`, unused and kept
+  alive only by `quality/vulture_whitelist.py`.
+- **4 dead locals** — `entry` and `kind` in `kwsed/app.py::_fill`, `first` in
+  `tests/test_bankbuild.py`, `kind` in `tests/test_review_fixes.py`.
 
-Once a suppression is no longer needed, delete the entry as well as the
-finding — a baseline that only ever grows stops being read.
+Removing the whitelist entry is part of removing the finding: a whitelist that
+only ever grows stops being read, and stops being an argument for anything.
 
 ## CI
 

@@ -88,7 +88,6 @@ known-first-party = ["kws", "kwsed"]
 "tools/build_bank.py" = ["B904", "C901", "I001", "RUF100"]
 "tools/extract_catalog.py" = ["I001", "RUF100"]
 # dead `typing` imports left over from an earlier revision
-"kws/backup.py" = ["F401"]
 "kws/banks.py" = ["F401"]
 "kws/dumps.py" = ["F401"]
 "kws/favorites.py" = ["E501", "F401", "RUF023", "S608"]
