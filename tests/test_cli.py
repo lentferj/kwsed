@@ -352,9 +352,22 @@ class TestTheChannelArguments:
         with pytest.raises(SystemExit):
             cli.main(["--demo", "--midi-channel", "17", "status"])
 
+    def test_the_two_channels_are_both_range_checked(self):
+        # --channel is the one a program change goes out on; --device-channel
+        # is the unit's own base. They are different numbers on most of these
+        # instruments and the spec says they must not share a word, so both
+        # get their own option and both are checked.
+        for option in ("--channel", "--device-channel"):
+            with pytest.raises(SystemExit):
+                cli.main(["--demo", option, "17", "status"])
+
     def test_the_parser_defaults_are_none(self):
+        # --midi-channel is now --device-channel, with the old spelling still
+        # accepted; both land in the same dest, so there is one attribute.
         args = cli.build_parser().parse_args(["banks"])
-        assert args.midi_channel is None and args.channel is None
+        assert args.device_channel is None and args.channel is None
+        old = cli.build_parser().parse_args(["--midi-channel", "7", "banks"])
+        assert old.device_channel == 7
 
 
 class TestOfflineNeverBuildsADevice:

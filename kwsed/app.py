@@ -3,10 +3,8 @@
 #
 # This file is part of kwsed.
 #
-# The key-hint legend is ported from the sibling rxved and p2ked projects,
-# which port it from s3ked, eosed and k2kremote:
-#   Copyright (C) 2026  rxved / p2ked / s3ked / eosed / k2kremote
-#   contributors                                     - GPL-2.0-or-later
+# The legend itself is now vinsynlib's, which carries the copyright of every
+# sibling it was assembled from; see src/vinsynlib/ui/hints.py there.
 #
 # kwsed is free software: you can redistribute it and/or modify it under the
 # terms of the GNU General Public License as published by the Free Software
@@ -56,6 +54,7 @@ from typing import (
     Tuple,
 )
 
+from vinsynlib import cli
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -67,12 +66,20 @@ from kws import banks
 from kws import messages as m
 from kws import catalog as cat
 
+# The legend's wrapping and the widget that draws it are the family's; see
+# src/vinsynlib/keys.py and src/vinsynlib/ui/hints.py, which carry the
+# copyright of every sibling the shared version was assembled from. The
+# library's KeyHints takes the blocks as a constructor argument where the
+# local one read this module's global, so the one construction site below
+# passes KEY_HINTS explicitly. The CSS selector is unchanged -- same class
+# name, so the stylesheet rule still matches.
+from vinsynlib.keys import wrap_blocks  # re-exported: it is in __all__
+from vinsynlib.ui.hints import KeyHints
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from kws.favorites import Favorite, Favorites
 
 __all__ = ["KwsedApp", "main", "build_parser", "KEY_HINTS", "wrap_blocks"]
-
-_SEP = " · "
 
 #: What `F` steps through. The same three the sibling rxved, p2ked and
 #: x5ded use, so the key means the same thing across these projects.
@@ -110,49 +117,16 @@ KEY_HINTS = (
     "F favourites view",
     "t tags",
     "n note",
-    "m multi",
+    # `m` means channels everywhere in a browser, and a Wavestation Multiset
+    # *is* a channel assignment: Multiset 3 is what answers on MIDI channel 3.
+    # So this is a clarification rather than a change of function. The
+    # `multi` subcommand keeps the instrument's own word for the object, which
+    # docs/UX-SPEC.md section 2 permits; the legend names what the key does.
+    "m channels",
     "i device",
     "? help",
     "q quit",
 )
-
-
-def wrap_blocks(blocks: Sequence[str], width: int, sep: str = _SEP) -> str:
-    """Pack hints into lines no wider than ``width``.
-
-    Ported from the siblings. Breaks happen only between blocks, so a hint
-    is never split mid-label. The point is that the legend wraps instead of
-    truncating: a footer that silently drops its last keys teaches the user
-    those keys do not exist.
-    """
-    lines, current = [], ""
-    for block in blocks:
-        candidate = block if not current else current + sep + block
-        if width and len(candidate) > width and current:
-            lines.append(current)
-            current = block
-        else:
-            current = candidate
-    if current:
-        lines.append(current)
-    return "\n".join(lines)
-
-
-class KeyHints(Static):
-    """The legend, wrapped to the window rather than truncated."""
-
-    DEFAULT_CSS = "KeyHints { height: auto; background: $panel; padding: 0 1; }"
-
-    def on_mount(self) -> None:
-        self._render_hints()
-
-    def on_resize(self) -> None:
-        self._render_hints()
-
-    def _render_hints(self) -> None:
-        # NOT named _render: Widget._render is Textual's own, and shadowing
-        # it makes every layout pass ask a None for its height.
-        self.update(wrap_blocks(KEY_HINTS, max(self.size.width - 2, 20)))
 
 
 class ReportScreen(ModalScreen[None]):
@@ -453,7 +427,9 @@ class KwsedApp(App[None]):
         Binding("left_square_bracket", "channel_down", "Channel -"),
         Binding("right_square_bracket", "channel_up", "Channel +"),
         Binding("c", "pick_channel", "Set channel"),
-        Binding("m", "multi", "Multi mode"),
+        # Description matches the legend: `m` opens the channel assignment,
+        # which is what a Multiset is. The action keeps its own name.
+        Binding("m", "multi", "Channels"),
         Binding("f", "toggle_favorite", "Favourite"),
         Binding("F", "cycle_favorites", "Favourites view"),
         Binding("t", "edit_tags", "Tags"),
@@ -506,7 +482,9 @@ class KwsedApp(App[None]):
             yield DataTable(id="slot-table", cursor_type="row")
         yield Static("", id="detail")
         yield Static("", id="status")
-        yield KeyHints()
+        # The library's widget takes the blocks; the local one read this
+        # module's KEY_HINTS global, which a library cannot do.
+        yield KeyHints(KEY_HINTS)
 
     def on_mount(self) -> None:
         self.title = "kwsed"
@@ -997,7 +975,7 @@ are different objects; performance 7 is not patch 7.
   ⏎   select the slot on the unit -- it will sound
   r   read this bank's names from the unit -- SILENT, nothing is selected
   /   search names
-  m   the 32 Multisets: which performance answers on each MIDI channel
+  m   channels: the 32 Multisets, and which performance answers on each
   f   favourite this slot; F steps all -> this bank's -> every favourite
   t   tags; n   note (both hang off a favourite, so press f first)
   [ ] step the send channel; c set it by number
@@ -1013,36 +991,33 @@ Moving the cursor sends nothing at all.
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = cli.make_parser(
         prog="kwsed", description="Browse a Korg Wavestation SR's sounds."
     )
-    parser.add_argument("--port")
-    parser.add_argument("--recv-port")
-    parser.add_argument(
-        "--demo", action="store_true", help="built-in demo device; opens no MIDI ports"
-    )
-    parser.add_argument(
-        "--midi-channel", type=int, default=None, help="the unit's global channel, 1-16"
-    )
-    parser.add_argument("--catalog", default=None)
-    parser.add_argument(
-        "--config", default=None, help="settings cache (default: ./config.toml)"
-    )
-    parser.add_argument(
-        "--favorites",
-        default=None,
-        help="favourites database (default: the per-platform data directory)",
+    # scan=False: a Wavestation's ports are whatever ALSA reports behind the
+    # user's interface, and re-probing finds nothing a name hint could not.
+    # channel=False: the option this tool wants is the unit's own global
+    # channel (--device-channel), and on this instrument that number is also
+    # the channel selections are sent on -- they are not two numbers here.
+    cli.add_common_arguments(
+        parser,
+        port=True,
+        recv_port=True,
+        channel=False,
+        device_channel=True,
+        catalog=True,
+        config=True,
+        favorites=True,
     )
     return parser
 
 
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
+    cli.validate_common(args)
     from kws import config as cfg
 
     config_path = getattr(args, "config", None) or cfg.DEFAULT_PATH
-    if args.midi_channel is not None and not 1 <= args.midi_channel <= 16:
-        sys.exit("error: --midi-channel is 1-16")
 
     # Either a DemoDevice or a WavestationBridge: the two share the handful
     # of operations the browser calls, and neither is a base of the other.
@@ -1063,9 +1038,13 @@ def main(argv: Optional[List[str]] = None) -> int:
                 device = b.WavestationBridge.open(
                     args.port,
                     recv_port=args.recv_port,
+                    # --midi-channel is now --device-channel, with the old
+                    # spelling still accepted: the number is the unit's own
+                    # global channel, not the channel a program change goes
+                    # out on, and the spec says those must not share a word.
                     channel=(
-                        (args.midi_channel - 1)
-                        if args.midi_channel
+                        (args.device_channel - 1)
+                        if args.device_channel
                         else (remembered if remembered is not None else 0)
                     ),
                 )

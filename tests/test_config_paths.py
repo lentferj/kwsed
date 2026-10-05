@@ -17,32 +17,32 @@
 
 ``config.DEFAULT_PATH`` is the relative string ``"config.toml"``. That is
 the right default for the application -- it is a disposable per-checkout
-cache of which port answered last, gitignored in all four sibling projects,
-as distinct from the favourites store, which is the user's own work and
-lives in the platform data directory. It is the wrong thing for a test,
-which would drop the file into whatever directory pytest was started from.
+cache of which port answered last, gitignored, as distinct from the
+favourites store, which is the user's own work and lives in the platform
+data directory. It is the wrong thing for a test, which would drop the file
+into whatever directory pytest was started from.
 
 Being gitignored is what makes this worth a test rather than a habit: the
 file never appears in ``git status``, so the only evidence is somebody
 noticing it sitting next to the source. One was, dated during a test run.
-The sibling rxved had the same shape of bug with backup files and fixed it
-in ``1f5aa3a``; p2ked, kwsed and x5ded all carried the same copied line.
+
+Both checks below were this file's own AST walk, copied into each project in
+the family. They are now one call into :mod:`vinsynlib.devchecks`, so a fix
+to the walk is a fix in all nine rather than in whichever one noticed.
 """
 
 import ast
 import os
 
+from vinsynlib import devchecks
 
-def _test_sources():
-    here = os.path.dirname(os.path.abspath(__file__))
-    for name in sorted(os.listdir(here)):
-        if name.startswith("test_") and name.endswith(".py"):
-            with open(os.path.join(here, name), encoding="utf-8") as handle:
-                yield name, ast.parse(handle.read())
+
+def _here() -> str:
+    return os.path.dirname(os.path.abspath(__file__))
 
 
 def _config_saves():
-    for name, tree in _test_sources():
+    for name, tree in devchecks.iter_test_sources(_here()):
         for node in ast.walk(tree):
             if (
                 isinstance(node, ast.Call)
@@ -55,11 +55,7 @@ def _config_saves():
 
 
 def test_every_config_save_in_the_suite_names_its_file():
-    offenders = []
-    for name, node in _config_saves():
-        # the path is either the last positional argument or path=
-        if not (len(node.args) >= 2 or any(kw.arg == "path" for kw in node.keywords)):
-            offenders.append(f"{name}:{node.lineno} {node.func.attr}")
+    offenders = devchecks.config_saves_without_path(_here())
     assert not offenders, (
         f"{offenders} save to config.DEFAULT_PATH, which is relative to the "
         f"working directory. Pass a tmp_path."
@@ -67,5 +63,30 @@ def test_every_config_save_in_the_suite_names_its_file():
 
 
 def test_the_check_has_something_to_check():
-    """Guard against the search passing because it matched nothing."""
+    """Guard against the search passing because it matched nothing.
+
+    Counts every ``config.save_*`` in the suite, offending or not:
+    :func:`devchecks.config_saves_without_path` returns only the offenders, so
+    "none" from it means nothing at all on its own.
+    """
     assert list(_config_saves()), "no config.save_* calls found; the check is vacuous"
+
+
+def test_this_project_imports_no_sibling():
+    """A sibling project's package is not installed beside this one.
+
+    emorphed had a function importing ``nano.config`` -- nanosyned's package
+    -- which worked in the project it was copied from and raised ImportError
+    the moment ``--config`` was used there.
+    """
+    root = os.path.dirname(_here())
+    offenders = []
+    for pkg in ("kws", "kwsed"):
+        directory = os.path.join(root, pkg)
+        for name in sorted(os.listdir(directory)):
+            if name.endswith(".py"):
+                offenders += devchecks.foreign_imports(
+                    os.path.join(directory, name),
+                    own=("kws", "kwsed", "vinsynlib"),
+                )
+    assert not offenders, offenders

@@ -375,7 +375,7 @@ class TestReadsMatchTheBankTheyAskedFor:
             def __init__(self):
                 self.queue = []
 
-            def ignore_types(self, **kw):
+            def ignore_types(self, **_kwargs):
                 pass
 
             def get_message(self):
@@ -425,7 +425,7 @@ class TestALargeSendIsRefusedWithoutTheAlsaPath:
                 self.sent.append(bytes(data))
 
         class In:
-            def ignore_types(self, **kw):
+            def ignore_types(self, **_kwargs):
                 pass
 
             def get_message(self):

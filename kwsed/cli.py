@@ -22,6 +22,7 @@ import os
 import sys
 from typing import Any, Callable, Dict, List, Optional
 
+from vinsynlib import cli, midi
 from kws import banks
 from kws import catalog as cat
 
@@ -101,19 +102,24 @@ def _cmd_find(_device: Any, args: argparse.Namespace) -> None:
 
 
 def _cmd_ports(_device: Any, _args: argparse.Namespace) -> None:
-    from kws.bridge import MidiUnavailable, list_ports
-
     try:
-        ins, outs = list_ports()
-    except MidiUnavailable as exc:
+        ins, outs = midi.list_ports()
+    except midi.MidiUnavailable as exc:
         raise SystemExit(f"error: {exc}") from exc
-    both = set(ins) & set(outs)
-    for label, names in (("inputs", ins), ("outputs", outs)):
-        print(f"{label}:")
-        for name in names:
-            print(f"  {name}" + ("   [bidirectional]" if name in both else ""))
-    print("\nA Wavestation on a DIN cable is behind an interface whose name")
-    print("says nothing about Korg. `kwscli status` asks every port.")
+    # The rendering is the family's, so all nine listings look alike; only the
+    # trailing note is kwsed's, because only kwsed has a DIN cable to warn
+    # about.
+    print(
+        midi.render_ports(
+            ins,
+            outs,
+            note=(
+                "A Wavestation on a DIN cable is behind an interface whose "
+                "name\nsays nothing about Korg. `kwscli status` asks every "
+                "port."
+            ),
+        )
+    )
 
 
 def _cmd_status(device: Any, _args: argparse.Namespace) -> None:
@@ -336,17 +342,22 @@ _OFFLINE = {"banks", "list", "find", "ports"}
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = cli.make_parser(
         prog="kwscli", description="Browse a Korg Wavestation SR's sounds."
     )
-    parser.add_argument("--port")
-    parser.add_argument("--recv-port")
-    parser.add_argument("--demo", action="store_true")
-    parser.add_argument(
-        "--midi-channel", type=int, default=None, help="the unit's global channel, 1-16"
+    # config=False and favorites=False: nothing in kwscli reads either. A
+    # flag that is accepted and then ignored teaches the user that a flag can
+    # lie, which docs/UX-SPEC.md section 2 says is worse than no flag.
+    cli.add_common_arguments(
+        parser,
+        port=True,
+        recv_port=True,
+        channel=True,
+        device_channel=True,
+        catalog=True,
+        config=False,
+        favorites=False,
     )
-    parser.add_argument("--channel", type=int, default=None)
-    parser.add_argument("--catalog", default=None)
     sub = parser.add_subparsers(dest="command", required=True)
 
     kinds = [banks.Kind.PERFORMANCE, banks.Kind.PATCH]
@@ -403,7 +414,9 @@ def _build_device(args: argparse.Namespace) -> Any:
         return b.WavestationBridge.open(
             args.port,
             recv_port=args.recv_port,
-            channel=(args.midi_channel - 1) if args.midi_channel else 0,
+            # --midi-channel is now --device-channel; the old spelling still
+            # parses. One-based on every command line, zero-based on the wire.
+            channel=(args.device_channel - 1) if args.device_channel else 0,
         )
     return b.WavestationBridge.autodetect(
         on_try=lambda name: print(f"  probing {name}...", file=sys.stderr)
@@ -413,10 +426,9 @@ def _build_device(args: argparse.Namespace) -> Any:
 def main(argv: Optional[List[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     handler = _COMMANDS[args.command]
-    for name in ("channel", "midi_channel"):
-        value = getattr(args, name, None)
-        if value is not None and not 1 <= value <= 16:
-            sys.exit(f"error: --{name.replace('_', '-')} is 1-16")
+    # Both channels, both named by the family now: --channel is the one a
+    # program change goes out on, --device-channel the unit's own base.
+    cli.validate_common(args)
 
     if args.command in _OFFLINE:
         try:

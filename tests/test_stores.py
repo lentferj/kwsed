@@ -89,11 +89,22 @@ class TestFavouritesTags:
         store.add("RAM2", 3, tags="bass")
         assert store.tags() == {"pad": 2, "lead": 1, "bass": 1}
 
-    def test_tags_counts_dormant_rows_too(self, store):
-        """A tag does not stop existing because the slot was unfavourited."""
+    def test_tags_counts_live_favourites_only(self, store):
+        """Dormant rows are not counted, and that is the family's rule.
+
+        kwsed used to count them: tags() walked all() + dormant(), so an
+        unfavourited slot's tags still appeared in `t tags` with a count
+        nothing could reach. The shared implementation walks live favourites
+        only, which is what every other read here does -- `with_tag` already
+        did -- and so `t tags` and `t` + a tag name now agree. A dormant row
+        keeps its tags, so un-favouriting and re-favouriting still restores
+        them; :func:`dormant` is where they remain visible.
+        """
         store.add("RAM1", 1, tags="pad")
         store.remove("RAM1", 1)
-        assert store.tags() == {"pad": 1}
+        assert store.tags() == {}
+        # The annotation itself is not destroyed, only uncounted.
+        assert [f.number for f in store.dormant()] == [1]
 
     def test_with_tag_matches_a_whole_tag_not_a_substring(self, store):
         store.add("RAM1", 1, tags="padded")

@@ -9,7 +9,7 @@ description = "Terminal browser for the Korg Wavestation SR"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "GPL-2.0-or-later" }
-dependencies = ["textual>=0.40", "python-rtmidi>=1.5"]
+dependencies = ["textual>=0.40", "python-rtmidi>=1.5", "vinsynlib"]
 
 [project.scripts]
 kwsed = "kwsed.app:main"
@@ -17,6 +17,13 @@ kwscli = "kwsed.cli:main"
 
 [tool.setuptools]
 packages = ["kws", "kwsed"]
+
+# vinsynlib is not on PyPI. It is the shared base of this family of terminal
+# instrument browsers and lives in a sibling checkout, so it is installed from
+# the working tree rather than from an index. Editable, because a change to
+# the library is a change here and should not need a reinstall to see.
+[tool.uv.sources]
+vinsynlib = { path = "../vinsynlib", editable = true }
 
 # --- ruff: linting and formatting (replaces flake8/isort/black/pyupgrade) ----
 #
@@ -72,7 +79,11 @@ ignore = [
 max-complexity = 10
 
 [tool.ruff.lint.isort]
-known-first-party = ["kws", "kwsed"]
+# vinsynlib is a sibling checkout rather than a published package, so ruff
+# cannot tell that it is ours and not third-party. Saying so keeps the import
+# block in one piece instead of splitting the family's code away from this
+# project's.
+known-first-party = ["kws", "kwsed", "vinsynlib"]
 
 # Existing findings only. A new file, or a new occurrence in a file not listed
 # here, is still reported.
@@ -91,14 +102,17 @@ known-first-party = ["kws", "kwsed"]
 "tests/test_write.py" = ["I001", "S110"]
 "tools/build_bank.py" = ["B904", "C901", "I001"]
 "tools/extract_catalog.py" = ["I001"]
-"kws/favorites.py" = ["E501", "RUF023", "S608"]
+# kws/favorites.py and kws/config.py used to need E501, RUF023, S608, PLW0603
+# and UP031 for the copies of the settings cache and the favourites database
+# they each carried. Both are shims over vinsynlib now, so those suppressions
+# are removed rather than left behind guarding nothing. If a line is ever
+# long here again, fix it: these were never a convention.
 "kws/messages.py" = ["PLW1641"]
 # C901: the write fence and the bank planner are complex by construction;
 # splitting them would fragment the one place each rule is enforced.
 "kws/bankbuild.py" = ["B007", "B008", "C901", "I001"]
 "kws/bridge.py" = ["C901", "I001", "S110", "S112"]
 "kws/catalog.py" = ["I001"]
-"kws/config.py" = ["PLW0603", "UP031"]
 "kws/deps.py" = ["B007"]
 "kwsed/app.py" = ["B904", "I001", "PLW0108"]
 "kwsed/cli.py" = ["C416", "C901", "I001"]

@@ -51,7 +51,11 @@ Two panes: bank-and-kind on the left, that bank's slots on the right.
   performance answers on each of the 16 channels, and at what level.
 
 `m` in the browser, or `kwscli multi`, shows the second. One request, three
-replies, nothing selected and no sound.
+replies, nothing selected and no sound. The legend calls that key
+`m channels`, because in every browser in this family `m` is channels and a
+Multiset is precisely a channel assignment — Multiset 3 is what answers on
+MIDI channel 3. The subcommand keeps `multi`, which is the instrument's own
+word for the object.
 
 ### A performance is not a patch
 
@@ -97,7 +101,7 @@ Needs Python 3.11+, `python-rtmidi` and `textual`.
 ```sh
 kwsed --demo      # built-in demo device; opens no MIDI ports
 kwsed             # find a Wavestation and adopt its global channel
-kwsed --port "U6MIDI Pro:U6MIDI Pro MIDI 1 44:0" --midi-channel 5
+kwsed --port "U6MIDI Pro:U6MIDI Pro MIDI 1 44:0" --device-channel 5
 ```
 
 ### Keys
@@ -108,7 +112,7 @@ kwsed --port "U6MIDI Pro:U6MIDI Pro MIDI 1 44:0" --midi-channel 5
 | `enter` | select this sound — **it will sound** |
 | `r` | read this bank's names from the unit — **silent** |
 | `/` | search names |
-| `m` | the 32 Multisets and their 16 channels — **silent** |
+| `m` | channels: the 32 Multisets and their 16 channels — **silent** |
 | `i` | device identity and the unit's global channel |
 | `?` / `q` | help / quit |
 

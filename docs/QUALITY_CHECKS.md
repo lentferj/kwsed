@@ -53,6 +53,14 @@ So the target audits `requirements-dev.txt`, which resolves the closure of the
 project's own dependencies plus the toolchain. The one thing it skips is
 `kwsed` itself, which is not on PyPI.
 
+`vinsynlib` is skipped by the same route, and deliberately. It is a sibling
+checkout rather than a package on an index (see `[tool.uv.sources]` in
+`pyproject.toml`), so `pip` cannot resolve it and `pip-audit` would fail
+resolving rather than audit anything. It is this family's own source, reviewed
+in this repository, and it carries no third-party dependency of its own at
+this layer — so there is nothing here for an index to say is vulnerable. If it
+is ever published, this note is the thing to revisit.
+
 ## mypy runs strict, behind a baseline that is empty
 
 The checker exists because mypy has no baseline of its own, and both built-in
