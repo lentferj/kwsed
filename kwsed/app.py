@@ -994,14 +994,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser = cli.make_parser(
         prog="kwsed", description="Browse a Korg Wavestation SR's sounds."
     )
-    # scan=False: a Wavestation's ports are whatever ALSA reports behind the
-    # user's interface, and re-probing finds nothing a name hint could not.
+    # --scan is offered even though a Wavestation's ports are whatever ALSA
+    # reports behind the user's interface: re-probing finds nothing a name
+    # hint could not, which is exactly why --scan is a request to re-probe
+    # and not the default. The port remembered last time is the default.
     # channel=False: the option this tool wants is the unit's own global
     # channel (--device-channel), and on this instrument that number is also
     # the channel selections are sent on -- they are not two numbers here.
     cli.add_common_arguments(
         parser,
         port=True,
+        scan=True,
         recv_port=True,
         channel=False,
         device_channel=True,
@@ -1049,8 +1052,22 @@ def main(argv: Optional[List[str]] = None) -> int:
                     ),
                 )
             else:
-                device = b.WavestationBridge.autodetect(
-                    on_try=lambda n: print(f"  probing {n}...", file=sys.stderr)
+                # One Identity Request to the remembered port; the sweep
+                # only when there is nothing remembered, when the
+                # remembered port no longer answers, or on --scan.
+                device = b.WavestationBridge.connect(
+                    config_path=config_path,
+                    # --midi-channel is now --device-channel, with the old
+                    # spelling still accepted: the number is the unit's own
+                    # global channel, not the channel a program change goes
+                    # out on, and the spec says those must not share a word.
+                    channel=(
+                        (args.device_channel - 1)
+                        if args.device_channel
+                        else (remembered if remembered is not None else 0)
+                    ),
+                    scan=args.scan,
+                    on_try=lambda n: print(f"  probing {n}...", file=sys.stderr),
                 )
         except Exception as exc:
             sys.exit(f"error: {exc}")

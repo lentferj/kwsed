@@ -44,9 +44,13 @@ __all__ = [
     "load_channel",
     "load_device_id",
     "load_last_port",
+    "load_last_recv_port",
+    "load_port_pair",
     "save_channel",
     "save_device_id",
     "save_last_port",
+    "save_last_recv_port",
+    "save_ports",
 ]
 
 _settings = Settings("kwsed", DEFAULT_PATH)
@@ -58,5 +62,31 @@ load_channel = _settings.load_channel
 save_channel = _settings.save_channel
 load_last_port = _settings.load_port
 save_last_port = _settings.save_port
+load_last_recv_port = _settings.load_recv_port
+save_last_recv_port = _settings.save_recv_port
 load_device_id = _settings.load_device_id
 save_device_id = _settings.save_device_id
+#: Both ports at once, in one write. What the connection policy saves after a
+#: sweep: a half-written pair is a pair where the second half is lost.
+save_ports = _settings.save_ports
+
+
+def load_port_pair(path: str | None = None) -> tuple[str, str] | None:
+    """The remembered port pair, or None.
+
+    :meth:`vinsynlib.config.Settings.load_ports` answers only when *both*
+    keys are present, because for most of the family a half-remembered pair
+    is not a pair. Here it would be wrong: a Wavestation's input port is the
+    same USB port it outputs to unless the user has said otherwise, so a
+    remembered output port on its own is a complete pair. Reading it as
+    half a pair would mean sweeping on every launch, which is the thing this
+    exists to stop.
+
+    ``recv_port`` did not exist in this project's config until the
+    remembered-port path did; a config written before that has no such key
+    and reads as the single port it was.
+    """
+    send = _settings.load_port(path)
+    if not send:
+        return None
+    return (send, _settings.load_recv_port(path) or send)

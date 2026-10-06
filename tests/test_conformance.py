@@ -28,13 +28,17 @@ from vinsynlib import conformance
 
 def test_flags_match_the_family() -> None:
     # A tuple rather than a set: check_flags takes a Sequence, and mypy is
-    # right that a set is not one. --scan is not required because a
-    # Wavestation's ports are whatever ALSA reports behind the user's own
-    # interface; re-probing finds nothing a name hint could not.
+    # right that a set is not one. --scan IS required here: a Wavestation
+    # hangs off whatever interface the user has, and re-probing is the
+    # remedy when the unit moves to a port USB re-enumeration has
+    # renumbered. That it was previously refused was the bug -- the port
+    # remembered last time is now the default, so --scan is the way to say
+    # "do not trust it".
     assert not conformance.check_flags(
         build_parser(),
         required=(
             "port",
+            "scan",
             "recv-port",
             "demo",
             "device-channel",

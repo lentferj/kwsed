@@ -345,12 +345,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser = cli.make_parser(
         prog="kwscli", description="Browse a Korg Wavestation SR's sounds."
     )
-    # config=False and favorites=False: nothing in kwscli reads either. A
-    # flag that is accepted and then ignored teaches the user that a flag can
-    # lie, which docs/UX-SPEC.md section 2 says is worse than no flag.
+    # config=False and favorites=False: nothing in kwscli *offers* either. A
+    # flag that is accepted and then ignored teaches the user that a flag
+    # can lie, which docs/UX-SPEC.md section 2 says is worse than no flag.
+    # The settings file is still read and written, at the same default the
+    # browser uses (./config.toml) -- see _build_device.
     cli.add_common_arguments(
         parser,
         port=True,
+        scan=True,
         recv_port=True,
         channel=True,
         device_channel=True,
@@ -408,6 +411,7 @@ def _build_device(args: argparse.Namespace) -> Any:
 
         return DemoDevice()
     from kws import bridge as b
+    from kws import config as cfg
 
     b.install_clean_exit()
     if args.port:
@@ -418,8 +422,17 @@ def _build_device(args: argparse.Namespace) -> Any:
             # parses. One-based on every command line, zero-based on the wire.
             channel=(args.device_channel - 1) if args.device_channel else 0,
         )
-    return b.WavestationBridge.autodetect(
-        on_try=lambda name: print(f"  probing {name}...", file=sys.stderr)
+    # No --config flag on this parser, so the settings file is the browser's
+    # default: ./config.toml, gitignored, safe to delete. One Identity Request
+    # to the remembered port; the sweep only when there is nothing
+    # remembered, when the remembered port no longer answers, or on --scan.
+    return b.WavestationBridge.connect(
+        config_path=cfg.DEFAULT_PATH,
+        # --midi-channel is now --device-channel; the old spelling still
+        # parses. One-based on every command line, zero-based on the wire.
+        channel=(args.device_channel - 1) if args.device_channel else 0,
+        scan=args.scan,
+        on_try=lambda name: print(f"  probing {name}...", file=sys.stderr),
     )
 
 

@@ -58,9 +58,11 @@ import rtmidi
 from kws import alsa
 from kws import backup
 from kws import banks
+from kws import config as cfg
 from kws import dumps
 from kws import messages as m
 from kws import records
+from vinsynlib import midi
 
 __all__ = [
     "SEND_GAP",
@@ -111,8 +113,15 @@ class MidiUnavailable(RuntimeError):
     """No MIDI backend on this host at all."""
 
 
-class DeviceError(RuntimeError):
-    """The device answered, but not with what was asked for."""
+class DeviceError(midi.DeviceError):
+    """The device answered, but not with what was asked for.
+
+    The library's class, so a probe that finds nothing is recognised by
+    :func:`vinsynlib.midi.open_remembered_or_swept` and the sweep it falls
+    back to happens -- with an announcement, rather than as a launch that
+    quietly takes the slow path. It was a RuntimeError before and is one
+    still, so every ``except`` clause that caught it does so unchanged.
+    """
 
 
 class DeviceRefused(DeviceError):
@@ -190,6 +199,13 @@ class WavestationBridge:
         self.channel = channel
         self.description = description
         self.timeout = timeout
+        #: Which ports this conversation is on, by name. `description` said
+        #: so only to a human reading it, and the connection policy has to
+        #: be able to put the answer somewhere -- which it cannot do with a
+        #: string it would have to parse back apart. None until `open` sets
+        #: it, and None for the test doubles that build one directly.
+        self.port: Optional[str] = None
+        self.recv_port: Optional[str] = None
         self._in.ignore_types(sysex=False, timing=True, active_sense=True)
 
     @classmethod
@@ -223,13 +239,16 @@ class WavestationBridge:
                 except Exception:
                     pass
             raise
-        return cls(
+        bridge = cls(
             midi_in,
             midi_out,
             channel=channel,
             description=f"{port} -> {listen}",
             timeout=timeout,
         )
+        bridge.port = port
+        bridge.recv_port = listen
+        return bridge
 
     def close(self) -> None:
         for client in (self._in, self._out):
@@ -306,6 +325,104 @@ class WavestationBridge:
             if fields is not None:
                 return fields
         return None
+
+    @classmethod
+    def connect(
+        cls,
+        *,
+        config_path: str = cfg.DEFAULT_PATH,
+        remembered: Optional[Tuple[str, str]] = None,
+        scan: bool = False,
+        channel: int = 0,
+        on_try: Optional[Callable[[str], None]] = None,
+    ) -> "WavestationBridge":
+        """Open the unit, sweeping every port only when that is necessary.
+
+        **The normal path is one Identity Request, to the port remembered in
+        ``config_path``.** That is not only an optimisation.
+        :meth:`autodetect` sweeps every bidirectional MIDI port on the
+        machine, which on a studio box with thirty ports takes seconds,
+        prints thirty lines, and pings every piece of hardware on the chain
+        once per launch -- and once the answer is known there is nothing left
+        to learn from asking again.
+
+        So: use the remembered port if there is one, sweep if there is not,
+        and sweep on request. ``scan=True`` is what ``--scan`` reaches,
+        which is what is needed after the unit moves to another port -- USB
+        re-enumeration renumbers ALSA clients out from under a saved name.
+
+        A remembered port that does not answer falls back to the sweep, but
+        **it says so first**. The guess is gone, and the announcement is
+        what keeps the fallback from looking like the fast path having
+        worked -- which is how a slow launch quietly becomes the normal one.
+        What the sweep then finds is written back, so the launch after this
+        one is fast again.
+
+        The channel the unit reports wins over the one asked for, on the fast
+        path as on the sweep: it is the fifth byte of every request, and the
+        saved one can be stale.
+
+        The policy itself is :func:`vinsynlib.midi.open_remembered_or_swept`,
+        written and tested once for the whole family; this is the
+        Wavestation's half of it, which is what an Identity Request on a
+        named port means and where the answer is filed.
+
+        ``remembered`` defaults to what ``config_path`` holds. It is a
+        parameter so a caller can pass a pair it has already read, and so a
+        test can say what the file says without writing one.
+        """
+        remembered = (
+            remembered if remembered is not None else cfg.load_port_pair(config_path)
+        )
+
+        def probe(send: str, recv: str) -> "WavestationBridge":
+            """One round trip to the named port. Raises if nothing answers."""
+            try:
+                bridge = cls.open(
+                    send,
+                    recv_port=recv,
+                    channel=channel,
+                    # 0.5 is autodetect's own discovery timeout, spelled
+                    # as a literal there; the two probes must cost the
+                    # # same or the fast path is not the fast path.
+                    timeout=0.5,
+                )
+            except Exception as exc:
+                raise DeviceError(str(exc)) from exc
+            try:
+                fields = bridge.identify(timeout=0.5)
+            except Exception as exc:
+                fields = None
+                error: Optional[Exception] = exc
+            else:
+                error = None
+            if fields is None or not fields.get("is_wavestation"):
+                bridge.close()
+                raise DeviceError(
+                    f"no Wavestation answered an Identity Request on {send!r}"
+                    + (f": {error}" if error is not None else "")
+                )
+            bridge.channel = fields["channel"]
+            # The discovery timeout is short on purpose -- a port that is
+            # not the instrument should cost as little as possible -- but it
+            # must not become the session's. Every later request that does
+            # not name its own would run at the probe's timeout rather than
+            # the working one.
+            bridge.timeout = DEFAULT_TIMEOUT
+            return bridge
+
+        def remember(bridge: "WavestationBridge") -> None:
+            if bridge.port and bridge.recv_port:
+                cfg.save_ports(bridge.port, bridge.recv_port, config_path)
+
+        return midi.open_remembered_or_swept(
+            probe=probe,
+            sweep=lambda try_hook: cls.autodetect(timeout=0.5, on_try=try_hook),
+            remembered=remembered,
+            scan=scan,
+            remember=remember,
+            on_try=on_try,
+        )
 
     @classmethod
     def autodetect(
