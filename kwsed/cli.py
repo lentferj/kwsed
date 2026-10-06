@@ -343,7 +343,9 @@ _OFFLINE = {"banks", "list", "find", "ports"}
 
 def build_parser() -> argparse.ArgumentParser:
     parser = cli.make_parser(
-        prog="kwscli", description="Browse a Korg Wavestation SR's sounds."
+        prog="kwscli",
+        description="Browse a Korg Wavestation SR's sounds.",
+        distribution="kwsed",
     )
     # config=False and favorites=False: nothing in kwscli *offers* either. A
     # flag that is accepted and then ignored teaches the user that a flag
