@@ -12,8 +12,8 @@ license = { text = "GPL-2.0-or-later" }
 dependencies = ["textual>=0.40", "python-rtmidi>=1.5", "vinsynlib"]
 
 [project.scripts]
-kwsed = "kwsed.app:main"
-kwscli = "kwsed.cli:main"
+kwsed = "kwsed.entry:app"
+kwscli = "kwsed.entry:cli"
 
 [tool.setuptools]
 packages = ["kws", "kwsed"]
