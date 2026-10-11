@@ -9,7 +9,7 @@ description = "Terminal browser for the Korg Wavestation SR"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "GPL-2.0-or-later" }
-dependencies = ["textual>=0.40", "python-rtmidi>=1.5", "vinsynlib>=0.2.0"]
+dependencies = ["textual>=0.40", "python-rtmidi>=1.5", "vinsynlib>=0.3.1"]
 
 [project.scripts]
 kwsed = "kwsed.entry:app"
