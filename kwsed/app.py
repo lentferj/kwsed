@@ -62,7 +62,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import DataTable, Header, Input, Label, Static
+from textual.widgets import DataTable, Header, Input, Label, Select, Static
 
 from kws import banks
 from kws import messages as m
@@ -285,22 +285,158 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
         with Vertical():
             yield Label("[b]Edit Multi Mode Setup[/b]")
             yield Static(f"{len(self._multisets)} multisets", classes="what")
+            options = [
+                (f"{entry.number:02d} {entry.name}".strip(), index)
+                for index, entry in enumerate(self._multisets)
+            ]
+            if not options:
+                options = [("0", 0)]
+            yield Select(options, value=0, id="multi-edit-ms")
+            yield Input(placeholder="name", id="multi-edit-name")
+            yield Select(
+                [(str(channel), channel - 1) for channel in range(1, 17)],
+                value=0,
+                id="multi-edit-channel",
+            )
+            yield Input(placeholder="bank 0-127", id="multi-edit-bank")
+            yield Input(placeholder="performance 0-49", id="multi-edit-performance")
+            yield Input(placeholder="level 0-127", id="multi-edit-level")
+            yield Input(placeholder="flag 0-1", id="multi-edit-flag")
             yield Static("", id="multi-edit-state")
             yield Static("[dim]a to arm, then w to write. esc cancels.[/dim]")
 
-    def action_arm(self) -> None:
-        self._armed = True
-        self.query_one("#multi-edit-state", Static).update(
-            "[b]ARMED[/b] - w writes the Multi Mode Setup. Nothing sent yet."
-        )
+    def on_mount(self) -> None:
+        self._refresh_inputs()
 
-    def action_fire(self) -> None:
-        if not self._armed:
-            self.query_one("#multi-edit-state", Static).update(
-                "[dim]not armed - press a first[/dim]"
+    def _selected_ms_index(self) -> int:
+        try:
+            value = self.query_one("#multi-edit-ms", Select).value
+        except Exception:
+            return 0
+        return int(value) if value is not None and value is not Select.BLANK else 0  # type: ignore[arg-type]
+
+    def _selected_channel_index(self) -> int:
+        try:
+            value = self.query_one("#multi-edit-channel", Select).value
+        except Exception:
+            return 0
+        return int(value) if value is not None and value is not Select.BLANK else 0  # type: ignore[arg-type]
+
+    def _refresh_inputs(self) -> None:
+        try:
+            entry = self._multisets[self._selected_ms_index()]
+        except (IndexError, Exception):
+            return
+        channel_index = self._selected_channel_index()
+        part = entry.parts[channel_index] if channel_index < len(entry.parts) else None
+        try:
+            self.query_one("#multi-edit-name", Input).value = entry.name
+        except Exception:  # noqa: S110
+            pass
+        if part is not None:
+            for widget_id, value in (
+                ("#multi-edit-bank", str(part.bank)),
+                ("#multi-edit-performance", str(part.performance)),
+                ("#multi-edit-level", str(part.level)),
+                ("#multi-edit-flag", str(part.flag)),
+            ):
+                try:
+                    self.query_one(widget_id, Input).value = value
+                except Exception:  # noqa: S110
+                    pass
+
+    def on_select_changed(self, event: Any) -> None:
+        self._refresh_inputs()
+
+    def on_input_changed(self, event: Any) -> None:
+        self._collect()
+
+    def _collect(self) -> None:
+        from dataclasses import replace as _replace
+
+        try:
+            ms_index = self._selected_ms_index()
+            entry = self._multisets[ms_index]
+        except (IndexError, Exception):
+            return
+        try:
+            name = self.query_one("#multi-edit-name", Input).value
+        except Exception:
+            name = entry.name
+        channel_index = self._selected_channel_index()
+        parts = list(entry.parts)
+        if channel_index < len(parts):
+            part = parts[channel_index]
+
+            def _int(widget_id: str, fallback: int) -> int:
+                try:
+                    raw = self.query_one(widget_id, Input).value
+                except Exception:
+                    return fallback
+                try:
+                    return int(raw)
+                except (TypeError, ValueError):
+                    return fallback
+
+            parts[channel_index] = _replace(
+                part,
+                bank=_int("#multi-edit-bank", part.bank),
+                performance=_int("#multi-edit-performance", part.performance),
+                level=_int("#multi-edit-level", part.level),
+                flag=_int("#multi-edit-flag", part.flag),
             )
+        new_entry = _replace(entry, name=name, parts=tuple(parts))
+        self._multisets[ms_index] = new_entry
+
+    def action_arm(self) -> None:
+        self._collect()
+        self._armed = True
+        try:
+            self.query_one("#multi-edit-state", Static).update(
+                "[b]ARMED[/b] - w writes the Multi Mode Setup. Nothing sent yet."
+            )
+        except Exception:  # noqa: S110
+            pass
+
+    def action_fire(self) -> None:  # noqa: C901
+        if not self._armed:
+            try:
+                self.query_one("#multi-edit-state", Static).update(
+                    "[dim]not armed - press a first[/dim]"
+                )
+            except Exception:  # noqa: S110
+                pass
             return
         self._armed = False
+        self._collect()
+        app = None
+        try:
+            app = self.app
+        except Exception:
+            app = None
+        if app is not None and hasattr(app, "_multi_edit_write_worker"):
+            if getattr(app, "_busy", False):
+                try:
+                    self.query_one("#multi-edit-state", Static).update(
+                        "[dim]busy[/dim]"
+                    )
+                except Exception:  # noqa: S110
+                    pass
+                return
+            exchange = getattr(app, "_exchange", None)
+            if exchange is None or not exchange.acquire(blocking=False):
+                try:
+                    self.query_one("#multi-edit-state", Static).update(
+                        "[dim]busy[/dim]"
+                    )
+                except Exception:  # noqa: S110
+                    pass
+                return
+            app._multi_edit_write_worker(
+                list(self._multisets), self._device, self._backup_dir, self
+            )
+            return
+        # Fallback (no app): direct, for unit contexts.
         from kws import multi as multi_mod
 
         encoded = multi_mod.encode(self._multisets)
@@ -322,10 +458,30 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
                 kwargs["verify"] = True
                 result = device.write_multi(encoded, **kwargs)
         except Exception as exc:
-            self.query_one("#multi-edit-state", Static).update(
-                f"[b]write failed[/b] {exc}"
-            )
+            try:
+                self.query_one("#multi-edit-state", Static).update(
+                    f"[b]write failed[/b] {exc}"
+                )
+            except Exception:  # noqa: S110
+                pass
             return
+        try:
+            if app is not None and hasattr(app, "_record_write"):
+                payload = result if isinstance(result, dict) else {"backup": None}
+                app._record_write(payload)
+        except Exception:  # noqa: S110
+            pass
+        self.dismiss(result if isinstance(result, dict) else {"result": result})
+
+    def _write_failed(self, message: str) -> None:
+        try:
+            self.query_one("#multi-edit-state", Static).update(
+                f"[b]write failed[/b] {message}"
+            )
+        except Exception:  # noqa: S110
+            pass
+
+    def _write_succeeded(self, result: Any) -> None:
         try:
             app = self.app
             if hasattr(app, "_record_write"):
@@ -1445,13 +1601,63 @@ class KwsedApp(App[None]):
         if self._busy:
             self.notify_status("busy", refused=True)
             return
-        if not self._exchange.acquire(blocking=False):
-            self.notify_status("busy", refused=True)
-            return
         self.push_screen(
             MultiEditScreen(multisets=sets, device=self.device, backup_dir=None)
         )
-        self._exchange.release()
+
+    @work(thread=True)
+    def _multi_edit_write_worker(
+        self,
+        multisets: Sequence[Any],
+        device: Any,
+        backup_dir: Optional[str],
+        screen: Any,
+    ) -> None:
+        failure: BaseException | None = None
+        result: Any = None
+        try:
+            from kws import multi as multi_mod
+
+            encoded = multi_mod.encode(multisets)
+            with self._busy_gate, self._lock:
+                kwargs: Dict[str, Any] = {}
+                if backup_dir is not None:
+                    kwargs["backup_dir"] = backup_dir
+                else:
+                    try:
+                        from kws import backup as _backup
+
+                        kwargs["backup_dir"] = _backup.default_dir()
+                    except Exception:  # noqa: S110
+                        pass
+                kwargs["verify"] = True
+                result = device.write_multi(encoded, **kwargs)
+        except BaseException as exc:
+            failure = exc
+        finally:
+            try:
+                self._exchange.release()
+            except RuntimeError:
+                pass
+        if failure is not None:
+            self.call_from_thread(
+                self.notify_status, f"multi write: {failure}", refused=True
+            )
+            try:
+                self.call_from_thread(screen._write_failed, str(failure))
+            except Exception:  # noqa: S110
+                pass
+            return
+        try:
+            if hasattr(self, "_record_write"):
+                payload = result if isinstance(result, dict) else {"backup": None}
+                self._record_write(payload)
+        except Exception:  # noqa: S110
+            pass
+        try:
+            self.call_from_thread(screen._write_succeeded, result)
+        except Exception:  # noqa: S110
+            pass
 
     def action_device_info(self) -> None:
         if self._busy:

@@ -38,7 +38,7 @@ The layout was derived rather than read, and the arithmetic is the evidence:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Sequence
 
 __all__ = [
@@ -86,6 +86,10 @@ class Multiset:
     number: int
     name: str
     parts: tuple[Part, ...]
+    #: The first :data:`PART_BASE` bytes of the record, which are not
+    #: modelled by kwsed. Preserved on round trip so editing one field
+    #: never clobbers the unmodelled settings block.
+    settings: bytes = field(default_factory=lambda: bytes(PART_BASE))
 
     @property
     def display(self) -> str:
@@ -133,7 +137,10 @@ def parse(data: Sequence[int]) -> List[Multiset]:
         at = NAME_BASE + number * NAME_SIZE
         out.append(
             Multiset(
-                number=number, name=_name(data[at : at + NAME_SIZE]), parts=tuple(parts)
+                number=number,
+                name=_name(data[at : at + NAME_SIZE]),
+                parts=tuple(parts),
+                settings=bytes(data[base : base + PART_BASE]),
             )
         )
     return out
@@ -142,10 +149,11 @@ def parse(data: Sequence[int]) -> List[Multiset]:
 def encode(multisets: Sequence[Multiset]) -> bytes:
     """Encode 32 Multisets back into the plain data of a 0x62 dump.
 
-    The first 22 bytes of each Multiset's record are not modelled and are
-    written as zero; the four bytes of each of the 16 channels and the name
-    slot are written from the Multiset. Round-trips through :func:`parse`
-    for the fields it models.
+    The first :data:`PART_BASE` bytes of each Multiset's record are not
+    modelled but are preserved from the parsed dump (see
+    :attr:`Multiset.settings`); the four bytes of each of the 16 channels
+    and the name slot are written from the Multiset. Round-trips through
+    :func:`parse` byte-identically when nothing is edited.
     """
     needed = NAME_BASE + MULTISETS * NAME_SIZE
     data = bytearray(needed)
@@ -155,6 +163,10 @@ def encode(multisets: Sequence[Multiset]) -> bytes:
         if entry is None:
             continue
         base = number * MULTISET_SIZE
+        settings = entry.settings or b""
+        for index in range(PART_BASE):
+            if index < len(settings):
+                data[base + index] = settings[index] & 0x7F
         for part in entry.parts:
             at = base + PART_BASE + (part.channel - 1) * PART_SIZE
             data[at] = part.bank & 0x7F

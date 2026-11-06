@@ -84,3 +84,54 @@ async def test_multi_edit_refused_without_arm():
         screen.action_fire()
         await pilot.pause()
         assert len(dev.calls) == 0
+
+
+def test_round_trip_byte_identical():
+    needed = multi_mod.NAME_BASE + multi_mod.MULTISETS * multi_mod.NAME_SIZE
+    data = bytearray(needed)
+    for i in range(multi_mod.PART_BASE):
+        data[i] = (i + 1) & 0x7F
+    data[multi_mod.NAME_BASE : multi_mod.NAME_BASE + 4] = b"ABCD"
+    sets = multi_mod.parse(bytes(data))
+    out = multi_mod.encode(sets)
+    assert out == bytes(data)
+
+
+def test_editing_one_field_changes_only_that_field():
+    needed = multi_mod.NAME_BASE + multi_mod.MULTISETS * multi_mod.NAME_SIZE
+    data = bytearray(needed)
+    for i in range(multi_mod.PART_BASE):
+        data[i] = (i + 1) & 0x7F
+    sets = multi_mod.parse(bytes(data))
+    from dataclasses import replace
+
+    new_part = replace(sets[0].parts[0], bank=9)
+    new_parts = (new_part,) + sets[0].parts[1:]
+    new_set = replace(sets[0], parts=new_parts)
+    sets[0] = new_set
+    out = multi_mod.encode(sets)
+    diffs = [i for i in range(needed) if out[i] != data[i]]
+    assert diffs == [multi_mod.PART_BASE]
+
+
+@pytest.mark.asyncio
+async def test_no_write_while_busy():
+    data = bytes(multi_mod.NAME_BASE + multi_mod.MULTISETS * multi_mod.NAME_SIZE)
+    sets = multi_mod.parse(data)
+    dev = FakeDevice()
+    screen = MultiEditScreen(multisets=sets, device=dev, backup_dir=None)
+    from kwsed.app import KwsedApp
+    from kwsed.demo import DemoDevice
+
+    app = KwsedApp(DemoDevice(), allow_write=True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.push_screen(screen)
+        await pilot.pause()
+        screen.action_arm()
+        await pilot.pause()
+        app._exchange.acquire()
+        screen.action_fire()
+        await pilot.pause()
+        assert len(dev.calls) == 0
+        app._exchange.release()
