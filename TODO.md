@@ -311,7 +311,7 @@ check found. Three did not survive it.*
 
 ## 9. `dumps.read_syx_file` does not close the file it opens
 
-**Status:** open, real, one line. **Verified.**
+**Status:** closed 2026-11-06 — uses `with open(...)` now. **Verified.**
 
 `raw = open(path, "rb").read()` at `kws/dumps.py:187`. Called per `.syx`
 by `extract_catalog`, `build_bank`, `deps.load_syx` and `cli._cmd_send`.
@@ -351,7 +351,7 @@ re-raise it.
 
 ## 11. `config._update` escapes only `\` and `"` for TOML
 
-**Status:** open, real, unreachable in practice. **Verified.**
+**Status:** closed 2026-11-06 — config module is now a vinsynlib shim; escaping lives in the library.
 
 `kws/config.py:82`. TOML basic strings also interpret `\n`, `\t`, `\r`,
 `\b`, `\f` and `\uXXXX`, so a value containing one would not survive a
@@ -439,7 +439,7 @@ use is inside a function body, but it reads as a mistake. Move it up.
 
 ## 16. `data_dir()` is implemented twice
 
-**Status:** open, cosmetic. **Verified** -- `kws/favorites.py:79` and
+**Status:** open, cosmetic — closes with the backup-envelope binding (T5): `data_dir()` will be unified when `kws/backup.py` becomes a shim over `vinsynlib.backup`. **Verified** -- `kws/favorites.py:79` and
 `kws/backup.py:71`, same platform rules, independently written.
 
 They do agree today. The reason to merge them is that the next change to
