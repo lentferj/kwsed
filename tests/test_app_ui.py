@@ -274,6 +274,57 @@ class TestTheDetailLine:
             assert "read only" not in panel_text(app, "#detail")
 
 
+class TestWhatADifferenceMeans:
+    """The same `*` has two meanings, and the detail line says which.
+
+    In a writable bank a differing name is somebody's own work, saved over
+    the factory preset, which is not an error at all; in a ROM bank it
+    cannot mean that -- ROM does not change -- so the printed list is the
+    wrong one. Both former renderings agreed that a slot differs and
+    stopped there; the wording is the family's, via
+    `kws.catalog.disagreement_words`.
+    """
+
+    async def test_a_writable_difference_is_saved_work(self, app):
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.catalog.set_live_name("RAM1", 0, "Unit Name", banks.Kind.PERFORMANCE)
+            app._fill((0, banks.Kind.PERFORMANCE))
+            assert "saved over the factory preset" in panel_text(app, "#detail")
+            assert "the printed list is wrong" not in panel_text(app, "#detail")
+
+    async def test_a_rom_difference_means_the_catalog_is_wrong(self, store):
+        catalog = cat.Catalog([cat.Entry("ROM4", 0, "Printed Name", banks.Kind.PATCH)])
+        app = KwsedApp(DemoDevice(), catalog=catalog, favorites=store)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.catalog.set_live_name("ROM4", 0, "Unit Name", banks.Kind.PATCH)
+            # Display position: 3 is ROM 4, which is not writable.
+            app._fill((3, banks.Kind.PATCH))
+            text = panel_text(app, "#detail")
+            assert "the printed list is wrong; the unit is right" in text
+            assert "saved over the factory preset" not in text
+            assert "read only" not in text, "the disagreement says it instead"
+
+    async def test_a_writable_read_reports_its_names_as_saved_work(self, app):
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            await pilot.press("r")
+            for _ in range(10):
+                await pilot.pause()
+            assert "saved over the factory preset" in panel_text(app, "#status")
+
+    async def test_a_rom_read_reports_the_catalog_as_the_wrong_one(self, store):
+        catalog = cat.Catalog([cat.Entry("ROM4", 0, "Printed Name", banks.Kind.PATCH)])
+        app = KwsedApp(DemoDevice(), catalog=catalog, favorites=store)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._adopt(3, banks.Kind.PATCH, {0: "Unit Name"})
+            await settle(pilot)
+            status = panel_text(app, "#status")
+            assert "1 differ: the printed list is wrong; the unit is right" in status
+
+
 class TestSearchAndHelp:
     async def test_search_opens_a_prompt_and_escape_leaves_no_screen_behind(self, app):
         async with app.run_test() as pilot:

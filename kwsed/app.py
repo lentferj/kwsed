@@ -1124,7 +1124,15 @@ class KwsedApp(App[None]):
             return
         item = self._current[row]
         name = self.catalog.display_name(item.bank.id, item.number, item.kind)
-        note = "" if item.bank.writable else "   [dim]ROM — read only[/dim]"
+        note = ""
+        if self.catalog.differs(item.bank.id, item.number, item.kind):
+            # The two meanings of a difference, split the only way that is
+            # true: by writability. A writable bank holds somebody's own
+            # work; a ROM one cannot change, so there the catalog is what
+            # is wrong.
+            note = "   [dim]" + cat.disagreement_words(item.bank.writable) + "[/dim]"
+        elif not item.bank.writable:
+            note = "   [dim]ROM — read only[/dim]"
         self.query_one("#detail", Static).update(
             f"[b]{item.bank.label} {item.kind} {item.number:02d}[/b]  "
             f"{name}{note}\n"
@@ -1242,10 +1250,15 @@ class KwsedApp(App[None]):
             }
             # Merge rather than replace: other banks' names must survive.
             _livenames.save(flat, self._live_path)
-        self.notify_status(
-            f"read {len(names)} {kind} names from {entry.label}"
-            + (f"; {differing} differ from the catalog" if differing else "")
-        )
+        message = f"read {len(names)} {kind} names from {entry.label}"
+        if differing:
+            # Not "differ from the catalog" flat: on a writable bank the
+            # unit's names are somebody's work worth its own line, and on
+            # a ROM one the catalog is the thing that is wrong.
+            message += f"; {differing} differ: " + cat.disagreement_words(
+                entry.writable
+            )
+        self.notify_status(message)
 
     def action_scan_device(self) -> None:
         if self._scanning:
@@ -1482,6 +1495,12 @@ class KwsedApp(App[None]):
             f"catalog         {len(self.catalog)} names"
             + (f" from {self.catalog.source}" if self.catalog.source else "")
         )
+        lines.append("")
+        lines.append("A `*` marks a name the unit and the catalog disagree")
+        lines.append("about, and the two sides of that split by writability:")
+        lines.append("on a writable bank (RAM 1-3, Card) it is somebody's own")
+        lines.append("work, saved over the factory preset; on a ROM bank the")
+        lines.append("printed list is wrong, and the unit is right.")
         self.push_screen(ReportScreen("Device", "\n".join(lines)))
 
     def action_help(self) -> None:
@@ -1495,6 +1514,11 @@ performances, once for its 35 patches. Right: that bank-and-kind's slots.
   RAM 1-3   writable; somebody's own work lives here.
   ROM 4-11  read-only.
   Card      writable; the card in the slot.
+
+A `*` marks a name the unit and the catalog disagree about. In a
+writable bank (RAM 1-3, Card) that means somebody saved their own work
+over the factory preset; in a ROM bank it cannot mean that -- ROM does
+not change -- so the printed list is wrong, and the unit is right.
 
 A performance combines up to eight parts, each pointing at a patch. A
 patch is a sound: four oscillators playing waves or wave sequences. They

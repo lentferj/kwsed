@@ -308,6 +308,21 @@ class TestCatalogRoundTrip:
             == "the printed list is wrong; the unit is right"
         )
 
+    def test_the_two_wordings_have_one_home(self):
+        """App detail line, status after a read and the CLI all share it."""
+        assert cat.disagreement_words(True) == "saved over the factory preset"
+        assert (
+            cat.disagreement_words(False)
+            == "the printed list is wrong; the unit is right"
+        )
+        catalog = cat.Catalog(
+            [cat.Entry("ROM4", 0, "Printed Version", banks.Kind.PATCH)]
+        )
+        catalog.set_live_name("ROM4", 0, "Renamed", "patch")
+        assert catalog.disagreement("ROM4", 0, False, "patch") == (
+            cat.disagreement_words(False)
+        )
+
     def test_agreement_is_not_a_disagreement(self):
         catalog = self._catalog()
         catalog.set_live_name("CARD", 3, "Invented Chime", "patch")

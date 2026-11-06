@@ -74,14 +74,18 @@ def _cmd_list(_device: Any, args: argparse.Namespace) -> None:
     entry = banks.bank(args.bank)
     rows = []
     for item in banks.slots(entry.number, args.kind):
+        mark = "*" if catalog.differs(entry.id, item.number, args.kind) else ""
         rows.append(
             [
                 f"{item.number:02d}",
                 catalog.display_name(entry.id, item.number, args.kind),
+                mark,
             ]
         )
     print(f"{entry.label} — {_plural(args.kind)}\n")
-    print(render.table(["#", "name"], rows))
+    print(render.table(["#", "name", ""], rows))
+    if any(row[2] for row in rows):
+        print(f"\n`*` = {cat.disagreement_words(entry.writable)}.")
 
 
 def _cmd_find(_device: Any, args: argparse.Namespace) -> None:
@@ -161,14 +165,18 @@ def _cmd_dump(device: Any, args: argparse.Namespace) -> None:
     print(
         f"{dump.bank.label} — {_plural(dump.kind)} ({len(names)} named of {dump.count})"
     )
-    rows = []
+    rows: list[list[str]] = []
     for number in sorted(names):
         printed = catalog.name(dump.bank.id, number, dump.kind) or ""
         live = names[number]
-        rows.append(
-            [f"{number:02d}", live, printed, "*" if printed and printed != live else ""]
-        )
+        mark = "*" if printed and printed != live else ""
+        rows.append([f"{number:02d}", live, printed, mark])
     print(render.table(["#", "on the unit", "in the catalog", ""], rows))
+    # The mark means different things in the two kinds of bank, and which
+    # one is wrong is the difference only writability can carry: a writable
+    # bank holds somebody's own work, a ROM one a stale printed list.
+    if any(row[3] for row in rows):
+        print(f"\n`*` = {cat.disagreement_words(dump.bank.writable)}.")
 
 
 def _cmd_select(device: Any, args: argparse.Namespace) -> None:

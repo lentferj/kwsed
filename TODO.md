@@ -209,17 +209,28 @@ same fence.
 
 ---
 
-## 7. The catalog cannot tell a stale name from a changed one
+## 7. The catalog cannot tell a stale name from a changed one — FIXED
 
-**Status:** open, minor.
+**Status:** **fixed 2026-11-06.** `kws/catalog.py` keeps one wording for
+each meaning (`disagreement_words`), picked by `Bank.writable`, with the
+same strings x5ded uses: "saved over the factory preset" against RAM 1-3
+and the Card, "the printed list is wrong; the unit is right" against the
+eight ROM banks.
+
+**What actually changes on screen.** The browser's detail line now says
+which it is whenever the slot it shows differs, instead of reaching
+"read only" and stopping there; the status after `r` or a scan names the
+meaning beside the count ("3 differ: saved over the factory preset");
+`kwscli dump` and `kwscli list` print a `*` and, when any is shown, a
+line under the table saying what it means for that bank; the Device
+report and the help carry the same two sentences. Live names (T4) feed
+the unit side and the scan (T8) reads bank by bank through the same
+`_adopt`, so both land on the correct bank kind automatically.
 
 A name read from the unit that disagrees with the catalog gets a `*`. In a
 **ROM** bank that means the catalog is wrong. In **RAM or the Card** it
 means somebody saved their own work, which is not an error at all. kwsed
 marks both the same way.
-
-**Blocked on:** nothing. `banks.Bank.writable` already carries the
-distinction; the TUI just does not use it for this yet.
 
 ---
 

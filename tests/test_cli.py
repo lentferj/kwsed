@@ -127,6 +127,59 @@ class TestTheDemoDeviceCommands:
         assert run(["dump", "RAM1"]) == 0
         assert "patches" in capsys.readouterr().out
 
+
+class TestWhatADifferenceMeans:
+    """`kwscli dump` and `list` mark a differing name with `*`, and the mark
+    means different things in the two kinds of bank.
+
+    A writable bank (Card) holds somebody's own work, saved over the
+    factory preset; a ROM bank cannot change, so there the printed list is
+    the wrong one. The wording is the family's, via
+    `kws.catalog.disagreement_words`; each test pins the catalog and a
+    read-back live name, so the difference is deterministic rather than a
+    demo name colliding with a factory one.
+    """
+
+    def _names(self, tmp_path, bank_id):
+        catalog = tmp_path / "cat.json"
+        catalog.write_text(
+            json.dumps(
+                {"banks": {bank_id: [{"kind": "patch", "n": 3, "name": "Printed"}]}}
+            ),
+            encoding="utf-8",
+        )
+        live = tmp_path / "live.json"
+        live.write_text(
+            json.dumps({f"{bank_id}:patch:003": "Saved Own Work"}),
+            encoding="utf-8",
+        )
+        return ["--catalog", str(catalog), "--live-names", str(live)]
+
+    def test_a_readable_bank_reports_saved_work(self, tmp_path, capsys):
+        names = ["dump", "CARD", "patch"]
+        assert cli.main(["--demo"] + self._names(tmp_path, "CARD") + names) == 0
+        out = capsys.readouterr().out
+        assert "saved over the factory preset" in out
+        assert "the printed list is wrong" not in out
+
+    def test_a_rom_bank_reports_the_catalog_as_wrong(self, tmp_path, capsys):
+        names = ["dump", "ROM4", "patch"]
+        assert cli.main(["--demo"] + self._names(tmp_path, "ROM4") + names) == 0
+        out = capsys.readouterr().out
+        assert "the printed list is wrong; the unit is right" in out
+        assert "saved over the factory preset" not in out
+
+    def test_list_marks_differing_names_with_the_same_wording(self, tmp_path, capsys):
+        assert (
+            cli.main(
+                ["--demo"] + self._names(tmp_path, "CARD") + ["list", "CARD", "patch"]
+            )
+            == 0
+        )
+        out = capsys.readouterr().out
+        assert "saved over the factory preset" in out
+        assert "the printed list is wrong" not in out
+
     def test_select_sends_and_says_it_is_a_best_effort(self, capsys):
         device = DemoDevice()
         args = cli.build_parser().parse_args(
