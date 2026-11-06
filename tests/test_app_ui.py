@@ -38,6 +38,7 @@ from kwsed.app import (
     favorite_bank_id,
 )
 from kwsed.demo import DemoDevice
+from vinsynlib.ui.modals import RatingFilter
 
 
 @pytest.fixture()
@@ -387,3 +388,14 @@ class TestTheBankTable:
             table = app.query_one("#bank-table")
             cells = [str(c) for c in table.get_row("5:performance")]
             assert "ro" in cells
+
+
+class TestRatingFilterKeysOnKindQualifiedBankId:
+    def test_rated_entry_visible_unrated_not(self, app, store):
+        bank = banks.bank(0)
+        kind = banks.Kind.PERFORMANCE
+        store.set_rating(favorite_bank_id(bank.id, kind), 0, 3)
+        entries = [banks.slot(0, kind, 0), banks.slot(0, kind, 1)]
+        app.rating_filter = RatingFilter(stars=3, at_least=True)
+        out = app._by_rating(entries)
+        assert [e.number for e in out] == [0]

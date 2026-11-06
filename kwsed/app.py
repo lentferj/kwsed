@@ -1050,7 +1050,9 @@ class KwsedApp(App[None]):
             if self.favorites is None:
                 rating = 0
             else:
-                fav = self.favorites.get(entry.bank.id, entry.number)
+                fav = self.favorites.get(
+                    favorite_bank_id(entry.bank.id, entry.kind), entry.number
+                )
                 rating = fav.rating if fav is not None else 0
             if self.rating_filter.at_least:
                 if rating >= self.rating_filter.stars:
