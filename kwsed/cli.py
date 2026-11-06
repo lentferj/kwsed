@@ -26,6 +26,7 @@ from vinsynlib import cli, midi, render
 from kws import banks
 from kws import catalog as cat
 from kws import livenames as _livenames
+from .buildinfo import build_epilog
 
 __all__ = ["main", "build_parser"]
 
@@ -370,6 +371,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="kwscli",
         description="Browse a Korg Wavestation SR's sounds.",
         distribution="kwsed",
+        epilog=build_epilog(),
     )
     # config=False and favorites=False: nothing in kwscli *offers* either. A
     # flag that is accepted and then ignored teaches the user that a flag
