@@ -48,6 +48,7 @@ __all__ = [
     "Part",
     "Multiset",
     "parse",
+    "encode",
 ]
 
 #: Confirmed twice: 32 name slots in the dump, and Korg's two Multiset
@@ -136,3 +137,40 @@ def parse(data: Sequence[int]) -> List[Multiset]:
             )
         )
     return out
+
+
+def encode(multisets: Sequence[Multiset]) -> bytes:
+    """Encode 32 Multisets back into the plain data of a 0x62 dump.
+
+    The first 22 bytes of each Multiset's record are not modelled and are
+    written as zero; the four bytes of each of the 16 channels and the name
+    slot are written from the Multiset. Round-trips through :func:`parse`
+    for the fields it models.
+    """
+    needed = NAME_BASE + MULTISETS * NAME_SIZE
+    data = bytearray(needed)
+    by_number = {entry.number: entry for entry in multisets}
+    for number in range(MULTISETS):
+        entry = by_number.get(number)
+        if entry is None:
+            continue
+        base = number * MULTISET_SIZE
+        for part in entry.parts:
+            at = base + PART_BASE + (part.channel - 1) * PART_SIZE
+            data[at] = part.bank & 0x7F
+            data[at + 1] = part.performance & 0x7F
+            data[at + 2] = part.level & 0x7F
+            data[at + 3] = part.flag & 0x7F
+        at = NAME_BASE + number * NAME_SIZE
+        encoded_name = []
+        for char in entry.name:
+            code = ord(char)
+            if char == " ":
+                encoded_name.append(0x7F)
+            elif 32 <= code <= 126:
+                encoded_name.append(code)
+            else:
+                encoded_name.append(0)
+        for index, byte in enumerate(encoded_name[:NAME_SIZE]):
+            data[at + index] = byte
+    return bytes(data)

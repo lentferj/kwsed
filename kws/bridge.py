@@ -698,6 +698,79 @@ class WavestationBridge:
             "reception is enabled."
         )
 
+    def write_multi(
+        self,
+        data: Any,
+        *,
+        backup_dir: str,
+        verify: bool = True,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Replace the Multi Mode Setup (0x06). **Destructive.**
+
+        Mirrors :meth:`write_bank`'s fence: the destination is read in full
+        and backed up first, the dump is sent, and (when ``verify``) it is
+        read back and compared. There is no ROM check because the Multisets
+        are not a bank.
+        """
+        raw = bytes(data)
+        if (
+            len(raw) > 5
+            and raw[0] == 0xF0
+            and raw[-1] == 0xF7
+            and raw[4] == m.Function.MULTISET_DUMP
+        ):
+            sent = raw
+        else:
+            sent = m.frame(
+                m.Function.MULTISET_DUMP,
+                [0, 1] + list(m.to_nibbles(raw)),
+                channel=self.channel,
+            )
+
+        try:
+            before = self.read_multi(timeout=timeout)
+        except Exception as exc:
+            raise DeviceError(
+                "could not read the Multi Mode Setup before writing it, so "
+                f"nothing was sent ({exc}). kwsed does not overwrite a dump "
+                "it has not backed up."
+            ) from exc
+        saved = backup.save(
+            backup_dir,
+            kind="multi",
+            slot="multi",
+            name="Multi Mode Setup",
+            device_id=str(self.channel),
+            source="kwsed",
+            blocks={"dump": before},
+        )
+
+        self._drain()
+        self._send(sent)
+
+        result: Dict[str, Any] = {
+            "backup": saved,
+            "verified": None,
+            "mismatch": None,
+        }
+        if not verify:
+            return result
+
+        try:
+            after = self.read_multi(timeout=timeout)
+        except Exception as exc:
+            result["verified"] = False
+            result["mismatch"] = (
+                "the write was sent but the Multi Mode Setup could not be "
+                f"read back to check it ({exc}). Whether it took is unknown."
+            )
+            return result
+        result["verified"] = bytes(after) == bytes(sent)
+        if not result["verified"]:
+            result["mismatch"] = _first_difference(bytes(sent), bytes(after))
+        return result
+
     def read_bank_names(
         self,
         bank: int | str,
