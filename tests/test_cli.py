@@ -372,7 +372,7 @@ class TestTheChannelArguments:
 
 class TestOfflineNeverBuildsADevice:
     def test_the_offline_set_is_what_it_claims(self):
-        assert set(cli._OFFLINE) == {"banks", "list", "find", "ports"}
+        assert set(cli._OFFLINE) == {"banks", "list", "find", "ports", "backup"}
 
     def test_every_offline_name_is_in_the_command_table(self):
         assert set(cli._COMMANDS) >= cli._OFFLINE

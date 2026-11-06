@@ -336,6 +336,29 @@ def _cmd_send(device: Any, args: argparse.Namespace) -> int:
     return 1
 
 
+def _cmd_backup(_device: Any, args: argparse.Namespace) -> int:
+    from kws import backup
+
+    directory = getattr(args, "backup_dir", None) or backup.default_dir()
+    entries = sorted(
+        backup.list_backups(directory), key=lambda e: e.saved, reverse=True
+    )
+    if not entries:
+        print(f"no backups in {directory}")
+        return 0
+    rows = [
+        [
+            entry.kind or "?",
+            entry.slot or "?",
+            entry.name or "?",
+            f"{entry.saved:.0f}" if entry.saved else "?",
+        ]
+        for entry in entries
+    ]
+    print(_table(rows, ["kind", "slot", "name", "saved"]))
+    return 0
+
+
 _COMMANDS: Dict[str, Callable[[Any, argparse.Namespace], Any]] = {
     "banks": _cmd_banks,
     "list": _cmd_list,
@@ -346,8 +369,9 @@ _COMMANDS: Dict[str, Callable[[Any, argparse.Namespace], Any]] = {
     "select": _cmd_select,
     "send": _cmd_send,
     "multi": _cmd_multi,
+    "backup": _cmd_backup,
 }
-_OFFLINE = {"banks", "list", "find", "ports"}
+_OFFLINE = {"banks", "list", "find", "ports", "backup"}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -422,6 +446,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--backup-dir",
         default=None,
         help="where to save the destination before overwriting",
+    )
+    sp = sub.add_parser("backup", help="list saved backups")
+    backup_sub = sp.add_subparsers(dest="backup_command", required=True)
+    sp_list = backup_sub.add_parser("list", help="list envelopes in the backup dir")
+    sp_list.add_argument(
+        "--backup-dir",
+        default=None,
+        help="backup directory to list (default: the per-platform data dir)",
     )
     return parser
 

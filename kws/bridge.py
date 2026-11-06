@@ -614,12 +614,17 @@ class WavestationBridge:
                 f"writing it, so nothing was sent ({exc})."
             ) from exc
         saved = backup.save(
-            m.single_patch_dump(entry.sysex, number, before, channel=self.channel),
             backup_dir,
-            bank_label=_patch_backup_name(entry.label, number),
             kind="patch",
-            names=[m.decode_name(before)],
-            channel=self.channel,
+            slot=_patch_backup_name(entry.label, number),
+            name=_patch_backup_name(entry.label, number),
+            device_id=str(self.channel),
+            source="kwsed",
+            blocks={
+                "dump": m.single_patch_dump(
+                    entry.sysex, number, before, channel=self.channel
+                )
+            },
         )
 
         self._drain()
@@ -786,20 +791,14 @@ class WavestationBridge:
                 f"was sent ({exc}). kwsed does not overwrite a bank it has "
                 f"not backed up."
             ) from exc
-        names = []
-        try:
-            packet = m.parse(before)
-            if packet is not None and function != m.Function.ALL_WAVESEQ_DUMP:
-                names = list(dumps.parse_bulk(packet).names().values())
-        except Exception:
-            names = []
         saved = backup.save(
-            before,
             backup_dir,
-            bank_label=entry.label,
             kind=kind,
-            names=names,
-            channel=self.channel,
+            slot=entry.label,
+            name=entry.label,
+            device_id=str(self.channel),
+            source="kwsed",
+            blocks={"dump": before},
         )
 
         # --- 3. send -------------------------------------------------------

@@ -137,7 +137,7 @@ class TestTheFence:
         result = unit.bridge.write_bank(
             11, banks.Kind.PATCH, PATCH_BANK, backup_dir=str(tmp_path)
         )
-        saved = backup.load(result["backup"])
+        saved = backup.load(result["backup"]).blocks["dump"]
         saved_packet = m.parse(saved)
         assert saved_packet is not None
         restored = saved_packet.data()[: len(PATCH_BANK)]

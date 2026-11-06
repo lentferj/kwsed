@@ -291,7 +291,7 @@ class TestWritePatch:
             "CARD", 3, bytes(fresh), backup_dir=str(tmp_path)
         )
         assert result["verified"] is True
-        packet = m.parse(backup.load(result["backup"]))
+        packet = m.parse(backup.load(result["backup"]).blocks["dump"])
         assert packet is not None
         assert packet.data()[:8] == b"Previous", "the backup holds the old patch"
         assert backup.describe(result["backup"])["bank"] == "Card-patch03"

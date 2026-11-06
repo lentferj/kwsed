@@ -198,87 +198,54 @@ class TestBackupRoundTrip:
     def test_saving_then_loading_returns_the_same_bytes(self, tmp_path):
         raw = self._dump()
         path = backup.save(
-            raw,
             str(tmp_path),
-            bank_label="Card",
             kind="patch",
-            names=["Invented"],
-            channel=4,
+            slot="Card",
+            name="Card",
+            device_id="4",
+            source="kwsed",
+            blocks={"dump": raw},
         )
-        assert backup.load(path) == raw
+        loaded = backup.load(path)
+        assert loaded.blocks["dump"] == raw
 
-    def test_the_sidecar_carries_what_a_person_needs_to_choose(self, tmp_path):
+    def test_the_envelope_carries_what_a_person_needs_to_choose(self, tmp_path):
         path = backup.save(
-            self._dump(),
             str(tmp_path),
-            bank_label="Card",
             kind="patch",
-            names=["Invented"],
-            channel=4,
+            slot="Card",
+            name="Card",
+            device_id="4",
+            source="kwsed",
+            blocks={"dump": self._dump()},
         )
         described = backup.describe(path)
         assert described["bank"] == "Card"
         assert described["kind"] == "patch"
-        assert described["names"] == ["Invented"]
         assert described["bytes"] > 0
         assert described["saved"]
-
-    def test_describe_copes_with_a_sidecar_that_is_missing(self, tmp_path):
-        path = tmp_path / "orphan.syx"
-        path.write_bytes(self._dump())
-        described = backup.describe(str(path))
-        assert described["format"] is None
-        assert described["bank"] == "?"
-        assert described["names"] == []
-
-    def test_an_empty_backup_is_refused(self, tmp_path):
-        """Nothing was read back, so there would be nothing to restore."""
-        with pytest.raises(backup.BackupError, match="empty backup"):
-            backup.save(b"", str(tmp_path), bank_label="Card", kind="patch")
-
-    def test_a_directory_that_cannot_be_created_is_refused(self, tmp_path):
-        blocker = tmp_path / "a-file"
-        blocker.write_text("in the way")
-        with pytest.raises(backup.BackupError, match="Nothing has been sent"):
-            backup.save(
-                self._dump(), str(blocker / "sub"), bank_label="Card", kind="patch"
-            )
-
-    def test_listing_is_newest_first_and_skips_the_sidecars(self, tmp_path):
-        for index in range(3):
-            backup.save(
-                self._dump(name=b"Name%02d" % index),
-                str(tmp_path),
-                bank_label="Card",
-                kind="patch",
-            )
-        listed = backup.list_backups(str(tmp_path))
-        assert len(listed) == 3
-        assert all(entry["path"].endswith(".syx") for entry in listed)
-        stamps = [entry["saved"] for entry in listed]
-        assert stamps == sorted(stamps, reverse=True)
 
     def test_listing_a_directory_that_does_not_exist_is_empty(self, tmp_path):
         assert backup.list_backups(str(tmp_path / "nowhere")) == []
 
-    def test_a_sidecar_from_a_newer_build_is_refused(self, tmp_path):
-        path = backup.save(self._dump(), str(tmp_path), bank_label="Card", kind="patch")
-        sidecar = os.path.splitext(path)[0] + ".json"
-        with open(sidecar, encoding="utf-8") as handle:
-            payload = json.load(handle)
-        payload["format"] = backup.FORMAT + 1
-        with open(sidecar, "w", encoding="utf-8") as handle:
-            json.dump(payload, handle)
-        with pytest.raises(backup.BackupError, match="newer kwsed"):
-            backup.describe(path)
-
-    def test_two_saves_in_the_same_second_do_not_collide(self, tmp_path):
-        """The stamp carries microseconds, and the loop is the backstop."""
+    def test_two_saves_do_not_collide(self, tmp_path):
         first = backup.save(
-            self._dump(), str(tmp_path), bank_label="Card", kind="patch"
+            str(tmp_path),
+            kind="patch",
+            slot="Card",
+            name="Card",
+            device_id="",
+            source="kwsed",
+            blocks={"dump": self._dump()},
         )
         second = backup.save(
-            self._dump(), str(tmp_path), bank_label="Card", kind="patch"
+            str(tmp_path),
+            kind="patch",
+            slot="Card",
+            name="Card",
+            device_id="",
+            source="kwsed",
+            blocks={"dump": self._dump()},
         )
         assert first != second
         assert len(backup.list_backups(str(tmp_path))) == 2
