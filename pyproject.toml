@@ -150,9 +150,10 @@ module = [
     # warning that it was not applying it.
     "tests.*",
     # tools/ is not a package -- its scripts are run directly by path -- so
-    # these two are named. There are only two, and they change rarely.
+    # these three are named. There are only three, and they change rarely.
     "build_bank",
     "extract_catalog",
+    "measure_send_gap",
 ]
 # The two go together. Allowing an untyped def while still forbidding calls to
 # it would leave every test that calls a local helper reporting the helper
