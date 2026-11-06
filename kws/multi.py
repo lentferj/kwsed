@@ -146,7 +146,7 @@ def parse(data: Sequence[int]) -> List[Multiset]:
     return out
 
 
-def encode(multisets: Sequence[Multiset]) -> bytes:
+def encode(multisets: Sequence[Multiset]) -> bytes:  # noqa: C901
     """Encode 32 Multisets back into the plain data of a 0x62 dump.
 
     The first :data:`PART_BASE` bytes of each Multiset's record are not
@@ -182,7 +182,13 @@ def encode(multisets: Sequence[Multiset]) -> bytes:
             elif 32 <= code <= 126:
                 encoded_name.append(code)
             else:
-                encoded_name.append(0)
+                # Stop at the terminator: no bytes are written after the NUL.
+                break
+            if len(encoded_name) >= NAME_SIZE:
+                break
+        # Pad the remainder with NUL.
+        while len(encoded_name) < NAME_SIZE:
+            encoded_name.append(0)
         for index, byte in enumerate(encoded_name[:NAME_SIZE]):
             data[at + index] = byte
     return bytes(data)

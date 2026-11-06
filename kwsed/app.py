@@ -352,7 +352,7 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
     def on_input_changed(self, event: Any) -> None:
         self._collect()
 
-    def _collect(self) -> None:
+    def _collect(self) -> None:  # noqa: C901
         from dataclasses import replace as _replace
 
         try:
@@ -364,30 +364,50 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
             name = self.query_one("#multi-edit-name", Input).value
         except Exception:
             name = entry.name
+        if not isinstance(name, str):
+            name = entry.name
+        if len(name) > 16:
+            name = name[:16]
         channel_index = self._selected_channel_index()
         parts = list(entry.parts)
+        error: Optional[str] = None
         if channel_index < len(parts):
             part = parts[channel_index]
 
-            def _int(widget_id: str, fallback: int) -> int:
+            def _int(
+                widget_id: str, field_name: str, lo: int, hi: int, fallback: int
+            ) -> int:
+                nonlocal error
                 try:
                     raw = self.query_one(widget_id, Input).value
                 except Exception:
                     return fallback
                 try:
-                    return int(raw)
+                    value = int(raw)
                 except (TypeError, ValueError):
+                    error = f"{field_name} must be {lo}-{hi}"
                     return fallback
+                if value < lo or value > hi:
+                    error = f"{field_name} must be {lo}-{hi}"
+                    return fallback
+                return value
 
             parts[channel_index] = _replace(
                 part,
-                bank=_int("#multi-edit-bank", part.bank),
-                performance=_int("#multi-edit-performance", part.performance),
-                level=_int("#multi-edit-level", part.level),
-                flag=_int("#multi-edit-flag", part.flag),
+                bank=_int("#multi-edit-bank", "bank", 0, 127, part.bank),
+                performance=_int(
+                    "#multi-edit-performance", "performance", 0, 49, part.performance
+                ),
+                level=_int("#multi-edit-level", "level", 0, 127, part.level),
+                flag=_int("#multi-edit-flag", "flag", 0, 1, part.flag),
             )
         new_entry = _replace(entry, name=name, parts=tuple(parts))
         self._multisets[ms_index] = new_entry
+        if error is not None:
+            try:
+                self.query_one("#multi-edit-state", Static).update(error)
+            except Exception:  # noqa: S110
+                pass
 
     def _validation_error(self) -> Optional[str]:
         checks = (
@@ -504,6 +524,8 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
             if app is not None and hasattr(app, "_record_write"):
                 payload = result if isinstance(result, dict) else {"backup": None}
                 app._record_write(payload)
+            if app is not None and hasattr(app, "_multi_sets"):
+                app._multi_sets = list(self._multisets)
         except Exception:  # noqa: S110
             pass
         self.dismiss(result if isinstance(result, dict) else {"result": result})
@@ -522,6 +544,8 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
             if hasattr(app, "_record_write"):
                 payload = result if isinstance(result, dict) else {"backup": None}
                 app._record_write(payload)
+            if hasattr(app, "_multi_sets"):
+                app._multi_sets = list(self._multisets)
         except Exception:  # noqa: S110
             pass
         self.dismiss(result if isinstance(result, dict) else {"result": result})
@@ -860,7 +884,7 @@ class KwsedApp(App[None]):
                     kind = banks.Kind.PATCH
         if kind is None or destination is None or original is None:
             try:
-                self.notify_status("could not record the write for undo", refused=True)
+                self.notify_status("write not recorded for undo", refused=True)
             except Exception:  # noqa: S110
                 pass
             return
@@ -1654,7 +1678,7 @@ class KwsedApp(App[None]):
         )
 
     @work(thread=True)
-    def _multi_edit_write_worker(
+    def _multi_edit_write_worker(  # noqa: C901
         self,
         multisets: Sequence[Any],
         device: Any,
@@ -1700,6 +1724,8 @@ class KwsedApp(App[None]):
             if hasattr(self, "_record_write"):
                 payload = result if isinstance(result, dict) else {"backup": None}
                 self._record_write(payload)
+            if hasattr(self, "_multi_sets"):
+                self._multi_sets = list(multisets)
         except Exception:  # noqa: S110
             pass
         try:
