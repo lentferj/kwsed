@@ -344,6 +344,273 @@ class _Reading:
         pass
 
 
+class _SavingDevice:
+    """Answers a bank request with a full bank of invented names."""
+
+    description = "stand-in"
+    channel = 4
+
+    def __init__(self, *, fail=()):
+        self.calls = []
+        self.fail = set(fail)
+
+    def read_raw(self, bank_number, function, **_k):
+        from kws import records as r
+
+        self.calls.append((bank_number, function))
+        if function in self.fail:
+            raise TimeoutError("nothing came back")
+        if function == m.Function.ALL_PATCH_DUMP:
+            kind, size = banks.Kind.PATCH, r.PATCH_SIZE
+        elif function == m.Function.ALL_PERFORMANCE_DUMP:
+            kind, size = banks.Kind.PERFORMANCE, r.PERFORMANCE_SIZE
+        else:  # pragma: no cover - the CLI asks for one of the two
+            raise AssertionError(f"unexpected request {function:#04x}")
+        payload = bytearray(banks.count_for(kind) * size)
+        for number in range(banks.count_for(kind)):
+            name = f"Invented {number:02d}".encode()
+            at = number * size
+            payload[at : at + len(name)] = name
+        return bytes(m.frame_bulk(function, bank_number, bytes(payload), channel=4))
+
+    def close(self):
+        pass
+
+
+class TestBackupSave:
+    """`backup save` reads, writes envelopes, and changes nothing."""
+
+    def _args(self, tmp_path, *extra):
+        return cli.build_parser().parse_args(
+            [
+                "backup",
+                "save",
+                "--yes",
+                "--backup-dir",
+                str(tmp_path / "backups"),
+                *extra,
+            ]
+        )
+
+    def test_it_saves_both_kinds_for_every_writable_bank(self, tmp_path, capsys):
+        from kws import backup
+
+        device = _SavingDevice()
+        assert cli._cmd_backup(device, self._args(tmp_path)) == 0
+        entries = backup.list_backups(str(tmp_path / "backups"))
+        assert len(entries) == 8
+        assert {entry.slot for entry in entries} == {
+            "RAM 1",
+            "RAM 2",
+            "RAM 3",
+            "Card",
+        }
+        assert sum(entry.kind == banks.Kind.PATCH for entry in entries) == 4
+        assert sum(entry.kind == banks.Kind.PERFORMANCE for entry in entries) == 4
+        # A block is the message a .syx would hold, not a private container.
+        for entry in entries:
+            packet = m.parse(entry.blocks["dump"])
+            assert packet is not None
+            assert packet.function in (
+                m.Function.ALL_PATCH_DUMP,
+                m.Function.ALL_PERFORMANCE_DUMP,
+            )
+        out = capsys.readouterr().out
+        assert "RAM 1" in out and "Card" in out
+
+    def test_one_bank_and_one_kind_can_be_asked_for(self, tmp_path):
+        from kws import backup
+
+        device = _SavingDevice()
+        args = self._args(tmp_path, "--bank", "CARD", "--kind", "patch")
+        assert cli._cmd_backup(device, args) == 0
+        assert device.calls == [(banks.bank("CARD").sysex, m.Function.ALL_PATCH_DUMP)]
+        entries = backup.list_backups(str(tmp_path / "backups"))
+        assert len(entries) == 1
+        assert entries[0].slot == "Card"
+        assert entries[0].kind == banks.Kind.PATCH
+
+    def test_a_rom_bank_is_refused_before_anything_is_read(self, tmp_path, capsys):
+        device = _SavingDevice()
+        args = self._args(tmp_path, "--bank", "ROM4")
+        assert cli._cmd_backup(device, args) == 2
+        assert device.calls == []
+        out = capsys.readouterr().out
+        assert "ROM and cannot be written" in out
+        assert "RAM 1" in out, "it should say which banks can be saved"
+
+    def test_no_yes_reads_nothing_and_says_so(self, tmp_path, capsys):
+        device = _SavingDevice()
+        args = cli.build_parser().parse_args(
+            ["backup", "save", "--backup-dir", str(tmp_path / "backups")]
+        )
+        assert cli._cmd_backup(device, args) == 2
+        assert device.calls == []
+        err = capsys.readouterr().err
+        assert "--yes" in err
+        assert "Nothing was done" in err
+
+    def test_a_failed_kind_is_reported_and_the_rest_still_saves(self, tmp_path, capsys):
+        from kws import backup
+
+        device = _SavingDevice(fail={m.Function.ALL_PERFORMANCE_DUMP})
+        assert cli._cmd_backup(device, self._args(tmp_path)) == 1
+        entries = backup.list_backups(str(tmp_path / "backups"))
+        assert len(entries) == 4
+        assert {entry.kind for entry in entries} == {banks.Kind.PATCH}
+        assert "could not be read" in capsys.readouterr().out
+
+    def test_main_checks_yes_before_opening_a_unit(self, tmp_path, capsys):
+        assert run(["backup", "save", "--backup-dir", str(tmp_path)]) == 2
+        assert "--yes" in capsys.readouterr().err
+
+
+class TestBackupRestore:
+    """A restore is a write, so it goes through the same fence as `send`."""
+
+    def _args(self, path, tmp_path, *extra):
+        return cli.build_parser().parse_args(
+            [
+                "backup",
+                "restore",
+                str(path),
+                "--yes",
+                "--backup-dir",
+                str(tmp_path / "pre-write"),
+                *extra,
+            ]
+        )
+
+    def _envelope(self, tmp_path, *, bank="Card", kind=banks.Kind.PATCH, payload=None):
+        from kws import backup
+        from kws import records as r
+
+        entry = banks.bank(bank)
+        if payload is None:
+            size = r.PATCH_SIZE if kind == banks.Kind.PATCH else r.PERFORMANCE_SIZE
+            payload = bytes(banks.count_for(kind) * size)
+        function = (
+            m.Function.ALL_PATCH_DUMP
+            if kind == banks.Kind.PATCH
+            else m.Function.ALL_PERFORMANCE_DUMP
+        )
+        frame = m.frame_bulk(function, entry.sysex, payload, channel=0)
+        return backup.save(
+            str(tmp_path / "store"),
+            kind=kind,
+            slot=entry.label,
+            name=entry.label,
+            device_id="0",
+            source="kwsed",
+            blocks={"dump": bytes(frame)},
+        )
+
+    def test_it_writes_through_the_fence_and_verifies_by_read_back(
+        self, tmp_path, capsys
+    ):
+        from kws import backup
+        from tests.test_write import PATCH_BANK, Unit
+
+        unit = Unit(contents=bytes(PATCH_BANK))
+        path = self._envelope(tmp_path, payload=PATCH_BANK)
+        assert cli._cmd_backup(unit.bridge, self._args(path, tmp_path)) == 0
+
+        functions = [d[4] for d in unit.midi_out.sent if len(d) > 5]
+        # The names preview, then the fence's own read, the write and the
+        # read-back. A restore that sent first would put the write second.
+        assert functions == [
+            m.Function.BULK_REQUEST,
+            m.Function.BULK_REQUEST,
+            m.Function.ALL_PATCH_DUMP,
+            m.Function.BULK_REQUEST,
+        ]
+        assert len(backup.list_backups(str(tmp_path / "pre-write"))) == 1
+        out = capsys.readouterr().out
+        assert "about to replace: Card, all patches" in out
+        assert "written and verified" in out
+
+    def test_a_rom_envelope_is_refused_and_nothing_is_sent(self, tmp_path, capsys):
+        from tests.test_write import Unit
+
+        unit = Unit()
+        path = self._envelope(tmp_path, bank="ROM4")
+        assert cli._cmd_backup(unit.bridge, self._args(path, tmp_path)) == 2
+        assert unit.midi_out.sent == []
+        assert "ROM and cannot be written" in capsys.readouterr().out
+
+    def test_an_envelope_whose_slot_and_dump_disagree_is_refused(
+        self, tmp_path, capsys
+    ):
+        from kws import backup
+        from tests.test_write import PATCH_BANK, Unit
+
+        entry = banks.bank("Card")
+        frame = m.frame_bulk(
+            m.Function.ALL_PATCH_DUMP, entry.sysex, PATCH_BANK, channel=0
+        )
+        path = backup.save(
+            str(tmp_path / "store"),
+            kind=banks.Kind.PATCH,
+            slot="RAM 1",
+            name="RAM 1",
+            device_id="0",
+            source="kwsed",
+            blocks={"dump": bytes(frame)},
+        )
+        unit = Unit()
+        assert cli._cmd_backup(unit.bridge, self._args(path, tmp_path)) == 2
+        assert unit.midi_out.sent == []
+        assert "says RAM 1 but its dump was for Card" in capsys.readouterr().out
+
+    def test_no_yes_sends_nothing_and_says_so(self, tmp_path, capsys):
+        from tests.test_write import Unit
+
+        unit = Unit()
+        path = self._envelope(tmp_path)
+        args = cli.build_parser().parse_args(
+            [
+                "backup",
+                "restore",
+                str(path),
+                "--backup-dir",
+                str(tmp_path / "pre-write"),
+            ]
+        )
+        assert cli._cmd_backup(unit.bridge, args) == 2
+        assert unit.midi_out.sent == []
+        err = capsys.readouterr().err
+        assert "--yes" in err
+        assert "Nothing was done" in err
+
+    def test_an_unreadable_file_is_refused(self, tmp_path, capsys):
+        from tests.test_write import Unit
+
+        unit = Unit()
+        missing = tmp_path / "not-a-backup.json"
+        assert cli._cmd_backup(unit.bridge, self._args(missing, tmp_path)) == 2
+        assert unit.midi_out.sent == []
+        assert "not a backup kwsed can read" in capsys.readouterr().out
+
+    def test_a_bad_read_back_is_reported_and_exits_non_zero(self, tmp_path, capsys):
+        from tests.test_write import PATCH_BANK, Unit
+
+        unit = Unit(contents=bytes(PATCH_BANK))
+        original = unit._sent
+
+        def lying(data):
+            original(data)
+            if len(data) > 5 and data[4] == m.Function.ALL_PATCH_DUMP:
+                wrong = bytearray(unit.contents)
+                wrong[0] ^= 0xFF
+                unit.contents = bytes(wrong)
+
+        unit.midi_out.send_message = lying  # type: ignore[method-assign]
+        path = self._envelope(tmp_path, payload=PATCH_BANK)
+        assert cli._cmd_backup(unit.bridge, self._args(path, tmp_path)) == 1
+        out = capsys.readouterr().out
+        assert "does NOT match" in out
+
+
 class TestTheChannelArguments:
     def test_a_channel_outside_one_to_sixteen_is_refused(self):
         with pytest.raises(SystemExit):
@@ -371,7 +638,15 @@ class TestTheChannelArguments:
 
 class TestOfflineNeverBuildsADevice:
     def test_the_offline_set_is_what_it_claims(self):
-        assert set(cli._OFFLINE) == {"banks", "list", "find", "ports", "backup"}
+        assert set(cli._OFFLINE) == {"banks", "list", "find", "ports"}
+
+    def test_backup_list_needs_no_unit_but_save_and_restore_do(self):
+        parser = cli.build_parser()
+        assert cli._offline(parser.parse_args(["backup", "list"]))
+        assert not cli._offline(parser.parse_args(["backup", "save", "--yes"]))
+        assert not cli._offline(
+            parser.parse_args(["backup", "restore", "x.json", "--yes"])
+        )
 
     def test_every_offline_name_is_in_the_command_table(self):
         assert set(cli._COMMANDS) >= cli._OFFLINE

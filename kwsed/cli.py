@@ -213,6 +213,24 @@ def _cmd_multi(device: Any, args: argparse.Namespace) -> int:
     return spec.EXIT_OK
 
 
+def _destination_names(device: Any, entry: Any, kind: str) -> str:
+    """What a bank holds now, in names rather than a slot number.
+
+    A slot number means nothing on the confirmation line; the names about
+    to be replaced mean everything. Wave sequences have no names to read,
+    so their read is still made -- it is the fence's proof that the
+    destination can be read at all -- and the absence is said plainly.
+    """
+    from kws import messages as m
+
+    if kind == "waveseq":
+        device.read_raw(entry.sysex, m.Function.ALL_WAVESEQ_DUMP)
+        return "(wave sequence names are not read)"
+    _, names = device.read_bank_names(entry.number, kind)
+    shown = [f"{number:03d} {name}" for number, name in sorted(names.items())[:6]]
+    return f"{', '.join(shown)}{' ...' if len(names) > 6 else ''}"
+
+
 def _cmd_send(device: Any, args: argparse.Namespace) -> int:
     """Write a bank dump into the instrument. **This destroys a bank.**
 
@@ -283,31 +301,17 @@ def _cmd_send(device: Any, args: argparse.Namespace) -> int:
     print(f"about to replace: {destination.label}, all {plural}")
     print(f"          source: {args.file} ({size} bytes)")
 
-    if kind == "waveseq":
-        try:
-            device.read_raw(destination.sysex, m.Function.ALL_WAVESEQ_DUMP)
-        except Exception as exc:
-            print(f"     it now holds: could not be read ({exc})")
-            print("Refusing to write a bank that cannot first be read and backed up.")
-            return spec.EXIT_ERROR
-        print("     it now holds: (wave sequence names are not read)")
-    else:
-        try:
-            # The kind matters: a kind-less read sends the patch request,
-            # so sending a performance bank would print the destination's
-            # *patch* names and the user would confirm the write against a
-            # list of the wrong objects.
-            current = device.read_bank_names(destination.number, kind)
-            _, names = current
-            shown = [f"{n:03d} {name}" for n, name in sorted(names.items())[:6]]
-            print(
-                f"     it now holds: {', '.join(shown)}"
-                f"{' ...' if len(names) > 6 else ''}"
-            )
-        except Exception as exc:
-            print(f"     it now holds: could not be read ({exc})")
-            print("Refusing to write a bank that cannot first be read and backed up.")
-            return spec.EXIT_ERROR
+    try:
+        # The kind matters: a kind-less read sends the patch request, so
+        # sending a performance bank would print the destination's *patch*
+        # names and the user would confirm the write against a list of the
+        # wrong objects.
+        held = _destination_names(device, destination, kind)
+    except Exception as exc:
+        print(f"     it now holds: could not be read ({exc})")
+        print("Refusing to write a bank that cannot first be read and backed up.")
+        return spec.EXIT_ERROR
+    print(f"     it now holds: {held}")
 
     if not args.yes:
         print(
@@ -328,10 +332,10 @@ def _cmd_send(device: Any, args: argparse.Namespace) -> int:
     return spec.EXIT_ERROR
 
 
-def _cmd_backup(_device: Any, args: argparse.Namespace) -> int:
+def _cmd_backup_list(_args: argparse.Namespace) -> int:
     from kws import backup
 
-    directory = getattr(args, "backup_dir", None) or backup.default_dir()
+    directory = getattr(_args, "backup_dir", None) or backup.default_dir()
     entries = sorted(
         backup.list_backups(directory), key=lambda e: e.saved, reverse=True
     )
@@ -351,6 +355,288 @@ def _cmd_backup(_device: Any, args: argparse.Namespace) -> int:
     return spec.EXIT_OK
 
 
+def _function_for_kind(kind: str) -> int:
+    from kws import messages as m
+
+    functions = {
+        banks.Kind.PERFORMANCE: m.Function.ALL_PERFORMANCE_DUMP,
+        banks.Kind.PATCH: m.Function.ALL_PATCH_DUMP,
+        "waveseq": m.Function.ALL_WAVESEQ_DUMP,
+    }
+    try:
+        return functions[kind]
+    except KeyError:
+        raise ValueError(
+            f"cannot back up {kind!r}; have {banks.Kind.PERFORMANCE}, "
+            f"{banks.Kind.PATCH}"
+        ) from None
+
+
+def _bank_size(kind: str) -> int:
+    from kws import records as rec
+
+    if kind == banks.Kind.PATCH:
+        return banks.PATCHES_PER_BANK * rec.PATCH_SIZE
+    if kind == banks.Kind.PERFORMANCE:
+        return banks.PERFORMANCES_PER_BANK * rec.PERFORMANCE_SIZE
+    if kind == "waveseq":
+        return rec.WAVESEQ_BANK_SIZE
+    raise ValueError(f"no bank size for {kind!r}")
+
+
+def _confirmed(args: argparse.Namespace, what: str, does: str) -> bool:
+    """The command line's arm-then-fire for a destructive verb.
+
+    The TUI has a screen for this; the command line has ``--yes``. A flag
+    that is missing is a refusal, not a prompt: nothing is read, sent or
+    written, and the message says how to proceed.
+    """
+    if getattr(args, "yes", False):
+        return True
+    print(
+        f"error: refusing to run `{what}` without --yes: it {does}. Nothing was done.",
+        file=sys.stderr,
+    )
+    return False
+
+
+def _backup_gate(args: argparse.Namespace) -> bool:
+    """True when a backup verb may run, or when it needs no confirmation."""
+    which = getattr(args, "backup_command", None)
+    if which == "save":
+        return _confirmed(
+            args,
+            "backup save",
+            "reads every selected bank and writes the backup envelopes",
+        )
+    if which == "restore":
+        return _confirmed(
+            args,
+            "backup restore",
+            "replaces a whole bank on the unit",
+        )
+    return True
+
+
+def _cmd_backup_save(device: Any, args: argparse.Namespace) -> int:
+    """Save one envelope per bank and kind. Read-only, **makes no sound**.
+
+    ``--bank`` names one bank; without it every writable bank is saved. A
+    bank holds performances and patches, which are different objects with
+    different dump requests, so each bank yields one envelope per kind.
+    The envelope is the family's; its ``dump`` block is the exact System
+    Exclusive message a ``.syx`` file would hold, bank byte, checksum and
+    all, so any tool that speaks the protocol can still restore it.
+    """
+    from kws import backup, dumps
+    from kws import messages as m
+
+    if not _backup_gate(args):
+        return spec.EXIT_USAGE
+    if args.bank is None:
+        selected = banks.writable_banks()
+    else:
+        entry = banks.bank(args.bank)
+        if not entry.writable:
+            print(
+                f"{entry.label} is ROM and cannot be written. The banks "
+                f"that can are: "
+                f"{', '.join(b.label for b in banks.writable_banks())}."
+            )
+            return spec.EXIT_USAGE
+        selected = [entry]
+    kinds = (
+        [args.kind]
+        if getattr(args, "kind", None)
+        else [banks.Kind.PERFORMANCE, banks.Kind.PATCH]
+    )
+    directory = getattr(args, "backup_dir", None) or backup.default_dir()
+    channel = getattr(device, "channel", None)
+    device_id = "" if channel is None else str(channel)
+    failures = 0
+    for entry in selected:
+        for kind in kinds:
+            function = _function_for_kind(kind)
+            try:
+                raw = device.read_raw(entry.sysex, function)
+            except Exception as exc:
+                print(f"{entry.label} — {_plural(kind)}: could not be read ({exc})")
+                failures += 1
+                continue
+            try:
+                packet = m.parse(raw)
+                if packet is None:
+                    raise ValueError("the reply was not a Wavestation message")
+                dump = dumps.parse_bulk(packet)
+            except Exception as exc:
+                print(f"{entry.label} — {_plural(kind)}: not a bank dump ({exc})")
+                failures += 1
+                continue
+            if dump.bank.number != entry.number or dump.kind != kind:
+                print(
+                    f"{entry.label} — {_plural(kind)}: the reply was for "
+                    f"{dump.bank.label} {_plural(dump.kind)}, so it was not saved"
+                )
+                failures += 1
+                continue
+            try:
+                path = backup.save(
+                    directory,
+                    kind=kind,
+                    slot=entry.label,
+                    name=entry.label,
+                    device_id=device_id,
+                    source="kwsed",
+                    blocks={"dump": bytes(raw)},
+                )
+            except backup.BackupError as exc:
+                print(f"{entry.label} — {_plural(kind)}: could not be saved ({exc})")
+                failures += 1
+                continue
+            print(f"{entry.label} — {_plural(kind)}: {path}")
+    return spec.EXIT_ERROR if failures else spec.EXIT_OK
+
+
+def _envelope_block(record: Any, kind: str) -> bytes:
+    blocks = record.blocks
+    if not isinstance(blocks, dict) or not blocks:
+        raise ValueError("it holds no blocks")
+    if "dump" in blocks:
+        return bytes(blocks["dump"])
+    if kind in blocks:
+        return bytes(blocks[kind])
+    if len(blocks) == 1:
+        return bytes(next(iter(blocks.values())))
+    raise ValueError(
+        f"it holds blocks {', '.join(sorted(blocks))} and none is the whole bank"
+    )
+
+
+def _restore_plan(record: Any) -> "tuple[banks.Bank, str, bytes]":
+    """``(destination, kind, payload)`` from an envelope, or ``ValueError``.
+
+    The fence backups written by :meth:`WavestationBridge.write_bank` hold
+    the message exactly as it arrived. A hand-saved envelope may hold the
+    decoded records instead; both are accepted, and both are checked
+    against the kind and bank the envelope claims before anything is sent.
+    """
+    from kws import messages as m
+
+    kind = record.kind
+    if kind not in (banks.Kind.PATCH, banks.Kind.PERFORMANCE):
+        raise ValueError(
+            f"it holds a {kind!r} backup; only whole-bank patch or "
+            f"performance envelopes can be restored"
+        )
+    raw = _envelope_block(record, kind)
+    packet = m.parse(raw) if raw.startswith(b"\xf0") else None
+    frame_bank = None
+    if packet is not None:
+        expected = _function_for_kind(kind)
+        if packet.function != expected:
+            raise ValueError(
+                f"its dump block is a {packet.function_name}, not a "
+                f"{_plural(kind)} bank"
+            )
+        data = packet.data()
+        if packet.bank is not None:
+            frame_bank = banks.by_sysex(packet.bank)
+    else:
+        data = raw
+
+    slot = (record.slot or "").strip()
+    named = None
+    if slot:
+        try:
+            named = banks.bank(slot)
+        except LookupError:
+            named = None
+    if (
+        named is not None
+        and frame_bank is not None
+        and named.number != frame_bank.number
+    ):
+        raise ValueError(
+            f"its slot says {named.label} but its dump was for {frame_bank.label}"
+        )
+    destination = named or frame_bank
+    if destination is None:
+        raise ValueError(
+            f"it does not name a bank (slot {record.slot!r}) and its dump "
+            f"carries no bank byte"
+        )
+
+    size = _bank_size(kind)
+    if len(data) < size:
+        raise ValueError(
+            f"its dump block decodes to {len(data)} bytes; a {kind} bank is {size}"
+        )
+    return destination, kind, bytes(data[:size])
+
+
+def _cmd_backup_restore(device: Any, args: argparse.Namespace) -> int:
+    """Load an envelope and write its bank back. **This destroys a bank.**
+
+    The write goes through :meth:`WavestationBridge.write_bank`, not around
+    it: the destination is read in full first, the pre-write snapshot is
+    saved, the dump is sent at the ALSA pace and the result is read back
+    and compared. The gate here only decides whether to ask it to.
+    """
+    from kws import backup
+
+    if not _backup_gate(args):
+        return spec.EXIT_USAGE
+    try:
+        record = backup.load(args.file)
+    except (backup.BackupError, ValueError) as exc:
+        print(f"{args.file} is not a backup kwsed can read ({exc})")
+        return spec.EXIT_USAGE
+    try:
+        destination, kind, payload = _restore_plan(record)
+    except (LookupError, ValueError) as exc:
+        print(f"{args.file} cannot be restored: {exc}")
+        return spec.EXIT_USAGE
+    if not destination.writable:
+        print(
+            f"{destination.label} is ROM and cannot be written. The banks "
+            f"that can are: "
+            f"{', '.join(b.label for b in banks.writable_banks())}."
+        )
+        return spec.EXIT_USAGE
+
+    plural = _plural(kind)
+    print(f"about to replace: {destination.label}, all {plural}")
+    print(f"          source: {args.file} ({len(payload)} bytes)")
+    try:
+        held = _destination_names(device, destination, kind)
+    except Exception as exc:
+        print(f"     it now holds: could not be read ({exc})")
+        print("Refusing to write a bank that cannot first be read and backed up.")
+        return spec.EXIT_ERROR
+    print(f"     it now holds: {held}")
+
+    where = getattr(args, "backup_dir", None) or backup.default_dir()
+    result = device.write_bank(destination.number, kind, payload, backup_dir=where)
+    print(f"\nbacked up to: {result['backup']}")
+    if result["verified"] is True:
+        print("written and verified by reading it back")
+        return spec.EXIT_OK
+    print(f"written, but the read-back does NOT match: {result['mismatch']}")
+    print("The backup above holds what was there before.")
+    return spec.EXIT_ERROR
+
+
+def _cmd_backup(device: Any, args: argparse.Namespace) -> int:
+    which = getattr(args, "backup_command", None)
+    if which == "list":
+        return _cmd_backup_list(args)
+    if which == "save":
+        return _cmd_backup_save(device, args)
+    if which == "restore":
+        return _cmd_backup_restore(device, args)
+    raise ValueError(f"no backup command {which!r}")
+
+
 _COMMANDS: Dict[str, Callable[[Any, argparse.Namespace], Any]] = {
     "banks": _cmd_banks,
     "list": _cmd_list,
@@ -363,7 +649,15 @@ _COMMANDS: Dict[str, Callable[[Any, argparse.Namespace], Any]] = {
     "multi": _cmd_multi,
     "backup": _cmd_backup,
 }
-_OFFLINE = {"banks", "list", "find", "ports", "backup"}
+_OFFLINE = {"banks", "list", "find", "ports"}
+
+
+def _offline(args: argparse.Namespace) -> bool:
+    """True when a command needs no unit. ``backup list`` is the one
+    subcommand that qualifies: ``save`` and ``restore`` both open one."""
+    if args.command == "backup":
+        return getattr(args, "backup_command", None) == "list"
+    return args.command in _OFFLINE
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -440,13 +734,50 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="where to save the destination before overwriting",
     )
-    sp = sub.add_parser("backup", help="list saved backups")
+    sp = sub.add_parser("backup", help="list, save or restore bank backups")
     backup_sub = sp.add_subparsers(dest="backup_command", required=True)
     sp_list = backup_sub.add_parser("list", help="list envelopes in the backup dir")
     sp_list.add_argument(
         "--backup-dir",
         default=None,
         help="backup directory to list (default: the per-platform data dir)",
+    )
+    sp_save = backup_sub.add_parser(
+        "save", help="read banks off the unit into backup envelopes (silent)"
+    )
+    sp_save.add_argument(
+        "--bank",
+        default=None,
+        help=(
+            "one bank to save: RAM1, RAM2, RAM3 or CARD "
+            "(default: all four writable banks)"
+        ),
+    )
+    sp_save.add_argument(
+        "--kind",
+        default=None,
+        choices=kinds,
+        help="save only one kind (default: performances and patches)",
+    )
+    sp_save.add_argument(
+        "--yes", action="store_true", help="confirm; without it nothing is read"
+    )
+    sp_save.add_argument(
+        "--backup-dir",
+        default=None,
+        help="where to write the envelopes (default: the per-platform data dir)",
+    )
+    sp_restore = backup_sub.add_parser(
+        "restore", help="WRITE a saved bank back into the unit"
+    )
+    sp_restore.add_argument("file", help="an envelope written by `backup save`")
+    sp_restore.add_argument(
+        "--yes", action="store_true", help="actually write; without it nothing is sent"
+    )
+    sp_restore.add_argument(
+        "--backup-dir",
+        default=None,
+        help="where to save the destination before overwriting",
     )
     return parser
 
@@ -494,12 +825,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     # program change goes out on, --device-channel the unit's own base.
     cli.validate_common(args)
 
-    if args.command in _OFFLINE:
+    if _offline(args):
         try:
             code = handler(None, args)
         except (LookupError, ValueError) as exc:
             sys.exit(f"error: {exc}")
         return int(code or 0)
+    # A backup verb's --yes is checked before a port is opened, so a missing
+    # confirmation costs a message rather than a MIDI session.
+    if not _backup_gate(args):
+        return spec.EXIT_USAGE
     try:
         device = _build_device(args)
     except Exception as exc:

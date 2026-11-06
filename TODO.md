@@ -192,17 +192,20 @@ The fence, which is the rule for any destructive feature added later:
 2. **Never one keystroke from the browser.**
 3. **Back up first, unconditionally.** The destination is read in full and
    written to a file before a byte goes out; if that read fails, nothing is
-   written. Backups are plain `.syx` plus a JSON sidecar, so they can be
-   restored by any tool including the instrument's own front panel.
+   written. Backups use the family envelope, and each block is the exact
+   System Exclusive message a `.syx` file holds, so they can be restored by
+   any tool including the instrument's own front panel.
 4. **Say what is about to be destroyed, by name.** "Card" means nothing; the
    names it is about to replace mean everything.
 5. **Verify by reading back and comparing**, and report a mismatch rather
    than claiming success -- a bulk dump is unacknowledged.
 
+`kwscli backup save` reads a bank into an envelope and `kwscli backup
+restore` writes it back through the same fence; both are behind `--yes`.
+
 **Still not done:** writing a single performance or patch rather than a
-whole bank, and restoring a backup from within kwsed (the files are plain
-`.syx`, so the instrument can already take them back). Neither is a dict to
-widen: both are new destinations and get the same fence.
+whole bank. It is not a dict to widen: it is a new destination and gets the
+same fence.
 
 ---
 
