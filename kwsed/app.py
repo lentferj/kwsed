@@ -326,7 +326,7 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
     def _refresh_inputs(self) -> None:
         try:
             entry = self._multisets[self._selected_ms_index()]
-        except (IndexError, Exception):
+        except Exception:
             return
         channel_index = self._selected_channel_index()
         part = entry.parts[channel_index] if channel_index < len(entry.parts) else None
@@ -358,7 +358,7 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
         try:
             ms_index = self._selected_ms_index()
             entry = self._multisets[ms_index]
-        except (IndexError, Exception):
+        except Exception:
             return
         try:
             name = self.query_one("#multi-edit-name", Input).value

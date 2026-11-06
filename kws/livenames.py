@@ -17,13 +17,11 @@ adds is the per-application default path, beside the favourites database.
 
 from __future__ import annotations
 
-import json
 import os
 from typing import Any
 
 from kws import favorites
 from vinsynlib import livenames as _livenames
-from vinsynlib.catalog import wire_to_display
 from vinsynlib.livenames import FILE_NAME, key
 
 __all__ = [
@@ -32,7 +30,6 @@ __all__ = [
     "default_path",
     "key",
     "load",
-    "migrate_legacy",
     "names_from_snapshot",
     "save",
 ]
@@ -70,57 +67,3 @@ def names_from_snapshot(snapshot: dict[str, dict[int, str]]) -> dict[str, str]:
         for program_change, name in names.items():
             flat[key(bank_id, program_change)] = name
     return flat
-
-
-def _legacy_path(legacy: str | None) -> str:
-    return legacy or os.path.join(os.path.dirname(__file__), "data", "live.json")
-
-
-def _rows_to_names(bank_id: str, rows: object) -> dict[str, str]:
-    if not isinstance(rows, list):
-        return {}
-    names: dict[str, str] = {}
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        try:
-            # Legacy rows carried a wire (program-change) number under
-            # "pc", the same convention vinsynlib.catalog.load uses for
-            # "pc" rows; convert to the display number the live layer keys
-            # on, per the family's wire_to_display convention.
-            number = wire_to_display(int(row["pc"]))
-            name = row["name"]
-        except (KeyError, TypeError, ValueError):
-            continue
-        if isinstance(name, str):
-            names[key(bank_id, number)] = name
-    return names
-
-
-def _read_legacy(path: str) -> dict[str, str]:
-    try:
-        with open(path, encoding="utf-8") as handle:
-            payload = json.load(handle)
-    except (OSError, ValueError):
-        return {}
-    if not isinstance(payload, dict):
-        return {}
-    banks = payload.get("banks", {})
-    if not isinstance(banks, dict):
-        return {}
-    names: dict[str, str] = {}
-    for bank_id, rows in banks.items():
-        if isinstance(bank_id, str):
-            names.update(_rows_to_names(bank_id, rows))
-    return names
-
-
-def migrate_legacy(path: str | None = None, legacy: str | None = None) -> str | None:
-    target = path or default_path()
-    if os.path.exists(target):
-        return None
-    names = _read_legacy(_legacy_path(legacy))
-    if not names:
-        return None
-    save(names, target)
-    return target if os.path.exists(target) else None

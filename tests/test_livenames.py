@@ -3,7 +3,6 @@
 
 """The cache of names read off a unit."""
 
-import json
 import os
 
 from kws import catalog as cat
@@ -75,38 +74,3 @@ class TestApplyTo:
         applied = livenames.apply_to(catalog, path)
         assert applied == 1
         assert catalog.live_name("RAM1", 0) == "Good"
-
-
-class TestMigrateLegacy:
-    def test_migrate_legacy_converts_old_nested_format(self, tmp_path):
-        legacy = tmp_path / "live.json"
-        legacy.write_text(
-            json.dumps(
-                {
-                    "banks": {
-                        "A": [{"pc": 0, "name": "First"}, {"pc": 5, "name": "Fifth"}],
-                        "C": [{"pc": 1, "name": "Combo"}],
-                    }
-                }
-            ),
-            encoding="utf-8",
-        )
-        target = tmp_path / "live-names.json"
-        result = livenames.migrate_legacy(path=str(target), legacy=str(legacy))
-        assert result == str(target)
-        assert os.path.exists(target)
-        loaded = livenames.load(str(target))
-        assert loaded[livenames.key("A", 1)] == "First"
-        assert loaded[livenames.key("A", 6)] == "Fifth"
-        assert loaded[livenames.key("C", 2)] == "Combo"
-        assert legacy.exists()
-
-    def test_migrate_legacy_returns_none_if_target_exists(self, tmp_path):
-        legacy = tmp_path / "live.json"
-        legacy.write_text(
-            json.dumps({"banks": {"A": [{"pc": 0, "name": "X"}]}}), encoding="utf-8"
-        )
-        target = tmp_path / "live-names.json"
-        target.write_text("{}", encoding="utf-8")
-        result = livenames.migrate_legacy(path=str(target), legacy=str(legacy))
-        assert result is None
