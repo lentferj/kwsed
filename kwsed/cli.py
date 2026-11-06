@@ -60,7 +60,7 @@ def _cmd_banks(_device: Any, args: argparse.Namespace) -> None:
             named[kind] = sum(
                 1
                 for n in range(banks.count_for(kind))
-                if catalog.name(entry.id, kind, n)
+                if catalog.name(entry.id, n, kind)
             )
         rows.append(
             [
@@ -82,7 +82,7 @@ def _cmd_list(_device: Any, args: argparse.Namespace) -> None:
         rows.append(
             [
                 f"{item.number:02d}",
-                catalog.display_name(entry.id, args.kind, item.number),
+                catalog.display_name(entry.id, item.number, args.kind),
             ]
         )
     print(f"{entry.label} — {_plural(args.kind)}\n")
@@ -162,7 +162,7 @@ def _cmd_dump(device: Any, args: argparse.Namespace) -> None:
     )
     rows = []
     for number in sorted(names):
-        printed = catalog.name(dump.bank.id, dump.kind, number) or ""
+        printed = catalog.name(dump.bank.id, number, dump.kind) or ""
         live = names[number]
         rows.append(
             [f"{number:02d}", live, printed, "*" if printed and printed != live else ""]
@@ -425,9 +425,14 @@ def _build_device(args: argparse.Namespace) -> Any:
             channel=(args.device_channel - 1) if args.device_channel else 0,
         )
     # No --config flag on this parser, so the settings file is the browser's
-    # default: ./config.toml, gitignored, safe to delete. One Identity Request
-    # to the remembered port; the sweep only when there is nothing
-    # remembered, when the remembered port no longer answers, or on --scan.
+    # default per-tool path. Migrate a legacy working-directory file first.
+    cfg.migrate_legacy_config("kwsed")
+    import os
+
+    os.makedirs(cfg.config_dir("kwsed"), exist_ok=True)
+    # One Identity Request to the remembered port; the sweep only when there
+    # is nothing remembered, when the remembered port no longer answers, or
+    # on --scan.
     return b.WavestationBridge.connect(
         config_path=cfg.DEFAULT_PATH,
         # --midi-channel is now --device-channel; the old spelling still

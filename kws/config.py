@@ -37,15 +37,27 @@ able to tell which one is unhappy.
 
 from __future__ import annotations
 
-from vinsynlib.config import DEFAULT_PATH, Settings
+from vinsynlib.config import (
+    bind,
+    config_dir,
+    config_help,
+    default_config_path,
+    migrate_legacy_config,
+)
+
+DEFAULT_PATH = default_config_path("kwsed")
 
 __all__ = [
     "DEFAULT_PATH",
+    "bind",
+    "config_dir",
+    "config_help",
     "load_channel",
     "load_device_id",
     "load_last_port",
     "load_last_recv_port",
     "load_port_pair",
+    "migrate_legacy_config",
     "save_channel",
     "save_device_id",
     "save_last_port",
@@ -53,7 +65,7 @@ __all__ = [
     "save_ports",
 ]
 
-_settings = Settings("kwsed", DEFAULT_PATH)
+_settings = bind("kwsed", DEFAULT_PATH)
 
 #: Module-level aliases, so every existing call site reads the same as it did
 #: before: ``config.load_channel(path)``. The library takes the path as an
