@@ -389,8 +389,35 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
         new_entry = _replace(entry, name=name, parts=tuple(parts))
         self._multisets[ms_index] = new_entry
 
+    def _validation_error(self) -> Optional[str]:
+        checks = (
+            ("#multi-edit-bank", "bank", 0, 127),
+            ("#multi-edit-performance", "performance", 0, 49),
+            ("#multi-edit-level", "level", 0, 127),
+            ("#multi-edit-flag", "flag", 0, 1),
+        )
+        for widget_id, name, lo, hi in checks:
+            try:
+                raw = self.query_one(widget_id, Input).value
+            except Exception:  # noqa: S112
+                continue
+            try:
+                value = int(raw)
+            except (TypeError, ValueError):
+                return f"{name} must be {lo}-{hi}"
+            if value < lo or value > hi:
+                return f"{name} must be {lo}-{hi}"
+        return None
+
     def action_arm(self) -> None:
         self._collect()
+        error = self._validation_error()
+        if error is not None:
+            try:
+                self.query_one("#multi-edit-state", Static).update(error)
+            except Exception:  # noqa: S110
+                pass
+            return
         self._armed = True
         try:
             self.query_one("#multi-edit-state", Static).update(
@@ -410,6 +437,13 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
             return
         self._armed = False
         self._collect()
+        error = self._validation_error()
+        if error is not None:
+            try:
+                self.query_one("#multi-edit-state", Static).update(error)
+            except Exception:  # noqa: S110
+                pass
+            return
         app = None
         try:
             app = self.app
@@ -824,6 +858,12 @@ class KwsedApp(App[None]):
                 destination, original = args[0], args[1]
                 if kind is None:
                     kind = banks.Kind.PATCH
+        if kind is None or destination is None or original is None:
+            try:
+                self.notify_status("could not record the write for undo", refused=True)
+            except Exception:  # noqa: S110
+                pass
+            return
         label = f"bank {destination}"
         record = _undo.Record(label=label, payload=(kind, destination, original))
         self._undo_log.push(record)
