@@ -57,12 +57,14 @@ __all__ = [
     "load_last_port",
     "load_last_recv_port",
     "load_port_pair",
+    "load_scan_offer_dismissed",
     "migrate_legacy_config",
     "save_channel",
     "save_device_id",
     "save_last_port",
     "save_last_recv_port",
     "save_ports",
+    "save_scan_offer_dismissed",
 ]
 
 _settings = bind("kwsed", DEFAULT_PATH)
@@ -102,3 +104,13 @@ def load_port_pair(path: str | None = None) -> tuple[str, str] | None:
     if not send:
         return None
     return (send, _settings.load_recv_port(path) or send)
+
+
+def load_scan_offer_dismissed(path: str | None = None) -> bool:
+    """Whether the user chose "don't ask again" for the scan offer."""
+    return bool(_settings.load_ui_bool("scan.offer_dismissed", path, default=False))
+
+
+def save_scan_offer_dismissed(value: bool, path: str | None = None) -> None:
+    """Remember the scan offer's "don't ask again" answer."""
+    _settings.save_ui_state("scan.offer_dismissed", value, path)

@@ -66,7 +66,7 @@ def test_the_legend_matches_the_family() -> None:
     # legend is a promise about which keys work, and this one does.
     # "m channels" is kwsed's own hint, so it is passed as an extra and lands
     # where the family leaves room for one -- after "n note", before "i device".
-    assert not conformance.check_legend(KEY_HINTS, extras=("m channels",))
+    assert not conformance.check_legend(KEY_HINTS, extras=("m channels", "S scan"))
 
 
 def test_the_vocabulary_is_declared() -> None:

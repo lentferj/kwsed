@@ -68,6 +68,7 @@ from kws import banks
 from kws import messages as m
 from kws import catalog as cat
 from kws import livenames as _livenames
+from kws import scan as _scan
 
 # The legend's wrapping and the widget that draws it are the family's; see
 # src/vinsynlib/keys.py and src/vinsynlib/ui/hints.py, which carry the
@@ -135,6 +136,7 @@ KEY_HINTS = (
     # `multi` subcommand keeps the instrument's own word for the object, which
     # docs/UX-SPEC.md section 2 permits; the legend names what the key does.
     "m channels",
+    "S scan",
     "i device",
     "? help",
     "q quit",
@@ -422,6 +424,7 @@ class KwsedApp(App[None]):
         Binding("question_mark", "help", "Help"),
         Binding("tab", "switch_pane", "Switch pane"),
         Binding("q", "quit", "Quit"),
+        Binding("S", "scan_device", "Scan"),
     ]
 
     def __init__(
@@ -462,6 +465,18 @@ class KwsedApp(App[None]):
         self._busy_gate = BusyGate()
         self._exchange = threading.Lock()
         self._filling = False
+        #: Scan state
+        self._scanning = False
+        self._scan_cancel = threading.Event()
+        if config_path is not None:
+            try:
+                from kws import config as _cfg
+
+                self._scan_offer_dismissed = _cfg.load_scan_offer_dismissed(config_path)
+            except Exception:
+                self._scan_offer_dismissed = False
+        else:
+            self._scan_offer_dismissed = False
 
     @property
     def _busy(self) -> bool:
@@ -896,6 +911,98 @@ class KwsedApp(App[None]):
             f"read {len(names)} {kind} names from {entry.label}"
             + (f"; {differing} differ from the catalog" if differing else "")
         )
+
+    def action_scan_device(self) -> None:
+        if self._scanning:
+            self._scan_cancel.set()
+            self.notify_status("stopping the scan after the current bank", refused=True)
+            return
+        if self._busy:
+            self.notify_status("busy", refused=True)
+            return
+        if self._live_path is None:
+            self.notify_status(
+                "this is the demo -- it invents its names, and scanning "
+                "it would write fiction into the live cache. Nothing has "
+                "been sent.",
+                refused=True,
+            )
+            return
+        if not self._exchange.acquire(blocking=False):
+            self.notify_status("busy", refused=True)
+            return
+        self._scan_cancel.clear()
+        self._scanning = True
+        self.push_screen(_scan.ScanScreen(self._scan_cancel))
+        self._scan_worker()
+
+    @work(thread=True)
+    def _scan_worker(self) -> None:
+        done = 0
+        total = len(self._pairs)
+        try:
+            for number, kind in self._pairs:
+                if self._scan_cancel.is_set():
+                    break
+                try:
+                    with self._busy_gate, self._lock:
+                        result_kind, names = self.device.read_bank_names(number, kind)
+                except Exception as exc:
+                    self.call_from_thread(
+                        self.notify_status, f"scan {number}: {exc}", refused=True
+                    )
+                    continue
+                self.call_from_thread(self._adopt, number, result_kind, names)
+                self.call_from_thread(
+                    self._scan_progress, f"scanned {banks.bank(number).id} {kind}"
+                )
+                done += 1
+        finally:
+            self._exchange.release()
+            self.call_from_thread(self._scan_done, done, total)
+
+    def _scan_progress(self, line: str) -> None:
+        screen = self.screen
+        if screen and isinstance(screen, _scan.ScanScreen):
+            screen.set_progress(line)
+
+    def _scan_done(self, done: int, total: int) -> None:
+        self._scanning = False
+        screen = self.screen
+        if screen and isinstance(screen, _scan.ScanScreen):
+            self.pop_screen()
+        if done:
+            self.notify_status(f"scanned {done} of {total} bank(s)")
+        else:
+            self.notify_status("scan stopped")
+
+    def _has_cached_names(self) -> bool:
+        return any(self.catalog.is_live(banks.bank(n).id, 0, k) for n, k in self._pairs)
+
+    def _maybe_offer_scan(self) -> None:
+        if (
+            self._live_path is None
+            or bool(self.catalog)
+            or self._has_cached_names()
+            or self._busy
+            or self._scanning
+            or self._scan_offer_dismissed
+        ):
+            return
+        self.push_screen(
+            _scan.ScanOfferScreen(_scan.SCAN_OFFER), self._scan_offer_answered
+        )
+
+    def _scan_offer_answered(self, answer: str | None) -> None:
+        if answer == "never":
+            self._scan_offer_dismissed = True
+            if self._config_path is not None:
+                from kws import config as _cfg
+
+                _cfg.save_scan_offer_dismissed(True, self._config_path)
+            return
+        if answer == "scan":
+            self.action_scan_device()
 
     def action_search(self) -> None:
         def done(text: Optional[str]) -> None:
