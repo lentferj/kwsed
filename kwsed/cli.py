@@ -25,6 +25,7 @@ from typing import Any, Callable, Dict, List, Optional
 from vinsynlib import cli, midi
 from kws import banks
 from kws import catalog as cat
+from kws import livenames as _livenames
 
 __all__ = ["main", "build_parser"]
 
@@ -48,7 +49,9 @@ def _table(rows: List[List[str]], headers: List[str]) -> str:
 
 
 def _catalog(args: argparse.Namespace) -> cat.Catalog:
-    return cat.load(getattr(args, "catalog", None))
+    catalog = cat.load(getattr(args, "catalog", None))
+    _livenames.apply_to(catalog, getattr(args, "live_names", None))
+    return catalog
 
 
 def _cmd_banks(_device: Any, args: argparse.Namespace) -> None:
@@ -157,6 +160,12 @@ def _cmd_dump(device: Any, args: argparse.Namespace) -> None:
     dump = device.read_bank(args.bank, args.kind)
     catalog = _catalog(args)
     names = dump.names()
+    if not getattr(args, "demo", False):
+        flat = {
+            _livenames.key(dump.bank.id, number, dump.kind): name
+            for number, name in names.items()
+        }
+        _livenames.save(flat, getattr(args, "live_names", None))
     print(
         f"{dump.bank.label} — {_plural(dump.kind)} ({len(names)} named of {dump.count})"
     )
@@ -362,6 +371,16 @@ def build_parser() -> argparse.ArgumentParser:
         catalog=True,
         config=False,
         favorites=False,
+    )
+    parser.add_argument(
+        "--live-names",
+        "--live",
+        dest="live_names",
+        default=None,
+        help=(
+            "cache of names read off the unit "
+            f"(default: {_livenames.default_path()}; safe to delete)"
+        ),
     )
     sub = parser.add_subparsers(dest="command", required=True)
 

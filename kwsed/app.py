@@ -65,6 +65,7 @@ from textual.widgets import DataTable, Header, Input, Label, Static
 from kws import banks
 from kws import messages as m
 from kws import catalog as cat
+from kws import livenames as _livenames
 
 # The legend's wrapping and the widget that draws it are the family's; see
 # src/vinsynlib/keys.py and src/vinsynlib/ui/hints.py, which carry the
@@ -448,6 +449,7 @@ class KwsedApp(App[None]):
         catalog: Optional[cat.Catalog] = None,
         favorites: Optional[Favorites] = None,
         config_path: Optional[str] = None,
+        live_path: Optional[str] = None,
     ) -> None:
         super().__init__()
         self.device = device
@@ -460,6 +462,9 @@ class KwsedApp(App[None]):
         self._config_path = config_path
         self.view_mode = VIEW_ALL
         self.catalog = catalog if catalog is not None else cat.empty()
+        #: Where hardware-read names are cached between runs. None disables
+        #: persistence, as in tests and --demo.
+        self._live_path = live_path
         self._lock = threading.RLock()
         #: The left pane lists bank-and-kind pairs, because a Wavestation
         #: bank holds 50 performances *and* 35 patches and they are
@@ -516,6 +521,8 @@ class KwsedApp(App[None]):
         # down, rather than a character glued to the name.
         for label, key in (("♥", "fav"), ("#", "num"), ("name", "name")):
             slots.add_column(label, key=key)
+        if self._live_path is not None:
+            _livenames.apply_to(self.catalog, self._live_path)
         self._fill(self._current_pair)
         table.focus()
         self.notify_status(
@@ -852,6 +859,13 @@ class KwsedApp(App[None]):
         differing = sum(1 for n in names if self.catalog.differs(entry.id, n, kind))
         if self._current_pair == (entry.number, kind):
             self._fill(self._current_pair)
+        if self._live_path is not None:
+            flat = {
+                _livenames.key(entry.id, number, kind): name
+                for number, name in names.items()
+            }
+            # Merge rather than replace: other banks' names must survive.
+            _livenames.save(flat, self._live_path)
         self.notify_status(
             f"read {len(names)} {kind} names from {entry.label}"
             + (f"; {differing} differ from the catalog" if differing else "")
@@ -1012,6 +1026,16 @@ def build_parser() -> argparse.ArgumentParser:
         config=True,
         favorites=True,
     )
+    parser.add_argument(
+        "--live-names",
+        "--live",
+        dest="live_names",
+        default=None,
+        help=(
+            "cache of names read off the unit "
+            f"(default: {_livenames.default_path()}; safe to delete)"
+        ),
+    )
     return parser
 
 
@@ -1089,8 +1113,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         # at all. Every other startup failure here leaves by sys.exit; these
         # two used to print a traceback.
         raise SystemExit(f"error: {exc}")
+    live_path = (
+        None
+        if getattr(args, "demo", False)
+        else (getattr(args, "live_names", None) or _livenames.default_path())
+    )
     app = KwsedApp(
-        device, catalog=cat.load(args.catalog), favorites=store, config_path=config_path
+        device,
+        catalog=cat.load(args.catalog),
+        favorites=store,
+        config_path=config_path,
+        live_path=live_path,
     )
     try:
         app.run()
