@@ -22,7 +22,7 @@ import os
 import sys
 from typing import Any, Callable, Dict, List, Optional
 
-from vinsynlib import cli, midi, render
+from vinsynlib import cli, midi, render, spec
 from kws import banks
 from kws import catalog as cat
 from kws import livenames as _livenames
@@ -210,7 +210,7 @@ def _cmd_multi(device: Any, args: argparse.Namespace) -> int:
                 f"    ch {part.channel:2d}  {label:7s} perf "
                 f"{part.performance:02d}  level {part.level}"
             )
-    return 0
+    return spec.EXIT_OK
 
 
 def _cmd_send(device: Any, args: argparse.Namespace) -> int:
@@ -227,11 +227,11 @@ def _cmd_send(device: Any, args: argparse.Namespace) -> int:
         size = os.path.getsize(args.file)
     except OSError as exc:
         print(f"{args.file} cannot be read ({exc})")
-        return 2
+        return spec.EXIT_USAGE
     packets = [p for p in dumps.read_syx_file(args.file)]
     if not packets:
         print(f"{args.file} holds no Wavestation message kwsed recognises")
-        return 2
+        return spec.EXIT_USAGE
     sendable = [
         p
         for p in packets
@@ -244,7 +244,7 @@ def _cmd_send(device: Any, args: argparse.Namespace) -> int:
     ]
     if not sendable:
         print(f"{args.file} is a {packets[0].function_name}, which kwsed does not send")
-        return 2
+        return spec.EXIT_USAGE
     if len(sendable) > 1:
         print(
             f"{args.file} holds {len(sendable)} bank dumps; only the "
@@ -268,7 +268,7 @@ def _cmd_send(device: Any, args: argparse.Namespace) -> int:
             f"{args.file} decodes to {len(payload)} bytes; a {kind} bank "
             f"is {sizes[kind]}. Refusing to send a short bank."
         )
-        return 2
+        return spec.EXIT_USAGE
 
     destination = bk.bank(args.to)
     if not destination.writable:
@@ -277,7 +277,7 @@ def _cmd_send(device: Any, args: argparse.Namespace) -> int:
             f"that can are: "
             f"{', '.join(b.label for b in bk.writable_banks())}."
         )
-        return 2
+        return spec.EXIT_USAGE
 
     plural = _plural(kind)
     print(f"about to replace: {destination.label}, all {plural}")
@@ -289,7 +289,7 @@ def _cmd_send(device: Any, args: argparse.Namespace) -> int:
         except Exception as exc:
             print(f"     it now holds: could not be read ({exc})")
             print("Refusing to write a bank that cannot first be read and backed up.")
-            return 1
+            return spec.EXIT_ERROR
         print("     it now holds: (wave sequence names are not read)")
     else:
         try:
@@ -307,7 +307,7 @@ def _cmd_send(device: Any, args: argparse.Namespace) -> int:
         except Exception as exc:
             print(f"     it now holds: could not be read ({exc})")
             print("Refusing to write a bank that cannot first be read and backed up.")
-            return 1
+            return spec.EXIT_ERROR
 
     if not args.yes:
         print(
@@ -315,17 +315,17 @@ def _cmd_send(device: Any, args: argparse.Namespace) -> int:
             "this replaces the whole bank and no power cycle brings it "
             "back."
         )
-        return 0
+        return spec.EXIT_OK
 
     where = args.backup_dir or backup.default_dir()
     result = device.write_bank(destination.number, kind, payload, backup_dir=where)
     print(f"\nbacked up to: {result['backup']}")
     if result["verified"] is True:
         print("written and verified by reading it back")
-        return 0
+        return spec.EXIT_OK
     print(f"written, but the read-back does NOT match: {result['mismatch']}")
     print("The backup above holds what was there before.")
-    return 1
+    return spec.EXIT_ERROR
 
 
 def _cmd_backup(_device: Any, args: argparse.Namespace) -> int:
@@ -337,7 +337,7 @@ def _cmd_backup(_device: Any, args: argparse.Namespace) -> int:
     )
     if not entries:
         print(f"no backups in {directory}")
-        return 0
+        return spec.EXIT_OK
     rows = [
         [
             entry.kind or "?",
@@ -348,7 +348,7 @@ def _cmd_backup(_device: Any, args: argparse.Namespace) -> int:
         for entry in entries
     ]
     print(render.table(["kind", "slot", "name", "saved"], rows))
-    return 0
+    return spec.EXIT_OK
 
 
 _COMMANDS: Dict[str, Callable[[Any, argparse.Namespace], Any]] = {
