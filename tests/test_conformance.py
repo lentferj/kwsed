@@ -68,7 +68,14 @@ def test_the_legend_matches_the_family() -> None:
     # where the family leaves room for one -- after "n note", before "i device".
     assert not conformance.check_legend(
         KEY_HINTS,
-        extras=("m channels", "e edit multi", "S scan", "V rating filter", "z undo"),
+        extras=(
+            "m channels",
+            "e edit multi",
+            "S scan",
+            "V rating filter",
+            "z undo",
+            "w write gate",
+        ),
     )
 
 

@@ -143,6 +143,7 @@ KEY_HINTS = (
     "S scan",
     "V rating filter",
     "z undo",
+    "w write gate",
     "i device",
     "? help",
     "q quit",
@@ -692,6 +693,7 @@ class KwsedApp(App[None]):
         Binding("S", "scan_device", "Scan"),
         Binding("V", "rating_filter", "Rating filter"),
         Binding("z", "undo", "Undo"),
+        Binding("w", "toggle_write_gate", "Write gate"),
     ]
 
     def __init__(
@@ -702,7 +704,7 @@ class KwsedApp(App[None]):
         favorites: Optional[Favorites] = None,
         config_path: Optional[str] = None,
         live_path: Optional[str] = None,
-        allow_write: bool = True,
+        allow_write: bool = False,
     ) -> None:
         super().__init__()
         self.device = device
@@ -954,6 +956,10 @@ class KwsedApp(App[None]):
             self.notify_status("busy", refused=True)
             return
         self._undo_worker(records)
+
+    def action_toggle_write_gate(self) -> None:
+        self._write_gate.toggle()
+        self.notify_status(self._write_gate.describe())
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -1779,6 +1785,7 @@ def build_parser() -> argparse.ArgumentParser:
         catalog=True,
         config=True,
         favorites=True,
+        allow_write=True,
     )
     parser.add_argument(
         "--live-names",
@@ -1883,6 +1890,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         favorites=store,
         config_path=config_path,
         live_path=live_path,
+        allow_write=getattr(args, "allow_write", False),
     )
     try:
         app.run()
