@@ -79,6 +79,7 @@ from kws import scan as _scan
 # name, so the stylesheet rule still matches.
 from vinsynlib.keys import wrap_blocks  # re-exported: it is in __all__
 from vinsynlib.ui.hints import KeyHints
+from vinsynlib.ui.modals import RatingFilter, RatingFilterScreen
 
 #: Family quiet set plus this tool's own bridge errors.
 _BRIDGE_ERRORS: tuple[type[BaseException], ...] = (
@@ -137,6 +138,7 @@ KEY_HINTS = (
     # docs/UX-SPEC.md section 2 permits; the legend names what the key does.
     "m channels",
     "S scan",
+    "V rating filter",
     "i device",
     "? help",
     "q quit",
@@ -425,6 +427,7 @@ class KwsedApp(App[None]):
         Binding("tab", "switch_pane", "Switch pane"),
         Binding("q", "quit", "Quit"),
         Binding("S", "scan_device", "Scan"),
+        Binding("V", "rating_filter", "Rating filter"),
     ]
 
     def __init__(
@@ -446,6 +449,7 @@ class KwsedApp(App[None]):
         #: working directory.
         self._config_path = config_path
         self.view_mode = VIEW_ALL
+        self.rating_filter: RatingFilter | None = None
         self.catalog = catalog if catalog is not None else cat.empty()
         #: Where hardware-read names are cached between runs. None disables
         #: persistence, as in tests and --demo.
@@ -577,7 +581,7 @@ class KwsedApp(App[None]):
             if not numbers:
                 continue
             out.extend(s for s in banks.slots(number, kind) if s.number in numbers)
-        return out
+        return self._by_rating(out)
 
     def _visible(self, pair: Tuple[int, str]) -> List[banks.Slot]:
         number, kind = pair
@@ -587,7 +591,24 @@ class KwsedApp(App[None]):
         if self.view_mode == VIEW_BANK_FAVOURITES:
             marked = self._favorite_keys(banks.bank(number).id, kind)
             entries = [e for e in entries if e.number in marked]
-        return entries
+        return self._by_rating(entries)
+
+    def _by_rating(self, entries: List[banks.Slot]) -> List[banks.Slot]:
+        if self.rating_filter is None:
+            return entries
+        out = []
+        for entry in entries:
+            if self.favorites is None:
+                rating = 0
+            else:
+                fav = self.favorites.get(entry.bank.id, entry.number)
+                rating = fav.rating if fav is not None else 0
+            if self.rating_filter.at_least:
+                if rating >= self.rating_filter.stars:
+                    out.append(entry)
+            elif rating == self.rating_filter.stars:
+                out.append(entry)
+        return out
 
     def _cursor_entry(self) -> Optional[banks.Slot]:
         """The row under the cursor, or None."""
@@ -744,6 +765,28 @@ class KwsedApp(App[None]):
             )
         else:
             self.notify_status(f"{VIEW_LABELS[self.view_mode]} - {shown}")
+
+    def action_rating_filter(self) -> None:
+        if self.favorites is None:
+            self.notify_status("no favourites database")
+            return
+        current = self.rating_filter or RatingFilter(stars=0, at_least=False)
+
+        def apply(value: RatingFilter | None) -> None:
+            if value is None:
+                return
+            if value.stars == 0 and value.at_least:
+                self.rating_filter = None
+                self.notify_status("rating filter cleared")
+            else:
+                self.rating_filter = value
+                if value.at_least:
+                    self.notify_status(f"rating filter: at least {value.stars} star(s)")
+                else:
+                    self.notify_status(f"rating filter: exactly {value.stars} star(s)")
+            self._refill_keeping_place()
+
+        self.push_screen(RatingFilterScreen(current), apply)
 
     def _refill_keeping_place(self) -> None:
         table = self.query_one("#slot-table", DataTable)
