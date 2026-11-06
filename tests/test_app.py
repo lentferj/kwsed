@@ -21,6 +21,8 @@ from kws import banks
 from kws import catalog as cat
 from kwsed.app import KwsedApp
 from kwsed.demo import DemoDevice
+from vinsynlib.ui.report import ReportScreen as SharedReportScreen
+from vinsynlib.ui.work import BusyGate
 
 pytestmark = pytest.mark.asyncio
 
@@ -129,3 +131,19 @@ class TestDeviceInfoIsGated:
                 "identify must not run while the bridge is busy"
             )
             app._busy = False
+
+
+class TestSharedUiAdoption:
+    async def test_the_busy_gate_is_the_shared_one(self, app):
+        assert isinstance(app._busy_gate, BusyGate)
+
+    async def test_help_uses_the_shared_report_frame(self, app):
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.action_help()
+            for _ in range(5):
+                await pilot.pause()
+            assert isinstance(app.screen, SharedReportScreen)
+            await pilot.press("escape")
+            for _ in range(5):
+                await pilot.pause()

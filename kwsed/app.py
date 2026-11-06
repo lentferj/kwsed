@@ -55,6 +55,8 @@ from typing import (
 )
 
 from vinsynlib import cli
+from vinsynlib.ui.report import ReportScreen
+from vinsynlib.ui.work import QUIET_BRIDGE_ERRORS, BusyGate, close_when_idle
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -76,6 +78,15 @@ from kws import livenames as _livenames
 # name, so the stylesheet rule still matches.
 from vinsynlib.keys import wrap_blocks  # re-exported: it is in __all__
 from vinsynlib.ui.hints import KeyHints
+
+#: Family quiet set plus this tool's own bridge errors.
+_BRIDGE_ERRORS: tuple[type[BaseException], ...] = (
+    *QUIET_BRIDGE_ERRORS,
+    ValueError,
+    LookupError,
+    RuntimeError,
+    SystemError,
+)
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from kws.favorites import Favorite, Favorites
@@ -128,35 +139,6 @@ KEY_HINTS = (
     "? help",
     "q quit",
 )
-
-
-class ReportScreen(ModalScreen[None]):
-    """A scrollable block of text."""
-
-    DEFAULT_CSS = """
-    ReportScreen { align: center middle; }
-    ReportScreen > Vertical {
-        width: 84; height: 80%; border: thick $accent;
-        background: $surface; padding: 1 2;
-    }
-    ReportScreen .body { height: 1fr; overflow-y: auto; }
-    """
-
-    BINDINGS = [Binding("escape", "close", "Close"), Binding("q", "close", "Close")]
-
-    def __init__(self, title: str, body: str) -> None:
-        super().__init__()
-        self._title = title
-        self._body = body
-
-    def compose(self) -> ComposeResult:
-        with Vertical():
-            yield Label(f"[b]{self._title}[/b]")
-            yield Static(self._body, classes="body")
-            yield Static("[dim]esc / q to close[/dim]")
-
-    def action_close(self) -> None:
-        self.dismiss(None)
 
 
 def _bank_label(sysex_byte: int) -> str:
@@ -477,8 +459,35 @@ class KwsedApp(App[None]):
         ]
         self._current_pair = self._pairs[0]
         self._current: List[banks.Slot] = []
-        self._busy = False
+        self._busy_gate = BusyGate()
+        self._exchange = threading.Lock()
         self._filling = False
+
+    @property
+    def _busy(self) -> bool:
+        return (
+            self._busy_gate.check() is not None
+            or self._busy_gate.is_busy()
+            or self._exchange.locked()
+        )
+
+    @_busy.setter
+    def _busy(self, value: bool) -> None:
+        if value:
+            if not self._exchange.locked():
+                self._exchange.acquire()
+            try:
+                self._busy_gate.refuse("busy")
+            except RuntimeError:
+                pass
+        else:
+            if self._exchange.locked():
+                try:
+                    self._exchange.release()
+                except RuntimeError:
+                    pass
+            with self._busy_gate._lock:
+                self._busy_gate._refused = None
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -810,16 +819,26 @@ class KwsedApp(App[None]):
         if self._busy:
             self.notify_status("busy", refused=True)
             return
+        if not self._exchange.acquire(blocking=False):
+            self.notify_status("busy", refused=True)
+            return
         self._select_worker(self._current[row])
 
     @work(thread=True)
     def _select_worker(self, entry: banks.Slot) -> None:
         """**MIDI only.**"""
+        failure: BaseException | None = None
         try:
-            with self._lock:
+            with self._busy_gate, self._lock:
                 self.device.select(entry)
-        except Exception as exc:
-            self.call_from_thread(self.notify_status, f"select: {exc}", refused=True)
+        except _BRIDGE_ERRORS as exc:
+            failure = exc
+        finally:
+            self._exchange.release()
+        if failure is not None:
+            self.call_from_thread(
+                self.notify_status, f"select: {failure}", refused=True
+            )
             return
         self.call_from_thread(
             self.notify_status,
@@ -832,25 +851,32 @@ class KwsedApp(App[None]):
         if self._busy:
             self.notify_status("busy", refused=True)
             return
-        self._busy = True
+        if not self._exchange.acquire(blocking=False):
+            self.notify_status("busy", refused=True)
+            return
         self._read_worker(*self._current_pair)
 
     @work(thread=True)
     def _read_worker(self, bank_id: int, kind: str) -> None:
         """**MIDI only** -- the catalog is updated on the main thread."""
+        failure: BaseException | None = None
+        result_kind = kind
+        result_names: Any = None
         try:
             self.call_from_thread(
                 self.notify_status,
                 f"asking for bank {bank_id} {kind}s in one message (silent)...",
             )
-            with self._lock:
-                kind, names = self.device.read_bank_names(bank_id, kind)
-        except Exception as exc:
-            self.call_from_thread(self.notify_status, f"read: {exc}", refused=True)
-            return
+            with self._busy_gate, self._lock:
+                result_kind, result_names = self.device.read_bank_names(bank_id, kind)
+        except _BRIDGE_ERRORS as exc:
+            failure = exc
         finally:
-            self._busy = False
-        self.call_from_thread(self._adopt, bank_id, kind, names)
+            self._exchange.release()
+        if failure is not None:
+            self.call_from_thread(self.notify_status, f"read: {failure}", refused=True)
+            return
+        self.call_from_thread(self._adopt, bank_id, result_kind, result_names)
 
     def _adopt(self, bank_id: int, kind: str, names: Dict[int, str]) -> None:
         entry = banks.bank(bank_id)
@@ -893,20 +919,26 @@ class KwsedApp(App[None]):
         if self._busy:
             self.notify_status("busy", refused=True)
             return
-        self._busy = True
+        if not self._exchange.acquire(blocking=False):
+            self.notify_status("busy", refused=True)
+            return
         self._multi_worker()
 
     @work(thread=True)
     def _multi_worker(self) -> None:
         """**MIDI only** -- the screen is built on the main thread."""
+        failure: BaseException | None = None
+        raw: Any = None
         try:
-            with self._lock:
+            with self._busy_gate, self._lock:
                 raw = self.device.read_multi()
-        except Exception as exc:
-            self.call_from_thread(self.notify_status, f"multi: {exc}", refused=True)
-            return
+        except _BRIDGE_ERRORS as exc:
+            failure = exc
         finally:
-            self._busy = False
+            self._exchange.release()
+        if failure is not None:
+            self.call_from_thread(self.notify_status, f"multi: {failure}", refused=True)
+            return
         self.call_from_thread(self._show_multi, raw)
 
     def _show_multi(self, raw: bytes) -> None:
@@ -930,20 +962,28 @@ class KwsedApp(App[None]):
         if self._busy:
             self.notify_status("busy", refused=True)
             return
-        self._busy = True
+        if not self._exchange.acquire(blocking=False):
+            self.notify_status("busy", refused=True)
+            return
         self._info_worker()
 
     @work(thread=True)
     def _info_worker(self) -> None:
         """**MIDI only** -- the report is built on the main thread."""
+        failure: BaseException | None = None
+        fields: Any = None
         try:
-            with self._lock:
+            with self._busy_gate, self._lock:
                 fields = self.device.identify()
-        except Exception as exc:
-            self.call_from_thread(self.notify_status, f"device: {exc}", refused=True)
-            return
+        except _BRIDGE_ERRORS as exc:
+            failure = exc
         finally:
-            self._busy = False
+            self._exchange.release()
+        if failure is not None:
+            self.call_from_thread(
+                self.notify_status, f"device: {failure}", refused=True
+            )
+            return
         self.call_from_thread(self._show_info, fields)
 
     def _show_info(self, fields: Optional[Dict[str, Any]]) -> None:
@@ -1129,7 +1169,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         app.run()
     finally:
         store.close()
-        device.close()
+        with close_when_idle(device, gate=app._busy_gate):
+            pass
     return 0
 
 
