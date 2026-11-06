@@ -67,7 +67,8 @@ def test_the_legend_matches_the_family() -> None:
     # "m channels" is kwsed's own hint, so it is passed as an extra and lands
     # where the family leaves room for one -- after "n note", before "i device".
     assert not conformance.check_legend(
-        KEY_HINTS, extras=("m channels", "S scan", "V rating filter", "z undo")
+        KEY_HINTS,
+        extras=("m channels", "e edit multi", "S scan", "V rating filter", "z undo"),
     )
 
 

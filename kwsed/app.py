@@ -139,6 +139,7 @@ KEY_HINTS = (
     # `multi` subcommand keeps the instrument's own word for the object, which
     # docs/UX-SPEC.md section 2 permits; the legend names what the key does.
     "m channels",
+    "e edit multi",
     "S scan",
     "V rating filter",
     "z undo",
@@ -180,16 +181,26 @@ class MultiScreen(ModalScreen[None]):
     MultiScreen DataTable { height: 1fr; }
     """
 
-    BINDINGS = [Binding("escape", "close", "Close"), Binding("q", "close", "Close")]
+    BINDINGS = [
+        Binding("escape", "close", "Close"),
+        Binding("q", "close", "Close"),
+        Binding("e", "edit", "Edit", show=False),
+    ]
 
     def __init__(
         self,
         multisets: Sequence[Any],
         bank_label: Optional[Callable[[int], str]] = None,
+        on_edit: Optional[Callable[[Sequence[Any]], None]] = None,
     ) -> None:
         super().__init__()
         self._multisets = list(multisets)
         self._bank_label = bank_label or (lambda n: str(n))
+        self._on_edit = on_edit
+
+    def action_edit(self) -> None:
+        if self._on_edit is not None:
+            self._on_edit(self._multisets)
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -231,6 +242,98 @@ class MultiScreen(ModalScreen[None]):
         half = (len(lines) + 1) // 2
         rows = [f"{a:38s}{b}" for a, b in zip(lines[:half], lines[half:] + [""])]
         self.query_one("#multi-detail", Static).update("\n".join(rows))
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
+class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
+    """Edit the Multi Mode Setup (0x06). **Destructive.**"""
+
+    DEFAULT_CSS = """
+    MultiEditScreen { align: center middle; }
+    MultiEditScreen > Vertical {
+        width: 80; height: auto; border: thick $error;
+        background: $surface; padding: 1 2;
+    }
+    MultiEditScreen .armed { color: $error; text-style: bold; }
+    """
+
+    BINDINGS = [
+        Binding("escape", "close", "Cancel"),
+        Binding("q", "close", "Cancel"),
+        Binding("a", "arm", "Arm", show=False),
+        Binding("w", "fire", "Write", show=False),
+    ]
+
+    def __init__(
+        self,
+        *,
+        multisets: Sequence[Any],
+        device: Any = None,
+        on_write: Optional[Callable[[bytes], Any]] = None,
+        backup_dir: Optional[str] = None,
+    ) -> None:
+        super().__init__()
+        self._multisets = list(multisets)
+        self._device = device
+        self._on_write = on_write
+        self._backup_dir = backup_dir
+        self._armed = False
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Label("[b]Edit Multi Mode Setup[/b]")
+            yield Static(f"{len(self._multisets)} multisets", classes="what")
+            yield Static("", id="multi-edit-state")
+            yield Static("[dim]a to arm, then w to write. esc cancels.[/dim]")
+
+    def action_arm(self) -> None:
+        self._armed = True
+        self.query_one("#multi-edit-state", Static).update(
+            "[b]ARMED[/b] - w writes the Multi Mode Setup. Nothing sent yet."
+        )
+
+    def action_fire(self) -> None:
+        if not self._armed:
+            self.query_one("#multi-edit-state", Static).update(
+                "[dim]not armed - press a first[/dim]"
+            )
+            return
+        self._armed = False
+        from kws import multi as multi_mod
+
+        encoded = multi_mod.encode(self._multisets)
+        try:
+            if self._on_write is not None:
+                result = self._on_write(encoded)
+            else:
+                device = self._device
+                kwargs: Dict[str, Any] = {}
+                if self._backup_dir is not None:
+                    kwargs["backup_dir"] = self._backup_dir
+                else:
+                    try:
+                        from kws import backup as _backup
+
+                        kwargs["backup_dir"] = _backup.default_dir()
+                    except Exception:  # noqa: S110
+                        pass
+                kwargs["verify"] = True
+                result = device.write_multi(encoded, **kwargs)
+        except Exception as exc:
+            self.query_one("#multi-edit-state", Static).update(
+                f"[b]write failed[/b] {exc}"
+            )
+            return
+        try:
+            app = self.app
+            if hasattr(app, "_record_write"):
+                payload = result if isinstance(result, dict) else {"backup": None}
+                app._record_write(payload)
+        except Exception:  # noqa: S110
+            pass
+        self.dismiss(result if isinstance(result, dict) else {"result": result})
 
     def action_close(self) -> None:
         self.dismiss(None)
@@ -420,6 +523,7 @@ class KwsedApp(App[None]):
         # Description matches the legend: `m` opens the channel assignment,
         # which is what a Multiset is. The action keeps its own name.
         Binding("m", "multi", "Channels"),
+        Binding("e", "edit_multi", "Edit multi", show=False),
         Binding("f", "toggle_favorite", "Favourite"),
         Binding("F", "cycle_favorites", "Favourites view"),
         Binding("t", "edit_tags", "Tags"),
@@ -613,18 +717,37 @@ class KwsedApp(App[None]):
 
             import inspect
 
+            is_multi = str(kind).lower() == "multi" or (
+                isinstance(bank, str) and bank.lower() == "multi"
+            )
             kwargs: dict[str, Any] = {}
-            try:
-                sig = inspect.signature(self.device.write_bank)
-                if "backup_dir" in sig.parameters:
-                    from kws import backup as _backup
+            if is_multi:
+                try:
+                    sig = inspect.signature(self.device.write_multi)
+                    if "backup_dir" in sig.parameters:
+                        from kws import backup as _backup
 
-                    kwargs["backup_dir"] = _backup.default_dir()
-                if "verify" in sig.parameters:
-                    kwargs["verify"] = True
-            except (TypeError, ValueError):
-                pass
-            result = self.device.write_bank(bank, kind, bytes(data), **kwargs)
+                        kwargs["backup_dir"] = _backup.default_dir()
+                    if "verify" in sig.parameters:
+                        kwargs["verify"] = True
+                    if "timeout" in sig.parameters:
+                        pass
+                except (TypeError, ValueError, AttributeError):
+                    pass
+                result = self.device.write_multi(bytes(data), **kwargs)
+            else:
+                kwargs = {}
+                try:
+                    sig = inspect.signature(self.device.write_bank)
+                    if "backup_dir" in sig.parameters:
+                        from kws import backup as _backup
+
+                        kwargs["backup_dir"] = _backup.default_dir()
+                    if "verify" in sig.parameters:
+                        kwargs["verify"] = True
+                except (TypeError, ValueError):
+                    pass
+                result = self.device.write_bank(bank, kind, bytes(data), **kwargs)
             if isinstance(result, dict):
                 verified = result.get("verified", True)
                 if verified is False:
@@ -1274,8 +1397,40 @@ class KwsedApp(App[None]):
         except Exception as exc:
             self.notify_status(f"multi: {exc}", refused=True)
             return
-        self.push_screen(MultiScreen(sets, bank_label=lambda n: _bank_label(n)))
+        self._multi_sets = sets
+        self.push_screen(
+            MultiScreen(
+                sets,
+                bank_label=lambda n: _bank_label(n),
+                on_edit=self._edit_multi_sets,
+            )
+        )
         self.notify_status(f"{len(sets)} multisets")
+
+    def _edit_multi_sets(self, sets: Sequence[Any]) -> None:
+        self.push_screen(
+            MultiEditScreen(
+                multisets=sets,
+                device=self.device,
+                backup_dir=None,
+            )
+        )
+
+    def action_edit_multi(self) -> None:
+        sets = getattr(self, "_multi_sets", None)
+        if not sets:
+            self.notify_status("read multi first (m)", refused=True)
+            return
+        if self._busy:
+            self.notify_status("busy", refused=True)
+            return
+        if not self._exchange.acquire(blocking=False):
+            self.notify_status("busy", refused=True)
+            return
+        self.push_screen(
+            MultiEditScreen(multisets=sets, device=self.device, backup_dir=None)
+        )
+        self._exchange.release()
 
     def action_device_info(self) -> None:
         if self._busy:
