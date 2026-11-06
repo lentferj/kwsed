@@ -295,6 +295,9 @@ That writes `kws/data/catalog.json`, which is gitignored. kwsed works
 without it, showing numbers only — and a connected unit can supply every
 name.
 
+Screenshots of the demo browser are captured with
+`python3 tools/capture_screenshots.py`.
+
 Where two files hold the same bank and kind, the **first wins** and the rest
 are reported. Silently keeping whichever was read last would produce a
 catalog matching no actual instrument.

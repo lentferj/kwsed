@@ -154,6 +154,7 @@ module = [
     "build_bank",
     "extract_catalog",
     "measure_send_gap",
+    "capture_screenshots",
 ]
 # The two go together. Allowing an untyped def while still forbidding calls to
 # it would leave every test that calls a local helper reporting the helper
