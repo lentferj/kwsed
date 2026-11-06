@@ -53,14 +53,22 @@ def empty() -> "Catalog":
     return Catalog()
 
 
+def _copy_from_base(base: _Catalog) -> "Catalog":
+    # vinsynlib does not yet expose a public copy/constructor that carries
+    # the live layer, so the private state is read here and only here. A
+    # future library bump that renames these attributes fails in this one
+    # place. Upstream improvement: a public Catalog copy/constructor.
+    c = Catalog(base._entries.values(), source=base.source, generated=base.generated)
+    c._live = dict(base._live)
+    return c
+
+
 def load(path: str | None = None) -> "Catalog":
     try:
         base = _load(path)
     except (OSError, ValueError, json.JSONDecodeError):
         return Catalog()
-    c = Catalog(base._entries.values(), source=base.source, generated=base.generated)
-    c._live = dict(base._live)
-    return c
+    return _copy_from_base(base)
 
 
 __all__ = [

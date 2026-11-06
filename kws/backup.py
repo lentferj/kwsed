@@ -116,7 +116,6 @@ def describe(path: str) -> dict[str, Any]:
         "bank": record.slot or record.name or "?",
         "kind": record.kind,
         "bytes": sum(len(value) for value in record.blocks.values()),
-        "names": [],
         "saved": record.saved,
         "path": path,
     }

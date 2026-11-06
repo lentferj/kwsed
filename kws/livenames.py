@@ -23,6 +23,7 @@ from typing import Any
 
 from kws import favorites
 from vinsynlib import livenames as _livenames
+from vinsynlib.catalog import wire_to_display
 from vinsynlib.livenames import FILE_NAME, key
 
 __all__ = [
@@ -83,7 +84,11 @@ def _rows_to_names(bank_id: str, rows: object) -> dict[str, str]:
         if not isinstance(row, dict):
             continue
         try:
-            number = int(row["pc"])
+            # Legacy rows carried a wire (program-change) number under
+            # "pc", the same convention vinsynlib.catalog.load uses for
+            # "pc" rows; convert to the display number the live layer keys
+            # on, per the family's wire_to_display convention.
+            number = wire_to_display(int(row["pc"]))
             name = row["name"]
         except (KeyError, TypeError, ValueError):
             continue

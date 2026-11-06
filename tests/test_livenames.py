@@ -96,9 +96,9 @@ class TestMigrateLegacy:
         assert result == str(target)
         assert os.path.exists(target)
         loaded = livenames.load(str(target))
-        assert loaded[livenames.key("A", 0)] == "First"
-        assert loaded[livenames.key("A", 5)] == "Fifth"
-        assert loaded[livenames.key("C", 1)] == "Combo"
+        assert loaded[livenames.key("A", 1)] == "First"
+        assert loaded[livenames.key("A", 6)] == "Fifth"
+        assert loaded[livenames.key("C", 2)] == "Combo"
         assert legacy.exists()
 
     def test_migrate_legacy_returns_none_if_target_exists(self, tmp_path):
