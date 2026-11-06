@@ -69,6 +69,8 @@ from kws import messages as m
 from kws import catalog as cat
 from kws import livenames as _livenames
 from kws import scan as _scan
+from kws import undo as _undo
+from kwsed.gate import EditGate
 
 # The legend's wrapping and the widget that draws it are the family's; see
 # src/vinsynlib/keys.py and src/vinsynlib/ui/hints.py, which carry the
@@ -139,6 +141,7 @@ KEY_HINTS = (
     "m channels",
     "S scan",
     "V rating filter",
+    "z undo",
     "i device",
     "? help",
     "q quit",
@@ -428,6 +431,7 @@ class KwsedApp(App[None]):
         Binding("q", "quit", "Quit"),
         Binding("S", "scan_device", "Scan"),
         Binding("V", "rating_filter", "Rating filter"),
+        Binding("z", "undo", "Undo"),
     ]
 
     def __init__(
@@ -438,6 +442,7 @@ class KwsedApp(App[None]):
         favorites: Optional[Favorites] = None,
         config_path: Optional[str] = None,
         live_path: Optional[str] = None,
+        allow_write: bool = True,
     ) -> None:
         super().__init__()
         self.device = device
@@ -468,6 +473,7 @@ class KwsedApp(App[None]):
         self._current: List[banks.Slot] = []
         self._busy_gate = BusyGate()
         self._exchange = threading.Lock()
+        self._write_gate = EditGate(armed=allow_write)
         self._filling = False
         #: Scan state
         self._scanning = False
@@ -481,6 +487,12 @@ class KwsedApp(App[None]):
                 self._scan_offer_dismissed = False
         else:
             self._scan_offer_dismissed = False
+
+        self._undo_log = _undo.make_log(
+            apply_hook=self._undo_apply,
+            gate_hook=self._undo_gate,
+            status_hook=self.notify_status,
+        )
 
     @property
     def _busy(self) -> bool:
@@ -507,6 +519,163 @@ class KwsedApp(App[None]):
                     pass
             with self._busy_gate._lock:
                 self._busy_gate._refused = None
+
+    def _undo_gate(self) -> str | None:
+        return None if self._write_gate.armed else "the write gate is locked"
+
+    def _record_write(  # noqa: C901
+        self, *args: Any, **kwargs: Any
+    ) -> None:
+        kind: Any = kwargs.pop("kind", None)
+        destination: Any = kwargs.pop("destination", kwargs.pop("bank", None))
+        original: Any = kwargs.pop("original", kwargs.pop("data", None))
+        mode: Any = kwargs.pop("mode", None)
+        if kind is None and destination is None and original is None and len(args) == 1:
+            payload = args[0]
+            if isinstance(payload, dict):
+                backup_path = payload.get("backup")
+                destination = payload.get("bank", payload.get("destination"))
+                kind = payload.get("kind")
+                if backup_path is not None:
+                    try:
+                        from kws import backup as _backup
+
+                        loaded = _backup.load(backup_path)
+                        original = loaded.blocks.get("dump")
+                        if destination is None:
+                            destination = loaded.slot
+                        if kind is None:
+                            kind = loaded.kind
+                    except Exception:
+                        original = None
+                args = ()
+        if kind is None or destination is None or original is None:
+            if len(args) >= 3:
+                a, b, c = args[0], args[1], args[2]
+                if isinstance(a, str) and not isinstance(b, str):
+                    kind, destination, original = a, b, c
+                elif isinstance(b, str) and not isinstance(a, str):
+                    destination, kind, original = a, b, c
+                else:
+                    destination, kind, original = a, b, c
+            elif len(args) == 2:
+                destination, original = args[0], args[1]
+                if kind is None:
+                    kind = banks.Kind.PATCH
+        label = f"bank {destination}"
+        record = _undo.Record(label=label, payload=(kind, destination, original))
+        self._undo_log.push(record)
+        if mode is not None:
+            try:
+                self._unit_mode = mode
+            except Exception:  # noqa: S110
+                pass
+
+    def _undo_apply(self, record: _undo.Record) -> bool:  # noqa: C901
+        try:
+            payload = record.payload
+            backup_path: Any = None
+            bank: Any = None
+            kind: Any = None
+            data: Any = None
+            if isinstance(payload, dict):
+                backup_path = payload.get("backup")
+                bank = payload.get("bank", payload.get("destination"))
+                kind = payload.get("kind")
+                data = payload.get("data", payload.get("original"))
+            elif isinstance(payload, (tuple, list)):
+                if len(payload) == 1 and isinstance(payload[0], str):
+                    backup_path = payload[0]
+                elif len(payload) >= 3:
+                    first, second, third = payload[0], payload[1], payload[2]
+                    if isinstance(first, str) and not isinstance(second, str):
+                        kind, bank, data = first, second, third
+                    elif isinstance(second, str) and not isinstance(first, str):
+                        bank, kind, data = first, second, third
+                    else:
+                        bank, kind, data = first, second, third
+                elif len(payload) == 2:
+                    bank, data = payload[0], payload[1]
+                    kind = banks.Kind.PATCH
+            elif isinstance(payload, str):
+                backup_path = payload
+            if backup_path is not None and data is None:
+                from kws import backup as _backup
+
+                loaded = _backup.load(backup_path)
+                data = loaded.blocks.get("dump")
+                if bank is None:
+                    bank = loaded.slot
+                if kind is None:
+                    kind = loaded.kind
+            if bank is None or kind is None or data is None:
+                raise ValueError("incomplete undo payload")
+
+            import inspect
+
+            kwargs: dict[str, Any] = {}
+            try:
+                sig = inspect.signature(self.device.write_bank)
+                if "backup_dir" in sig.parameters:
+                    from kws import backup as _backup
+
+                    kwargs["backup_dir"] = _backup.default_dir()
+                if "verify" in sig.parameters:
+                    kwargs["verify"] = True
+            except (TypeError, ValueError):
+                pass
+            result = self.device.write_bank(bank, kind, bytes(data), **kwargs)
+            if isinstance(result, dict):
+                verified = result.get("verified", True)
+                if verified is False:
+                    return False
+            return True
+        except Exception as exc:
+            if threading.current_thread() is threading.main_thread():
+                self.notify_status(f"undo failed: {exc}", refused=True)
+            return False
+
+    def _undo_settle(
+        self, results: list[bool], failed: list[Any] | None = None
+    ) -> None:
+        for record in reversed(failed or []):
+            self._undo_log.push(record)
+        message = self._undo_log.settle(results)
+        self.notify_status(message)
+
+    @work(thread=True)
+    def _undo_worker(self, records: list[Any]) -> None:
+        results: list[bool] = []
+        failed: list[Any] = []
+        try:
+            for record in records:
+                with self._busy_gate, self._lock:
+                    ok = self._undo_apply(record)
+                results.append(ok)
+                if not ok:
+                    failed.append(record)
+        finally:
+            try:
+                self._exchange.release()
+            except RuntimeError:
+                pass
+        self.call_from_thread(self._undo_settle, results, failed)
+
+    def action_undo(self) -> None:
+        if not self._write_gate.armed:
+            self.notify_status("write gate is locked", refused=True)
+            return
+        if self._busy:
+            self.notify_status("busy", refused=True)
+            return
+        records = self._undo_log.plan(1)
+        if not records:
+            self.notify_status("nothing to undo", refused=True)
+            return
+        if not self._exchange.acquire(blocking=False):
+            self.notify_status("busy", refused=True)
+            return
+        self._undo_worker(records)
 
     def compose(self) -> ComposeResult:
         yield Header()
