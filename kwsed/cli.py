@@ -22,7 +22,7 @@ import os
 import sys
 from typing import Any, Callable, Dict, List, Optional
 
-from vinsynlib import cli, midi
+from vinsynlib import cli, midi, render
 from kws import banks
 from kws import catalog as cat
 from kws import livenames as _livenames
@@ -31,21 +31,12 @@ __all__ = ["main", "build_parser"]
 
 
 def _table(rows: List[List[str]], headers: List[str]) -> str:
-    if not rows:
-        return ""
-    widths = [len(h) for h in headers]
-    for row in rows:
-        for index, cell in enumerate(row):
-            widths[index] = max(widths[index], len(cell))
-    out = [
-        "  ".join(h.ljust(widths[i]) for i, h in enumerate(headers)).rstrip(),
-        "  ".join("-" * widths[i] for i in range(len(headers))),
-    ]
-    for row in rows:
-        out.append(
-            "  ".join(cell.ljust(widths[i]) for i, cell in enumerate(row)).rstrip()
-        )
-    return "\n".join(out)
+    """Thin wrapper around :func:`vinsynlib.render.table`.
+
+    Kept so callers and tests that still name it keep working; the family's
+    renderer is the implementation.
+    """
+    return render.table(headers, rows)
 
 
 def _catalog(args: argparse.Namespace) -> cat.Catalog:
@@ -74,7 +65,7 @@ def _cmd_banks(_device: Any, args: argparse.Namespace) -> None:
                 "writable" if entry.writable else "ROM",
             ]
         )
-    print(_table(rows, ["#", "bank", "performances", "patches", ""]))
+    print(render.table(["#", "bank", "performances", "patches", ""], rows))
 
 
 def _cmd_list(_device: Any, args: argparse.Namespace) -> None:
@@ -89,7 +80,7 @@ def _cmd_list(_device: Any, args: argparse.Namespace) -> None:
             ]
         )
     print(f"{entry.label} — {_plural(args.kind)}\n")
-    print(_table(rows, ["#", "name"]))
+    print(render.table(["#", "name"], rows))
 
 
 def _cmd_find(_device: Any, args: argparse.Namespace) -> None:
@@ -101,7 +92,7 @@ def _cmd_find(_device: Any, args: argparse.Namespace) -> None:
     rows = [
         [bank_id, kind, f"{number:02d}", name] for bank_id, kind, number, name in hits
     ]
-    print(_table(rows, ["bank", "kind", "#", "name"]))
+    print(render.table(["bank", "kind", "#", "name"], rows))
 
 
 def _cmd_ports(_device: Any, _args: argparse.Namespace) -> None:
@@ -176,7 +167,7 @@ def _cmd_dump(device: Any, args: argparse.Namespace) -> None:
         rows.append(
             [f"{number:02d}", live, printed, "*" if printed and printed != live else ""]
         )
-    print(_table(rows, ["#", "on the unit", "in the catalog", ""]))
+    print(render.table(["#", "on the unit", "in the catalog", ""], rows))
 
 
 def _cmd_select(device: Any, args: argparse.Namespace) -> None:
@@ -355,7 +346,7 @@ def _cmd_backup(_device: Any, args: argparse.Namespace) -> int:
         ]
         for entry in entries
     ]
-    print(_table(rows, ["kind", "slot", "name", "saved"]))
+    print(render.table(["kind", "slot", "name", "saved"], rows))
     return 0
 
 

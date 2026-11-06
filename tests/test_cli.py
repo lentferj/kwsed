@@ -49,15 +49,14 @@ class TestTable:
     def test_it_pads_columns_to_the_widest_cell(self):
         out = cli._table([["a", "longer"], ["bbb", "c"]], ["x", "y"])
         lines = out.splitlines()
-        # column 0 is 3 wide ("bbb"), joined to the next by two spaces
-        assert lines[0] == "x    y"
-        assert lines[1] == "---  ------"
-        assert lines[2] == "a    longer"
-        assert lines[3] == "bbb  c"
+        assert lines[0] == "  x |      y"
+        assert lines[1] == "--- | ------"
+        assert lines[2] == "  a | longer"
+        assert lines[3] == "bbb |      c"
 
     def test_trailing_space_is_trimmed(self):
         out = cli._table([["a"]], ["header"])
-        assert out.splitlines()[2] == "a"
+        assert out.splitlines()[2] == "     a"
 
     def test_no_rows_prints_nothing(self):
         assert cli._table([], ["x", "y"]) == ""
