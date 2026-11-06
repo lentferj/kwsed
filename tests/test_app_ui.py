@@ -50,7 +50,7 @@ def store(tmp_path):
 def app(store):
     catalog = cat.Catalog(
         [
-            cat.Entry("RAM1", banks.Kind.PERFORMANCE, 0, "Book Name"),
+            cat.Entry("RAM1", 0, "Book Name", banks.Kind.PERFORMANCE),
         ]
     )
     return KwsedApp(DemoDevice(), catalog=catalog, favorites=store)

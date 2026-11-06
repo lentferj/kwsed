@@ -631,7 +631,7 @@ class KwsedApp(App[None]):
             return
         item = self._current[row]
         key = favorite_bank_id(item.bank.id, item.kind)
-        name = self.catalog.display_name(item.bank.id, item.kind, item.number)
+        name = self.catalog.display_name(item.bank.id, item.number, item.kind)
         # Favorites.toggle, not remove-then-add: un-favouriting keeps
         # the row so a rating, tags, a note and the original date
         # survive being toggled off and on. As a delete followed by a
@@ -729,10 +729,10 @@ class KwsedApp(App[None]):
         try:
             table.clear()
             for item in self._current:
-                name = self.catalog.display_name(item.bank.id, item.kind, item.number)
-                if self.catalog.differs(item.bank.id, item.kind, item.number):
+                name = self.catalog.display_name(item.bank.id, item.number, item.kind)
+                if self.catalog.differs(item.bank.id, item.number, item.kind):
                     shown = f"[b]{name}[/b] [dim]*[/dim]"
-                elif self.catalog.is_live(item.bank.id, item.kind, item.number):
+                elif self.catalog.is_live(item.bank.id, item.number, item.kind):
                     shown = f"[b]{name}[/b]"
                 else:
                     shown = name
@@ -757,7 +757,7 @@ class KwsedApp(App[None]):
             self.query_one("#detail", Static).update("")
             return
         item = self._current[row]
-        name = self.catalog.display_name(item.bank.id, item.kind, item.number)
+        name = self.catalog.display_name(item.bank.id, item.number, item.kind)
         note = "" if item.bank.writable else "   [dim]ROM — read only[/dim]"
         self.query_one("#detail", Static).update(
             f"[b]{item.bank.label} {item.kind} {item.number:02d}[/b]  "
@@ -848,8 +848,8 @@ class KwsedApp(App[None]):
     def _adopt(self, bank_id: int, kind: str, names: Dict[int, str]) -> None:
         entry = banks.bank(bank_id)
         for number, name in names.items():
-            self.catalog.set_live_name(entry.id, kind, number, name)
-        differing = sum(1 for n in names if self.catalog.differs(entry.id, kind, n))
+            self.catalog.set_live_name(entry.id, number, name, kind)
+        differing = sum(1 for n in names if self.catalog.differs(entry.id, n, kind))
         if self._current_pair == (entry.number, kind):
             self._fill(self._current_pair)
         self.notify_status(

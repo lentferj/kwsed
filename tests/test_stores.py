@@ -298,16 +298,16 @@ class TestCatalogRoundTrip:
     def _catalog(self):
         return cat.Catalog(
             [
-                cat.Entry("CARD", banks.Kind.PATCH, 3, "Invented Chime"),
-                cat.Entry("CARD", banks.Kind.PERFORMANCE, 3, "Invented Layer"),
+                cat.Entry("CARD", 3, "Invented Chime", banks.Kind.PATCH),
+                cat.Entry("CARD", 3, "Invented Layer", banks.Kind.PERFORMANCE),
             ]
         )
 
     def test_the_two_kinds_do_not_collide(self):
         """Performance 3 is not patch 3 -- the collision this key exists for."""
         catalog = self._catalog()
-        assert catalog.name("CARD", "patch", 3) == "Invented Chime"
-        assert catalog.name("CARD", "performance", 3) == "Invented Layer"
+        assert catalog.name("CARD", 3, "patch") == "Invented Chime"
+        assert catalog.name("CARD", 3, "performance") == "Invented Layer"
 
     def test_has_reports_a_bank_by_any_of_its_kinds(self):
         assert self._catalog().has("CARD")
@@ -315,40 +315,40 @@ class TestCatalogRoundTrip:
 
     def test_a_live_name_wins_over_the_printed_one(self):
         catalog = self._catalog()
-        catalog.set_live_name("CARD", "patch", 3, "Renamed")
-        assert catalog.display_name("CARD", "patch", 3) == "Renamed"
+        catalog.set_live_name("CARD", 3, "Renamed", "patch")
+        assert catalog.display_name("CARD", 3, "patch") == "Renamed"
 
     def test_a_slot_with_neither_shows_nothing(self):
-        assert self._catalog().display_name("ROM4", "patch", 0) == ""
+        assert self._catalog().display_name("ROM4", 0, "patch") == "--"
 
     def test_it_reports_whether_the_unit_disagrees(self):
         catalog = self._catalog()
-        assert not catalog.differs("CARD", "patch", 3)
-        catalog.set_live_name("CARD", "patch", 3, "Renamed")
-        assert catalog.differs("CARD", "patch", 3)
+        assert not catalog.differs("CARD", 3, "patch")
+        catalog.set_live_name("CARD", 3, "Renamed", "patch")
+        assert catalog.differs("CARD", 3, "patch")
 
     def test_the_disagreement_says_which_way_is_wrong(self):
         catalog = self._catalog()
-        catalog.set_live_name("CARD", "patch", 3, "Renamed")
+        catalog.set_live_name("CARD", 3, "Renamed", "patch")
         # A writable bank means somebody saved their own work over it.
         assert (
-            catalog.disagreement("CARD", "patch", 3, True)
+            catalog.disagreement("CARD", 3, True, "patch")
             == "saved over the factory preset"
         )
         # ROM cannot change, so there the printed list is the wrong one.
         assert (
-            catalog.disagreement("CARD", "patch", 3, False)
+            catalog.disagreement("CARD", 3, False, "patch")
             == "the printed list is wrong; the unit is right"
         )
 
     def test_agreement_is_not_a_disagreement(self):
         catalog = self._catalog()
-        catalog.set_live_name("CARD", "patch", 3, "Invented Chime")
-        assert catalog.disagreement("CARD", "patch", 3, True) is None
+        catalog.set_live_name("CARD", 3, "Invented Chime", "patch")
+        assert catalog.disagreement("CARD", 3, True, "patch") is None
 
     def test_search_covers_both_sources_and_sorts(self):
         catalog = self._catalog()
-        catalog.set_live_name("ROM4", "patch", 0, "Invented Chime Too")
+        catalog.set_live_name("ROM4", 0, "Invented Chime Too", "patch")
         hits = catalog.search("invented chime")
         assert [h[0] for h in hits] == ["CARD", "ROM4"]
 

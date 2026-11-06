@@ -27,7 +27,7 @@ pytestmark = pytest.mark.asyncio
 
 @pytest.fixture
 def app():
-    catalog = cat.Catalog([cat.Entry("RAM1", banks.Kind.PERFORMANCE, 0, "Book Name")])
+    catalog = cat.Catalog([cat.Entry("RAM1", 0, "Book Name", banks.Kind.PERFORMANCE)])
     return KwsedApp(DemoDevice(), catalog=catalog)
 
 
@@ -76,7 +76,7 @@ class TestReadingIsSilent:
             for _ in range(10):
                 await pilot.pause()
             assert app.device.selected_log == []
-            assert app.catalog.is_live("RAM1", banks.Kind.PERFORMANCE, 0)
+            assert app.catalog.is_live("RAM1", 0, banks.Kind.PERFORMANCE)
 
     async def test_a_difference_from_the_catalog_is_flagged(self, app):
         async with app.run_test() as pilot:
@@ -84,7 +84,7 @@ class TestReadingIsSilent:
             await pilot.press("r")
             for _ in range(10):
                 await pilot.pause()
-            assert app.catalog.differs("RAM1", banks.Kind.PERFORMANCE, 0)
+            assert app.catalog.differs("RAM1", 0, banks.Kind.PERFORMANCE)
 
     async def test_the_request_names_the_kind(self, app):
         """Each kind has its own request; the reply is filed under it."""
@@ -95,8 +95,8 @@ class TestReadingIsSilent:
                 await pilot.pause()
             # The pane is showing performances, so performances come back --
             # never the other kind filed under this pane's numbers.
-            assert app.catalog.is_live("RAM1", banks.Kind.PERFORMANCE, 0)
-            assert not app.catalog.is_live("RAM1", banks.Kind.PATCH, 0)
+            assert app.catalog.is_live("RAM1", 0, banks.Kind.PERFORMANCE)
+            assert not app.catalog.is_live("RAM1", 0, banks.Kind.PATCH)
 
 
 class TestBothKindsAreListed:
