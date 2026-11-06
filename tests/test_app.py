@@ -147,3 +147,84 @@ class TestSharedUiAdoption:
             await pilot.press("escape")
             for _ in range(5):
                 await pilot.pause()
+
+
+class TestScanOfferScheduling:
+    async def test_on_mount_schedules_scan_offer_timer(self):
+        from kwsed.app import KwsedApp
+
+        calls = []
+        original = KwsedApp.set_timer
+
+        def spy(self, delay, callback, *args, **kwargs):
+            calls.append((delay, getattr(callback, "__name__", str(callback))))
+            return original(self, delay, callback, *args, **kwargs)
+
+        KwsedApp.set_timer = spy  # type: ignore[assignment]
+        try:
+            app = KwsedApp(DemoDevice(), catalog=cat.Catalog())
+            async with app.run_test() as pilot:
+                await pilot.pause()
+        finally:
+            KwsedApp.set_timer = original  # type: ignore[method-assign]
+        assert any(d == 0.6 and name == "_maybe_offer_scan" for d, name in calls)
+
+
+class TestCachedNamesAnySlot:
+    def test_unnamed_slot_zero_but_named_elsewhere(self):
+        from kwsed.app import KwsedApp
+
+        catalog = cat.Catalog()
+        # slot 0 unnamed, slot 1 live
+        catalog.set_live_name("RAM1", 1, "Cached", banks.Kind.PERFORMANCE)
+        app = KwsedApp(DemoDevice(), catalog=catalog)
+        assert app._has_cached_names() is True
+
+    def test_no_live_names_anywhere(self):
+        from kwsed.app import KwsedApp
+
+        app = KwsedApp(DemoDevice(), catalog=cat.Catalog())
+        assert app._has_cached_names() is False
+
+
+class TestScanOfferBusyRefusal:
+    def test_scan_answer_refuses_when_busy(self):
+        from kwsed.app import KwsedApp
+
+        app = KwsedApp(DemoDevice(), catalog=cat.Catalog())
+        recorded = []
+        app.notify_status = lambda *a, **k: recorded.append((a, k))  # type: ignore[method-assign]
+        app._busy = True
+        app._scan_offer_answered("scan")
+        app._busy = False
+        assert any("busy" in str(a) for a, _ in recorded)
+
+
+class TestSingleNotifyOnUndoSettle:
+    def test_undo_settle_notifies_once(self):
+        from kwsed.app import KwsedApp
+
+        app = KwsedApp(DemoDevice(), catalog=cat.Catalog())
+        count = {"n": 0}
+
+        def spy(*a, **k):
+            count["n"] += 1
+
+        app.notify_status = spy  # type: ignore[method-assign]
+        # keep status_hook pointing at spy too
+        app._undo_log.status_hook = spy
+        app._undo_settle([True])
+        assert count["n"] == 1
+
+
+class TestConfigDirOnFirstRun:
+    def test_main_creates_config_dir(self, tmp_path, monkeypatch):
+        import os
+
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+        from kwsed import app as appmod
+
+        monkeypatch.setattr(appmod.KwsedApp, "run", lambda self: None)
+        rc = appmod.main(["--demo"])
+        assert rc == 0
+        assert os.path.isdir(os.path.join(str(tmp_path / "cfg"), "kwsed"))

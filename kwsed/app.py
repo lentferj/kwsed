@@ -763,8 +763,7 @@ class KwsedApp(App[None]):
     ) -> None:
         for record in reversed(failed or []):
             self._undo_log.push(record)
-        message = self._undo_log.settle(results)
-        self.notify_status(message)
+        self._undo_log.settle(results)
 
     @work(thread=True)
     def _undo_worker(self, records: list[Any]) -> None:
@@ -851,6 +850,8 @@ class KwsedApp(App[None]):
             else "no catalog -- numbers only. Build one with "
             "tools/extract_catalog.py, or press r to read from the unit."
         )
+        # Offer to scan for names if there is no catalog at all.
+        self.set_timer(0.6, self._maybe_offer_scan)
 
     # --- filling ------------------------------------------------------------
 
@@ -1325,7 +1326,11 @@ class KwsedApp(App[None]):
             self.notify_status("scan stopped")
 
     def _has_cached_names(self) -> bool:
-        return any(self.catalog.is_live(banks.bank(n).id, 0, k) for n, k in self._pairs)
+        return any(
+            self.catalog.is_live(banks.bank(n).id, slot.number, k)
+            for n, k in self._pairs
+            for slot in banks.slots(n, k)
+        )
 
     def _maybe_offer_scan(self) -> None:
         if (
@@ -1350,6 +1355,9 @@ class KwsedApp(App[None]):
                 _cfg.save_scan_offer_dismissed(True, self._config_path)
             return
         if answer == "scan":
+            if self._busy:
+                self.notify_status("busy", refused=True)
+                return
             self.action_scan_device()
 
     def action_search(self) -> None:
@@ -1582,6 +1590,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     cli.validate_common(args)
     from kws import config as cfg
 
+    if getattr(args, "config", None) is None:
+        cfg.migrate_legacy_config("kwsed")
+        import os
+
+        os.makedirs(cfg.config_dir("kwsed"), exist_ok=True)
     config_path = getattr(args, "config", None) or cfg.DEFAULT_PATH
 
     # Either a DemoDevice or a WavestationBridge: the two share the handful
