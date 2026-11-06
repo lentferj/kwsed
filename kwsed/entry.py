@@ -35,13 +35,18 @@ import sys
 
 #: The minimum that has the API this project was written against.
 #:
-#: ``0.2.0`` is the version that added ``midi.open_remembered_or_swept``'s
-#: ``on_fallback`` hook, the per-file ownership guard in the settings cache,
-#: and the ``__version__`` whose absence used to be undetectable.
-MINIMUM = (0, 2, 0)
+#: ``0.4.2`` is the version that added ``backup`` (the family envelope for
+#: pre-write snapshots), ``livenames`` (live names persisted beside the
+#: favourites DB), ``catalog``'s ``make_key``/``split_key`` and
+#: ``UNNAMED`` discipline, ``ui.report`` (ReportScreen frame) and
+#: ``ui.work`` (BusyGate, close_when_idle, QUIET_BRIDGE_ERRORS), ``render``
+#: (headless tables/progress), ``spec`` (flag tiers, exit codes), and
+#: ``build`` (build_of, version/help line). kwsed is written against all
+#: of these, so anything older is unusable.
+MINIMUM = (0, 4, 2)
 
-#: Where to get it; on PyPI since 0.2.0.
-SOURCE = "vinsynlib>=0.2.0"
+#: Where to get it; on PyPI since 0.4.2.
+SOURCE = "vinsynlib>=0.4.2"
 
 
 def _release_parts(version: str, width: int) -> tuple[int, ...] | None:
