@@ -250,3 +250,17 @@ class TestResolution:
 
     def test_no_captures_and_no_table_name_is_none(self):
         assert cards.resolve("No Such Bank", "A", "B", captured={}) is None
+
+
+class TestCardWords:
+    """The two facts a person needs before trusting one bank."""
+
+    def test_a_plain_captured_bank(self):
+        assert cards.card_words(True, None) == "captured"
+
+    def test_an_uncaptured_bank(self):
+        assert cards.card_words(False, None) == "not captured"
+
+    def test_a_pcm_dependency_is_always_spoken(self):
+        assert cards.card_words(False, "WSC-01") == "not captured; needs WSC-01"
+        assert cards.card_words(True, "WSC-03") == "captured; needs WSC-03"

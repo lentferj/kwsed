@@ -1084,11 +1084,12 @@ class KwsedApp(App[None]):
         still a place a capture can land.
         """
         captured = self._archive.get(number)
+        entry = _cards.card(number)
+        pcm = f" · needs {entry.needs_pcm}" if entry.needs_pcm else ""
         if captured is None:
-            return "[dim]not captured[/dim]"
-        printed = _cards.card(number).name
-        name = captured.name or printed
-        if name.strip().casefold() != printed.strip().casefold():
+            return f"[dim]not captured{pcm}[/dim]"
+        name = captured.name or entry.name
+        if name.strip().casefold() != entry.name.strip().casefold():
             return f"{name} [dim]*[/dim]"
         return name
 
@@ -1468,11 +1469,12 @@ class KwsedApp(App[None]):
         entry = _cards.card(number)
         captured = self._archive.get(number)
         name = self._card_slot_name(number, item.kind, item.number)
+        status = _cards.card_words(captured is not None, entry.needs_pcm)
         if captured is None:
-            status = "not captured — select this bank on the HCard and press C"
+            status += " — select this bank on the HCard and press C"
             shown = name or "[dim](no archive)[/dim]"
         else:
-            status = f"captured {captured.captured_at}"
+            status += f"  {captured.captured_at}"
             shown = name or "[dim](unnamed)[/dim]"
         with contextlib.suppress(NoMatches):
             self.query_one("#detail", Static).update(

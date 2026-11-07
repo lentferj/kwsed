@@ -541,3 +541,61 @@ class TestCardSweep:
             app.action_card_sweep()
             app._busy = False
             assert "busy" in str(app.query_one("#status").content)
+
+
+class TestCardPcmWording:
+    """Banks 16-18 need a WSC PCM card; the detail line says so.
+
+    A missing PCM card is silent on the unit -- the patch plays the wrong
+    sound rather than failing -- so the browser has to be the place that
+    says it, in both states: captured and not.
+    """
+
+    def _app(self, tmp_path, *, seeded=False):
+        from kws import cards
+
+        path = str(tmp_path / "cards.json")
+        if seeded:
+            cards.save(
+                cards.capture(
+                    16,
+                    'WPC-22 "Performance 12"',
+                    {0: "Needs PCM"},
+                    {0: "Wave"},
+                    captured_at="2026-11-07T12:00:00+00:00",
+                ),
+                path,
+            )
+        return KwsedApp(
+            DemoDevice(),
+            catalog=cat.Catalog(),
+            cards_path=path,
+        )
+
+    async def test_an_uncaptured_pcm_bank_says_what_it_needs(self, tmp_path):
+        app = self._app(tmp_path)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._fill((banks.bank("CARD").number, banks.Kind.PERFORMANCE), 16)
+            detail = panel_text(app, "#detail")
+            assert "not captured" in detail
+            assert "needs WSC-01" in detail
+
+    async def test_a_captured_pcm_bank_still_says_what_it_needs(self, tmp_path):
+        app = self._app(tmp_path, seeded=True)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._fill((banks.bank("CARD").number, banks.Kind.PERFORMANCE), 16)
+            detail = panel_text(app, "#detail")
+            assert "captured" in detail
+            assert "needs WSC-01" in detail
+
+    async def test_the_list_marks_an_uncaptured_pcm_bank(self, tmp_path):
+        app = self._app(tmp_path)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            table = app.query_one("#bank-table")
+            cells = [str(cell) for cell in table.get_row("card:16:performance")]
+            joined = " ".join(cells)
+            assert "not captured" in joined
+            assert "needs WSC-01" in joined

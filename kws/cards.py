@@ -60,6 +60,7 @@ __all__ = [
     "PERFORMANCES_PER_BANK",
     "cards",
     "card",
+    "card_words",
     "is_user",
     "bank_numbers",
     "count_for",
@@ -214,6 +215,22 @@ def is_user(number: int) -> bool:
 def bank_numbers() -> List[int]:
     """00-39, in order."""
     return [entry.number for entry in CARDS]
+
+
+def card_words(captured: bool, needs_pcm: Optional[str]) -> str:
+    """How to describe one HCard bank's state, in words.
+
+    One home for the two facts a person needs before trusting a bank, the
+    way :func:`kws.catalog.disagreement_words` has one home for what a
+    catalog difference means. ``captured`` is whether this archive holds
+    the bank; ``needs_pcm`` is the PCM card (banks 16-18) a patch there
+    depends on. A missing PCM card does not fail loudly -- the patch plays
+    the wrong sound -- so it is always said, not merely hinted.
+    """
+    state = "captured" if captured else "not captured"
+    if needs_pcm:
+        return f"{state}; needs {needs_pcm}"
+    return state
 
 
 # --- the per-bank archive ----------------------------------------------------
