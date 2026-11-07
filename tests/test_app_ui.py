@@ -461,13 +461,13 @@ class TestTheCardSubList:
     async def test_c_captures_the_active_bank(self, tmp_path):
         from kws import cards
 
-        app = self._app(tmp_path, card_name='WPC-13 "Performance 3"', seeded=False)
+        app = self._app(tmp_path, card_name='Korg WPC-13 "Performance 3"', seeded=False)
         async with app.run_test() as pilot:
             await pilot.pause()
             app.action_capture_card()
             await settle(pilot, 30)
             assert 7 in app._archive
-            assert cards.load(app._cards_path)[7].name == 'WPC-13 "Performance 3"'
+            assert cards.load(app._cards_path)[7].name == 'Korg WPC-13 "Performance 3"'
             assert "captured Card 07" in str(app.query_one("#status").content)
 
     async def test_an_unknown_card_name_is_refused_not_filed(self, tmp_path):

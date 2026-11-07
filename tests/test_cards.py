@@ -34,13 +34,22 @@ class TestTheTable:
         assert not cards.is_user(40)
 
     def test_the_card_names_the_manual_names_are_there(self):
-        assert cards.card(0).name == "WS Internal ROM"
-        assert cards.card(1).name == "Factory Preload 1"
+        assert cards.card(0).name == "Korg WS Internal ROM"
+        assert cards.card(1).name == "Korg WPC-00PI RAM1 factory preload"
         # Section 5's example name for bank 07.
-        assert cards.card(7).name == 'WPC-13 "Performance 3"'
-        assert cards.card(19).name == "MCR03-WS1"
-        assert cards.card(22).name == "WSC-1S"
+        assert cards.card(7).name == 'Korg WPC-13 "Performance 3"'
+        assert cards.card(19).name == 'MCR03-WS "Legendary Prophet-VS Sounds"'
+        assert cards.card(24).name == 'MCR03 "Vector World"'
         assert cards.card(39).name == "User 15"
+
+    def test_every_korg_rom_card_name_is_prefixed(self):
+        for entry in cards.cards():
+            if entry.category == cards.Category.ROM_CARD and entry.number <= 18:
+                assert entry.name.startswith("Korg "), entry
+
+    def test_names_are_unique_case_insensitively(self):
+        names = [entry.name.casefold() for entry in cards.cards()]
+        assert len(names) == len(set(names))
 
     def test_the_three_pcm_banks_are_flagged(self):
         flagged = {c.number: c.needs_pcm for c in cards.cards() if c.needs_pcm}
@@ -57,11 +66,19 @@ class TestAccessors:
         with pytest.raises(LookupError):
             cards.card(True)
 
+    def test_a_float_is_not_a_bank_number(self):
+        with pytest.raises(LookupError):
+            cards.card(3.7)  # type: ignore[arg-type]
+
+    def test_a_string_is_not_a_bank_number(self):
+        with pytest.raises(LookupError):
+            cards.card("07")  # type: ignore[arg-type]
+
     def test_unknown_name_is_none(self):
         assert cards.card_by_name("not a bank") is None
 
     def test_name_lookup_ignores_case_and_padding(self):
-        found = cards.card_by_name('  wpc-13 "PERFORMANCE 3" ')
+        found = cards.card_by_name('  Korg WPC-13 "PERFORMANCE 3" ')
         assert found is not None
         assert found.number == 7
 
@@ -71,7 +88,7 @@ class TestAccessors:
 
 
 class TestTheArchive:
-    def _captured(self, number=7, name='WPC-13 "Performance 3"'):
+    def _captured(self, number=7, name='Korg WPC-13 "Performance 3"'):
         return cards.capture(
             number,
             name,
@@ -92,7 +109,7 @@ class TestTheArchive:
         raw = json.loads(path.read_text(encoding="utf-8"))
         assert raw["version"] == 1
         assert set(raw["banks"]) == {"07"}
-        assert raw["banks"]["07"]["name"] == 'WPC-13 "Performance 3"'
+        assert raw["banks"]["07"]["name"] == 'Korg WPC-13 "Performance 3"'
         assert raw["banks"]["07"]["performances"] == {
             "0": "First Performance",
             "1": "Second",
@@ -180,7 +197,7 @@ class TestResolution:
         return {
             7: cards.capture(
                 7,
-                'WPC-13 "Performance 3"',
+                'Korg WPC-13 "Performance 3"',
                 {0: "Opening", 1: "Second"},
                 {0: "Bell"},
                 captured_at="2026-11-07T12:00:00+00:00",
@@ -195,13 +212,13 @@ class TestResolution:
         }
 
     def test_an_exact_table_name_resolves(self):
-        assert cards.resolve("WS Internal ROM", None, None, captured={}) == 0
+        assert cards.resolve("Korg WS Internal ROM", None, None, captured={}) == 0
 
     def test_an_exact_captured_name_resolves(self):
         assert cards.resolve("User 01", None, None, captured=self._archive()) == 25
 
     def test_a_truncated_name_field_still_resolves(self):
-        assert cards.resolve('WPC-13 "Perf', None, None, captured={}) == 7
+        assert cards.resolve('Korg WPC-13 "Perf', None, None, captured={}) == 7
 
     def test_a_name_collision_is_ambiguous(self):
         archive = self._archive()

@@ -121,41 +121,38 @@ class Card:
         return self.category != Category.USER
 
 
-def _wpc(number: int) -> str:
-    """A WPC card's reported name: ``WPC-13 "Performance 3"``."""
-    return f'WPC-{number} "Performance {number - 10}"'
-
-
-#: The forty banks in HCard order. The manual gives 00-04 and 25-39 as
-#: ranges; 05-24 are the Korg cards, and the WPC series comes first, then
-#: the MCR03 wave-sequence cards, then the WSC PCM-card sets. Banks 16-18
-#: are the three that require a WSC PCM card to sound right.
+#: The forty banks in HCard order, transcribed verbatim from the HCard-101
+#: manual's Wavestation-SR-mode sound-library table (see docs/HCARD.md
+#: section 2). Banks 00-04 and 19-24 are named by the manual exactly as
+#: written here, including the "Korg " prefix on 00-18. Banks 25-39 are
+#: user banks: the manual names NONE of them, so "User 01".."User 15" are
+#: kwsed placeholders; their real identity comes from capture/rename.
 CARDS: Tuple[Card, ...] = (
-    Card(0, "WS Internal ROM", Category.FACTORY),
-    Card(1, "Factory Preload 1", Category.PRELOAD),
-    Card(2, "Factory Preload 2", Category.PRELOAD),
-    Card(3, "Factory Preload 3", Category.PRELOAD),
-    Card(4, "Factory Preload 4", Category.PRELOAD),
-    Card(5, _wpc(11), Category.ROM_CARD),
-    Card(6, _wpc(12), Category.ROM_CARD),
-    Card(7, _wpc(13), Category.ROM_CARD),
-    Card(8, _wpc(14), Category.ROM_CARD),
-    Card(9, _wpc(15), Category.ROM_CARD),
-    Card(10, _wpc(16), Category.ROM_CARD),
-    Card(11, _wpc(17), Category.ROM_CARD),
-    Card(12, _wpc(18), Category.ROM_CARD),
-    Card(13, _wpc(19), Category.ROM_CARD),
-    Card(14, _wpc(20), Category.ROM_CARD),
-    Card(15, _wpc(21), Category.ROM_CARD),
-    Card(16, _wpc(22), Category.ROM_CARD, needs_pcm="WSC-01"),
-    Card(17, _wpc(23), Category.ROM_CARD, needs_pcm="WSC-02"),
-    Card(18, _wpc(24), Category.ROM_CARD, needs_pcm="WSC-03"),
-    Card(19, "MCR03-WS1", Category.ROM_CARD),
-    Card(20, "MCR03-WS2", Category.ROM_CARD),
-    Card(21, "MCR03-WS3", Category.ROM_CARD),
-    Card(22, "WSC-1S", Category.ROM_CARD),
-    Card(23, "WSC-2S", Category.ROM_CARD),
-    Card(24, "WSC-3S", Category.ROM_CARD),
+    Card(0, "Korg WS Internal ROM", Category.FACTORY),
+    Card(1, "Korg WPC-00PI RAM1 factory preload", Category.PRELOAD),
+    Card(2, "Korg WPC-00PII RAM2 factory preload", Category.PRELOAD),
+    Card(3, "Korg WPC-00PIII RAM3EX factory preload", Category.PRELOAD),
+    Card(4, "Korg WPC-0AD RAM3AD", Category.PRELOAD),
+    Card(5, 'Korg WPC-11 "Performance 1"', Category.ROM_CARD),
+    Card(6, 'Korg WPC-12 "Performance 2"', Category.ROM_CARD),
+    Card(7, 'Korg WPC-13 "Performance 3"', Category.ROM_CARD),
+    Card(8, 'Korg WPC-14 "Analog & VS"', Category.ROM_CARD),
+    Card(9, 'Korg WPC-15 "Dance/Top 40"', Category.ROM_CARD),
+    Card(10, 'Korg WPC-16 "Wavestation Omnibus"', Category.ROM_CARD),
+    Card(11, 'Korg WPC-17 "Studio Collection"', Category.ROM_CARD),
+    Card(12, 'Korg WPC-18 "U.K. Modern"', Category.ROM_CARD),
+    Card(13, 'Korg WPC-19ex "Film Textures"', Category.ROM_CARD),
+    Card(14, 'Korg WPC-20ex "Song Factory"', Category.ROM_CARD),
+    Card(15, 'Korg WPC-J01 "Analog Freak"', Category.ROM_CARD),
+    Card(16, 'Korg WPC-1S "Piano"', Category.ROM_CARD, needs_pcm="WSC-01"),
+    Card(17, 'Korg WPC-2S "Drums & Percussion"', Category.ROM_CARD, needs_pcm="WSC-02"),
+    Card(18, 'Korg WPC-3S "Synth & Time Slice"', Category.ROM_CARD, needs_pcm="WSC-03"),
+    Card(19, 'MCR03-WS "Legendary Prophet-VS Sounds"', Category.ROM_CARD),
+    Card(20, 'MCR03-WS1 "Standard Synthesizer Sounds"', Category.ROM_CARD),
+    Card(21, 'MCR03-WS2 "Future Pad Sounds"', Category.ROM_CARD),
+    Card(22, 'MCR03-WS3 "Dancing Wavestation"', Category.ROM_CARD),
+    Card(23, 'MCR03-WS4 "Vocoder Effects & External"', Category.ROM_CARD),
+    Card(24, 'MCR03 "Vector World"', Category.ROM_CARD),
     Card(25, "User 01", Category.USER),
     Card(26, "User 02", Category.USER),
     Card(27, "User 03", Category.USER),
@@ -186,11 +183,15 @@ def card(number: int) -> Card:
     """One bank by its 00-39 number."""
     # ``isinstance(True, int)`` is True, and ``card(True)`` would return
     # bank 01 -- the same shape of mistake :func:`kws.banks.bank` guards.
+    # A float or a string is not a bank number either: ``int(3.7)`` would
+    # silently truncate, and a string id lookup is not part of this API.
     if isinstance(number, bool):
         raise LookupError(f"a card bank is not a boolean, got {number!r}")
+    if not isinstance(number, int):
+        raise LookupError(f"no card bank {number!r}; the HCard has banks 00-39")
     try:
-        return _BY_NUMBER[int(number)]
-    except (KeyError, TypeError, ValueError):
+        return _BY_NUMBER[number]
+    except KeyError:
         raise LookupError(
             f"no card bank {number!r}; the HCard has banks 00-39"
         ) from None

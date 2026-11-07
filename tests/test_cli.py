@@ -743,7 +743,7 @@ class TestCardsVerb:
         cards.save(
             cards.capture(
                 7,
-                'WPC-13 "Performance 3"',
+                'Korg WPC-13 "Performance 3"',
                 {0: "Opening", 1: "Second"},
                 {0: "Bell"},
                 captured_at="2026-11-07T12:00:00+00:00",
@@ -763,7 +763,7 @@ class TestCardsVerb:
         path = self._archive(tmp_path)
         assert cli.main(["--cards", path, "cards"]) == 0
         out = capsys.readouterr().out
-        assert 'WPC-13 "Performance 3"' in out
+        assert 'Korg WPC-13 "Performance 3"' in out
         assert out.count("not captured") == 39
 
     def test_one_bank_shows_its_archive(self, tmp_path, capsys):
@@ -778,7 +778,7 @@ class TestCardsVerb:
     def test_an_uncaptured_bank_still_shows_the_table_name(self, capsys):
         assert run(["cards", "16"]) == 0
         out = capsys.readouterr().out
-        assert "WPC-22" in out
+        assert "WPC-1S" in out
         assert "needs WSC-01" in out
         assert "not captured" in out
 
@@ -843,7 +843,7 @@ def test_one_banks_kind_filter_narrows_the_display(tmp_path, capsys):
     cards.save(
         cards.capture(
             7,
-            'WPC-13 "Performance 3"',
+            'Korg WPC-13 "Performance 3"',
             {0: "Opening"},
             {0: "Bell"},
             captured_at="2026-11-07T12:00:00+00:00",

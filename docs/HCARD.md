@@ -19,7 +19,8 @@ by name, even though only one is physically present to the synth at a time.
 ## 2. Background facts (HCard manual, WS mode)
 
 - WS bank range **00–39**; 00 = WS Internal ROM, 01–04 factory preloads,
-  05–24 Korg ROM cards (WPC-11…24, MCR03-WS*, WSC-1S/2S/3S), 25–39 user banks.
+  05–24 Korg ROM cards (WPC-11…20ex, WPC-J01, WPC-1S/2S/3S needing
+  WSC-01/02/03, MCR03-WS*, MCR03 "Vector World"), 25–39 user banks.
 - **Only one bank is visible at a time**; switching is a physical action on
   the HCard (touch pads / ▲▼). No remote bank-switch is documented.
 - **Dynamic Update**: selecting a bank on the HCard rewrites the Wavestation's
