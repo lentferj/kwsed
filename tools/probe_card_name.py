@@ -36,8 +36,8 @@ from typing import List, Optional
 from vinsynlib import spec
 
 
-#: The probe is deliberately quiet on import so --help works on a host with
-#: no MIDI backend; the bridge imports rtmidi.
+# The probe is deliberately quiet on import so --help works on a host with
+# no MIDI backend; the bridge imports rtmidi.
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="probe_card_name.py",

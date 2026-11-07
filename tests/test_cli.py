@@ -836,3 +836,21 @@ class TestCardsVerb:
     def test_an_unknown_bank_is_a_usage_error(self, capsys):
         assert run(["cards", "99"]) != 0
         assert "00-39" in capsys.readouterr().err
+
+
+def test_one_banks_kind_filter_narrows_the_display(tmp_path, capsys):
+    path = str(tmp_path / "cards.json")
+    cards.save(
+        cards.capture(
+            7,
+            'WPC-13 "Performance 3"',
+            {0: "Opening"},
+            {0: "Bell"},
+            captured_at="2026-11-07T12:00:00+00:00",
+        ),
+        path,
+    )
+    assert cli.main(["--cards", path, "cards", "07", "--kind", "patch"]) == 0
+    out = capsys.readouterr().out
+    assert "Bell" in out
+    assert "Opening" not in out

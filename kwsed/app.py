@@ -1433,7 +1433,8 @@ class KwsedApp(App[None]):
 
     def _detail(self, row: int) -> None:
         if not self._current or row >= len(self._current):
-            self.query_one("#detail", Static).update("")
+            with contextlib.suppress(NoMatches):
+                self.query_one("#detail", Static).update("")
             return
         item = self._current[row]
         if self._current_card is not None:

@@ -126,7 +126,10 @@ def _cmd_cards(_device: Any, args: argparse.Namespace) -> int:
     print(f"{_cards_status(bank, entry)}")
     print()
     rows = []
+    wanted_kind = getattr(args, "kind", None)
     for kind in (banks.Kind.PERFORMANCE, banks.Kind.PATCH):
+        if wanted_kind is not None and kind != wanted_kind:
+            continue
         names = bank.names(kind) if bank is not None else {}
         for slot in range(banks.count_for(kind)):
             name = names.get(slot, "")

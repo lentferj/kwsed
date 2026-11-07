@@ -4,8 +4,8 @@
 # This file is part of kwsed.
 #
 # The bank table is transcribed as a fact from the Hypersynth HCard-101
-# manual's Wavestation-SR mode, cross-checked against the card names the
-# instrument itself reports. No vendor code is used here.
+# manual's Wavestation-SR mode and docs/HCARD.md section 2. No vendor code
+# is used here.
 #
 # kwsed is free software: you can redistribute it and/or modify it under the
 # terms of the GNU General Public License as published by the Free Software
@@ -412,9 +412,9 @@ def _fingerprint_matches(
     to every captured one.
     """
     checks: List[bool] = []
-    if perf0:
+    if perf0 and perf0.strip():
         checks.append(_name_key(bank.performances.get(0)) == _name_key(perf0))
-    if patch0:
+    if patch0 and patch0.strip():
         checks.append(_name_key(bank.patches.get(0)) == _name_key(patch0))
     return bool(checks) and all(checks)
 

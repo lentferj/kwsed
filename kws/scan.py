@@ -180,7 +180,8 @@ class CardSweepScreen(ModalScreen[bool]):
     def compose(self) -> ComposeResult:
         with Vertical():
             yield Static(
-                f"[b]Card sweep[/b] — bank {self.number:02d} of 39",
+                f"[b]Card sweep[/b] — bank {self.number:02d} "
+                f"(bank {self.number + 1} of 40)",
                 classes="title",
             )
             yield Static(
