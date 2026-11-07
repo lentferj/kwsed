@@ -517,7 +517,7 @@ asserts on it; see `TestTheHeaderSaysWhereAChainStarts` in
 tests/test_bankbuild.py. The F841 suppression is gone.
 
 ```python
-first = step          # in make_waveseq
+first = step  # in make_waveseq
 for k, wave in enumerate(waves):
     at = r.STEP_BASE + step * r.STEP_SIZE
 ```
@@ -591,3 +591,37 @@ decoding it once would serve rxved, kwsed, p2ked, x5ded and nanosyned
 alike. Worth doing as shared work rather than five times over.
 
 **Blocked on:** nothing but the decoding. Nothing here depends on it.
+
+## 23. The HCard card-name field's offset is unconfirmed
+
+**Status:** open; read-only probe written, hardware not yet compared.
+
+`kws.bridge.read_card_name()` takes the card name from the System Setup dump
+(`0x51`) at `CARD_NAME_OFFSET`/`CARD_NAME_LEN`, marked
+`# CONFIRM AGAINST HARDWARE`. Until a real unit's dump is compared against
+the name on the card's own display, an unknown offset can make the archive
+file a capture under the wrong bank.
+
+`tools/probe_card_name.py` prints the raw `0x51` bytes, read-only, so the
+field can be located. The safe behaviour meanwhile is already in place:
+`read_card_name()` returns `None`, and identity resolution falls back to the
+first performance and patch names captured from the bank.
+
+**Blocked on:** one read-only session with the HCard fitted. No writes are
+needed or permitted for this.
+
+## 24. HCard write protection is invisible to the synth
+
+**Status:** documented, deliberately not implemented here.
+
+An HCard bank can be write-protected on the card itself, and the
+Wavestation cannot see that flag. A write to a protected bank fails its
+read-back comparison, so `write_bank` reports a mismatch rather than
+success. The browser should eventually say "the card may have this bank
+write-protected" when that happens, instead of only the generic mismatch.
+
+This is about writing *to* an HCard bank, which is the same `CARD` fence
+kwsed already has. No part of the read-only HCard support changes it.
+
+**Blocked on:** a separate write-verification session, deliberately outside
+this one.
