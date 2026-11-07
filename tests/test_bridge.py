@@ -429,24 +429,25 @@ class TestReadMulti:
 class TestSelect:
     def test_it_sends_bank_select_then_program_change(self):
         unit = Unit()
-        unit.bridge.select(banks.slot("CARD", banks.Kind.PATCH, 7))
+        unit.bridge.select(banks.slot("CARD", banks.Kind.PERFORMANCE, 7))
         assert len(unit.midi_out.sent) == 3
         msb, lsb, pc = unit.midi_out.sent
         assert msb[0] == 0xB0 and msb[1] == 0x00 and msb[2] == 0x00
         assert lsb[0] == 0xB0 and lsb[1] == 0x20
-        # the wire byte, not the display position: the Card is byte 3
-        assert lsb[2] == 3
-        assert pc[0] == 0xC0 and pc[1] == 7
+        assert lsb[2] == 1
+        assert pc[0] == 0xC0 and pc[1] == 57
 
     def test_it_honours_an_explicit_channel(self):
         unit = Unit()
-        unit.bridge.select(banks.slot("RAM1", banks.Kind.PATCH, 0), channel=9)
+        unit.bridge.select(banks.slot("RAM1", banks.Kind.PERFORMANCE, 0), channel=9)
         assert all(d[0] in (0xB9, 0xC9) for d in unit.midi_out.sent)
 
     def test_a_channel_outside_zero_to_fifteen_is_refused(self):
         unit = Unit()
         with pytest.raises(ValueError, match="outside 0-15"):
-            unit.bridge.select(banks.slot("RAM1", banks.Kind.PATCH, 0), channel=16)
+            unit.bridge.select(
+                banks.slot("RAM1", banks.Kind.PERFORMANCE, 0), channel=16
+            )
 
 
 class TestClose:

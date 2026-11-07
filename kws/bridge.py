@@ -853,24 +853,36 @@ class WavestationBridge:
         return name
 
     def select(self, slot: banks.Slot, *, channel: Optional[int] = None) -> None:
-        """Select a performance or patch. **This changes the sound.**
+        """Select a performance. **This changes the sound.**
 
-        Bank Select MSB/LSB then a Program Change. Which of the twelve banks
-        a given Bank Select reaches is **not established** -- see TODO.md --
-        so kwsed sends the bank's own number and says so rather than
-        implying it knows.
+        Bank Select MSB (CC0) = 0, Bank Select LSB (CC32) = the bank's MIDI
+        bank, then a Program Change = program_base + slot.number. Per
+        Player's Guide §4.8 and Reference Appendix 3 §1.3 the SR's twelve
+        banks are six MIDI banks (CC32 0-5), each holding two internal banks
+        of 50, so Program Change 0-49 selects the first and 50-99 the second.
+        The SR has no patch mode: a Program Change always selects a
+        Performance (or a Multiset in Multi mode), never a patch, so a patch
+        slot is refused. The SR's "Bank Select" MIDI-receive parameter must
+        be ON for this to work; kwsed cannot read it.
         """
+        if slot.kind == banks.Kind.PATCH:
+            raise ValueError(
+                "a patch is heard through a performance and cannot be "
+                "selected on its own"
+            )
         target = self.channel if channel is None else channel
         if not 0 <= target <= 15:
             raise ValueError(f"channel {target} is outside 0-15")
+        bank = slot.bank
+        program = bank.program_base + slot.number
+        if program > 99:
+            raise ValueError(
+                f"program change {program} is outside 0-99 for {bank.label}"
+            )
         status = 0xB0 | target
         self._out.send_message([status, 0x00, 0x00])
-        # Which number a Bank Select wants -- the display
-        # position or the System Exclusive byte -- is NOT
-        # established. The wire byte is sent because every
-        # other place that names a bank uses it. See TODO 1.
-        self._out.send_message([status, 0x20, slot.bank.sysex])
-        self._out.send_message([0xC0 | target, slot.number])
+        self._out.send_message([status, 0x20, bank.midi_bank])
+        self._out.send_message([0xC0 | target, program])
         time.sleep(SEND_GAP)
 
     # --- writing, which is fenced ------------------------------------------

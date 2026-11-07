@@ -322,11 +322,9 @@ def _cmd_select(device: Any, args: argparse.Namespace) -> None:
     item = banks.slot(args.bank, args.kind, args.number)
     device.select(item, channel=None if args.channel is None else args.channel - 1)
     print(
-        f"sent bank select LSB {item.bank.sysex} and program change "
-        f"{item.number} for {item}"
+        f"sent bank select MSB 0, LSB {item.bank.midi_bank}, program change "
+        f"{item.bank.program_base + item.number} for {item}"
     )
-    print("Which of the twelve banks a Bank Select actually reaches is NOT")
-    print("established (see TODO.md), so treat this as a best effort.")
 
 
 def _cmd_multi(device: Any, args: argparse.Namespace) -> int:

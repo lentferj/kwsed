@@ -181,15 +181,12 @@ class TestWhatADifferenceMeans:
         assert "saved over the factory preset" in out
         assert "the printed list is wrong" not in out
 
-    def test_select_sends_and_says_it_is_a_best_effort(self, capsys):
+    def test_select_sends_bank_select_and_program_change(self, capsys):
         device = DemoDevice()
-        args = cli.build_parser().parse_args(
-            ["dump", "CARD"]
-        )  # borrow the parser for a valid Namespace shape
-        args = cli.build_parser().parse_args(["select", "CARD", "patch", "3"])
+        args = cli.build_parser().parse_args(["select", "CARD", "performance", "3"])
         cli._cmd_select(device, args)
         out = capsys.readouterr().out
-        assert "best effort" in out
+        assert "MSB 0, LSB 1, program change 53" in out
         assert device.selected_log[0].number == 3
         assert device.selected_log[0].bank.label == "Card"
 

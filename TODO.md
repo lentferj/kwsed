@@ -10,22 +10,32 @@ from, is in [docs/RESOLUTION_NOTES.md](docs/RESOLUTION_NOTES.md).
 
 ---
 
-## 1. Which bank a Bank Select actually reaches is not established
+## 1. Which bank a Bank Select actually reaches — RESOLVED
 
-**Status:** open. Blocks nothing; makes `select` a best effort.
+**Status:** resolved from Korg's documentation (Player's Guide §4.8 and
+Reference Appendix 3 §1.3). `select` is no longer a best effort.
 
-`WavestationBridge.select()` sends Bank Select MSB `0`, LSB = the bank's
-System Exclusive number, then a Program Change. That the System Exclusive
-numbering (RAM 1 = 0 … Card = 11) is also the Bank Select numbering is an
-**assumption**, untested.
+The SR's twelve banks are six MIDI banks addressed by CC32 (LSB) 0-5; CC0
+(MSB) is always 0; each MIDI bank holds two internal banks of 50, so
+Program Change 0-49 selects the first and 50-99 the second:
 
-It is also unknown whether a Program Change selects a *performance* or a
-*patch* — that most likely depends on the unit's current mode, which kwsed
-does not read.
+- RAM1  -> CC32=0, PC base 0
+- RAM2  -> CC32=0, PC base 50
+- RAM3  -> CC32=2, PC base 0
+- ROM4  -> CC32=2, PC base 50
+- ROM5  -> CC32=3, PC base 0
+- ROM6  -> CC32=3, PC base 50
+- ROM7  -> CC32=4, PC base 0
+- ROM8  -> CC32=4, PC base 50
+- ROM9  -> CC32=5, PC base 0
+- ROM10 -> CC32=5, PC base 50
+- ROM11 -> CC32=1, PC base 0
+- CARD  -> CC32=1, PC base 50
 
-**Blocked on:** a session at the desk. Send a Bank Select and a Program
-Change, then read the unit's display and compare against the catalog. One
-pass over the twelve banks settles it.
+The SR has no patch mode: a Program Change always selects a Performance (or
+a Multiset in Multi mode), never a patch, so `select()` refuses a patch
+slot. The SR's "Bank Select" MIDI-receive parameter must be ON for this to
+work; kwsed cannot read it.
 
 ---
 

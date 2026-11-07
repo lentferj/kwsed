@@ -86,12 +86,25 @@ class Bank:
     reformatted: ROM does not change. Confirmed on hardware -- a freshly
     formatted card reads back 35 of 35 unnamed patches at byte 3, while byte
     11 holds a ROM bank's sounds.
+
+    **Bank Select addressing** (Player's Guide §4.8 and Reference Appendix 3
+    §1.3): the SR's twelve banks are six MIDI banks addressed by CC32 (LSB)
+    0-5; CC0 (MSB) is always 0; each MIDI bank holds two internal banks of
+    50, so Program Change 0-49 selects the first and 50-99 the second. The
+    SR's "Bank Select" MIDI-receive parameter must be ON for this to work;
+    kwsed cannot read it.
     """
 
     number: int  #: 0-11, the position a person sees it in.
     sysex: int  #: the byte a request and a dump actually carry.
     label: str  #: "RAM 1", "ROM 4", "Card".
     writable: bool
+    midi_bank: int  #: CC32 (Bank Select LSB) value, 0-5.
+    program_base: int  #: 0 or 50, added to the slot number for Program Change.
+
+    # Bank Select addressing per Player's Guide §4.8 and Reference Appendix 3
+    # §1.3. The SR's "Bank Select" MIDI-receive parameter must be ON for
+    # this to work; kwsed cannot read it.
 
     @property
     def id(self) -> str:
@@ -102,20 +115,26 @@ class Bank:
 #: The twelve banks in System Exclusive order. Confirmed twice over: the
 #: bank bytes in the owner's factory dumps run 0-11, and Edisyn's
 #: Wavestation support lists the same twelve with the same four writable.
+#: Bank Select addressing per Player's Guide §4.8 and Reference Appendix 3
+#: §1.3: the SR's twelve banks are six MIDI banks addressed by CC32 (LSB)
+#: 0-5; CC0 (MSB) is always 0; each MIDI bank holds two internal banks of
+#: 50, so Program Change 0-49 selects the first and 50-99 the second.
+#: The SR's "Bank Select" MIDI-receive parameter must be ON for this to work;
+#: kwsed cannot read it.
 BANKS: Tuple[Bank, ...] = (
-    #    pos  wire  label      writable
-    Bank(0, 0, "RAM 1", True),
-    Bank(1, 1, "RAM 2", True),
-    Bank(2, 4, "RAM 3", True),
-    Bank(3, 5, "ROM 4", False),
-    Bank(4, 6, "ROM 5", False),
-    Bank(5, 7, "ROM 6", False),
-    Bank(6, 8, "ROM 7", False),
-    Bank(7, 9, "ROM 8", False),
-    Bank(8, 10, "ROM 9", False),
-    Bank(9, 11, "ROM 10", False),
-    Bank(10, 2, "ROM 11", False),
-    Bank(11, 3, "Card", True),
+    #    pos  wire  label      writable  midi_bank  program_base
+    Bank(0, 0, "RAM 1", True, 0, 0),
+    Bank(1, 1, "RAM 2", True, 0, 50),
+    Bank(2, 4, "RAM 3", True, 2, 0),
+    Bank(3, 5, "ROM 4", False, 2, 50),
+    Bank(4, 6, "ROM 5", False, 3, 0),
+    Bank(5, 7, "ROM 6", False, 3, 50),
+    Bank(6, 8, "ROM 7", False, 4, 0),
+    Bank(7, 9, "ROM 8", False, 4, 50),
+    Bank(8, 10, "ROM 9", False, 5, 0),
+    Bank(9, 11, "ROM 10", False, 5, 50),
+    Bank(10, 2, "ROM 11", False, 1, 0),
+    Bank(11, 3, "Card", True, 1, 50),
 )
 
 #: Wire byte -> bank, for reading a dump's own bank byte back into a bank.
