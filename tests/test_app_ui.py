@@ -495,6 +495,67 @@ class TestTheCardSubList:
             assert cards.load(app._cards_path)[7].name == 'Korg WPC-13 "Performance 3"'
             assert "captured Card 07" in str(app.query_one("#status").content)
 
+    async def test_c_files_the_selected_bank_on_your_say_so(self, tmp_path):
+        """The real unit's card-name field is unconfirmed, so a selected
+        Card row is evidence enough to file an uncaptured bank."""
+        app = self._app(tmp_path, card_name=None, seeded=False)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            table = app.query_one("#bank-table")
+            table.move_cursor(
+                row=app._pairs.index(
+                    (banks.bank("CARD").number, banks.Kind.PERFORMANCE)
+                )
+                + 33 * 2
+            )
+            await settle(pilot)
+            assert app._current_card == 33
+            app.action_capture_card()
+            await settle(pilot, 30)
+            assert 33 in app._archive
+            assert app._archive[33].name == "User 09"
+            status = panel_text(app, "#status")
+            assert "captured Card 33" in status
+            assert "filed as bank 33 on your say-so" in status
+            # The slot list and the Card row were refreshed from the capture.
+            assert app._current_card == 33
+            slot = " ".join(
+                str(cell) for cell in app.query_one("#slot-table").get_row_at(0)
+            )
+            assert "Velvet Stack" in slot
+            row = " ".join(str(cell) for cell in table.get_row("card:33:performance"))
+            assert "User 09" in row
+
+    async def test_no_selected_card_still_resolves_from_contents(self, tmp_path):
+        """With no Card row selected, a captured fingerprint still files."""
+        from kws import cards
+        from kwsed.demo import demo_name
+
+        card = banks.bank("CARD")
+        path = str(tmp_path / "cards.json")
+        cards.save(
+            cards.capture(
+                7,
+                "Invented Card",
+                {0: demo_name(card.id, banks.Kind.PERFORMANCE, 0)},
+                {0: demo_name(card.id, banks.Kind.PATCH, 0)},
+                captured_at="2026-11-07T12:00:00+00:00",
+            ),
+            path,
+        )
+        app = KwsedApp(
+            DemoDevice(card_name=None),
+            catalog=cat.Catalog(),
+            cards_path=path,
+        )
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert app._current_card is None
+            app.action_capture_card()
+            await settle(pilot, 30)
+            assert 7 in app._archive
+            assert "captured Card 07" in panel_text(app, "#status")
+
     async def test_c_notifies_the_progress_line_before_the_read(self, tmp_path):
         from kws import cards
 
@@ -518,6 +579,7 @@ class TestTheCardSubList:
         app = self._app(tmp_path, card_name="Not In The Table", seeded=False)
         async with app.run_test() as pilot:
             await pilot.pause()
+            assert app._current_card is None
             app.action_capture_card()
             await settle(pilot, 30)
             assert app._archive == {}

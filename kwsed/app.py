@@ -1611,7 +1611,7 @@ class KwsedApp(App[None]):
             "capturing the Card bank — reading performances and patches "
             "(a few seconds)…"
         )
-        self._capture_card_worker(None)
+        self._capture_card_worker(self._current_card)
 
     def action_card_sweep(self) -> None:
         """Walk the HCard's forty banks, prompting for each selection.
