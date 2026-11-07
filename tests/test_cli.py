@@ -27,7 +27,7 @@ import os
 
 import pytest
 
-from kws import banks
+from kws import banks, cards, dumps
 from kws import messages as m
 from kwsed import cli
 from kwsed.demo import DemoDevice
@@ -36,11 +36,12 @@ from kwsed.demo import DemoDevice
 # and their output is the same on every machine. kws/data/catalog.json is
 # gitignored and present or absent depending on who generated it.
 NO_CATALOG = os.path.join(os.sep, "nonexistent", "kwsed-test-catalog.json")
+NO_CARDS = os.path.join(os.sep, "nonexistent", "kwsed-test-cards.json")
 
 
 def run(argv):
     """main() with the demo device, returning its exit code."""
-    return cli.main(["--demo", "--catalog", NO_CATALOG] + argv)
+    return cli.main(["--demo", "--catalog", NO_CATALOG, "--cards", NO_CARDS] + argv)
 
 
 class TestTable:
@@ -691,7 +692,7 @@ class TestTheChannelArguments:
 
 class TestOfflineNeverBuildsADevice:
     def test_the_offline_set_is_what_it_claims(self):
-        assert set(cli._OFFLINE) == {"banks", "list", "find", "ports"}
+        assert set(cli._OFFLINE) == {"banks", "list", "find", "ports", "cards"}
 
     def test_backup_list_needs_no_unit_but_save_and_restore_do(self):
         parser = cli.build_parser()
@@ -728,3 +729,110 @@ def test_the_argparse_type_is_the_one_the_handlers_expect():
     """A guard on the annotations added when mypy went strict."""
     args = cli.build_parser().parse_args(["list", "CARD", "patch"])
     assert isinstance(args, argparse.Namespace)
+
+
+class TestCardsVerb:
+    """`kwscli cards` is the archive of the HCard's forty banks.
+
+    Offline like `banks` and `list`: it reads no unit, so it works with the
+    synthesiser off, and a `.syx` it writes holds names only.
+    """
+
+    def _archive(self, tmp_path):
+        path = str(tmp_path / "cards.json")
+        cards.save(
+            cards.capture(
+                7,
+                'WPC-13 "Performance 3"',
+                {0: "Opening", 1: "Second"},
+                {0: "Bell"},
+                captured_at="2026-11-07T12:00:00+00:00",
+            ),
+            path,
+        )
+        return path
+
+    def test_the_table_lists_forty_banks(self, capsys):
+        assert run(["cards"]) == 0
+        out = capsys.readouterr().out
+        assert "WS Internal ROM" in out
+        assert "User 15" in out
+        assert out.count("not captured") == 40
+
+    def test_a_captured_bank_is_marked_in_the_table(self, tmp_path, capsys):
+        path = self._archive(tmp_path)
+        assert cli.main(["--cards", path, "cards"]) == 0
+        out = capsys.readouterr().out
+        assert 'WPC-13 "Performance 3"' in out
+        assert out.count("not captured") == 39
+
+    def test_one_bank_shows_its_archive(self, tmp_path, capsys):
+        path = self._archive(tmp_path)
+        assert cli.main(["--cards", path, "cards", "07"]) == 0
+        out = capsys.readouterr().out
+        assert "Card 07" in out
+        assert "Opening" in out
+        assert "Bell" in out
+        assert "Second" in out
+
+    def test_an_uncaptured_bank_still_shows_the_table_name(self, capsys):
+        assert run(["cards", "16"]) == 0
+        out = capsys.readouterr().out
+        assert "WPC-22" in out
+        assert "needs WSC-01" in out
+        assert "not captured" in out
+
+    def test_it_dumps_one_bank_as_syx(self, tmp_path):
+        path = self._archive(tmp_path)
+        out = tmp_path / "bank07.syx"
+        code = cli.main(
+            [
+                "--cards",
+                path,
+                "cards",
+                "07",
+                "--kind",
+                "patch",
+                "--syx",
+                str(out),
+            ]
+        )
+        assert code == 0
+        packets = dumps.read_syx_file(str(out))
+        assert len(packets) == 1
+        packet = packets[0]
+        assert packet.function == m.Function.ALL_PATCH_DUMP
+        assert packet.bank == banks.bank("CARD").sysex
+        dump = dumps.parse_bulk(packet)
+        assert dump.kind == banks.Kind.PATCH
+        assert dump.names()[0] == "Bell"
+
+    def test_syx_without_a_kind_is_a_usage_error(self, tmp_path, capsys):
+        path = self._archive(tmp_path)
+        out = tmp_path / "bank.syx"
+        code = cli.main(["--cards", path, "cards", "07", "--syx", str(out)])
+        assert code != 0
+        assert "needs --kind" in capsys.readouterr().err
+        assert not out.exists()
+
+    def test_syx_of_an_uncaptured_bank_is_a_usage_error(self, tmp_path, capsys):
+        out = tmp_path / "bank.syx"
+        code = cli.main(
+            [
+                "--cards",
+                str(tmp_path / "cards.json"),
+                "cards",
+                "07",
+                "--kind",
+                "patch",
+                "--syx",
+                str(out),
+            ]
+        )
+        assert code != 0
+        assert "not captured" in capsys.readouterr().err
+        assert not out.exists()
+
+    def test_an_unknown_bank_is_a_usage_error(self, capsys):
+        assert run(["cards", "99"]) != 0
+        assert "00-39" in capsys.readouterr().err

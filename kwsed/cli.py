@@ -24,6 +24,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from vinsynlib import cli, midi, render, spec
 from kws import banks
+from kws import cards as _cards
 from kws import catalog as cat
 from kws import livenames as _livenames
 from .buildinfo import build_epilog
@@ -67,6 +68,140 @@ def _cmd_banks(_device: Any, args: argparse.Namespace) -> None:
             ]
         )
     print(render.table(["#", "bank", "performances", "patches", ""], rows))
+
+
+def _cards_path(args: argparse.Namespace) -> str:
+    return getattr(args, "cards", None) or _cards.default_path()
+
+
+def _card_number(text: str) -> int:
+    try:
+        return int(text, 10)
+    except ValueError:
+        raise ValueError(
+            f"{text!r} is not a bank number; the HCard has banks 00-39"
+        ) from None
+
+
+def _cards_status(bank: _cards.CapturedBank | None, entry: _cards.Card) -> str:
+    return _cards.card_words(bank is not None, entry.needs_pcm)
+
+
+def _cmd_cards(_device: Any, args: argparse.Namespace) -> int:
+    """The HCard's forty banks: the table, one archive, or one .syx.
+
+    No unit is needed. The archive is what a capture filed; a ``.syx``
+    written here holds the **names** from that archive and zeroed parameter
+    data, because names are all the archive stores. Saying so plainly beats
+    a file that looks like a whole bank and is not.
+    """
+    archive = _cards.load(_cards_path(args))
+    if getattr(args, "bank", None) is None:
+        rows = []
+        for entry in _cards.cards():
+            bank = archive.get(entry.number)
+            rows.append(
+                [
+                    f"{entry.number:02d}",
+                    bank.name if bank is not None else entry.name,
+                    _cards_status(bank, entry),
+                    str(len(bank.performances)) if bank else "-",
+                    str(len(bank.patches)) if bank else "-",
+                ]
+            )
+        print(render.table(["#", "name", "archive", "performances", "patches"], rows))
+        return spec.EXIT_OK
+
+    try:
+        number = _card_number(args.bank)
+        entry = _cards.card(number)
+    except (LookupError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return spec.EXIT_USAGE
+    bank = archive.get(number)
+    if getattr(args, "syx", None) is not None:
+        return _dump_card_syx(args, entry, bank)
+
+    print(f"Card {number:02d} — {bank.name if bank else entry.name}")
+    print(f"{_cards_status(bank, entry)}")
+    print()
+    rows = []
+    for kind in (banks.Kind.PERFORMANCE, banks.Kind.PATCH):
+        names = bank.names(kind) if bank is not None else {}
+        for slot in range(banks.count_for(kind)):
+            name = names.get(slot, "")
+            rows.append(
+                [
+                    kind[:4],
+                    f"{slot:02d}",
+                    name if name else ("—" if bank is None else "(unnamed)"),
+                ]
+            )
+    print(render.table(["kind", "#", "name"], rows))
+    return spec.EXIT_OK
+
+
+def _dump_card_syx(
+    args: argparse.Namespace,
+    entry: _cards.Card,
+    bank: _cards.CapturedBank | None,
+) -> int:
+    """Write one captured bank as a ``.syx`` frame, names and zeros."""
+    from kws import messages as msg, records as rec
+
+    kind = getattr(args, "kind", None)
+    if kind not in (banks.Kind.PERFORMANCE, banks.Kind.PATCH):
+        print(
+            "error: --syx needs --kind performance or --kind patch",
+            file=sys.stderr,
+        )
+        return spec.EXIT_USAGE
+    if bank is None:
+        print(
+            f"error: Card {entry.number:02d} is not captured, so there is "
+            f"nothing to dump. Select it on the HCard and press C first.",
+            file=sys.stderr,
+        )
+        return spec.EXIT_USAGE
+
+    if kind == banks.Kind.PERFORMANCE:
+        size, count = rec.PERFORMANCE_SIZE, banks.PERFORMANCES_PER_BANK
+        function = msg.Function.ALL_PERFORMANCE_DUMP
+    else:
+        size, count = rec.PATCH_SIZE, banks.PATCHES_PER_BANK
+        function = msg.Function.ALL_PATCH_DUMP
+
+    raw = bytearray(size * count)
+    for slot, name in bank.names(kind).items():
+        if not 0 <= slot < count:
+            continue
+        at = slot * size
+        encoded = bytes(msg.encode_name(name))
+        raw[at : at + len(encoded)] = encoded
+    frame = msg.frame_bulk(function, banks.bank("CARD").sysex, bytes(raw), channel=0)
+
+    destination = args.syx
+    try:
+        if destination == "-":
+            sys.stdout.buffer.write(frame)
+            sys.stdout.buffer.flush()
+        else:
+            with open(destination, "wb") as handle:
+                handle.write(frame)
+    except OSError as exc:
+        print(f"error: {destination} cannot be written ({exc})", file=sys.stderr)
+        return spec.EXIT_ERROR
+    print(
+        f"wrote Card {entry.number:02d} {_plural(kind)} as a {len(frame)}-byte "
+        f"{msg.Function.name(function)}",
+        file=sys.stderr,
+    )
+    print(
+        "names only: the archive stores no parameter data, so every other "
+        "byte in the frame is zero.",
+        file=sys.stderr,
+    )
+    return spec.EXIT_OK
 
 
 def _cmd_list(_device: Any, args: argparse.Namespace) -> None:
@@ -656,8 +791,9 @@ _COMMANDS: Dict[str, Callable[[Any, argparse.Namespace], Any]] = {
     "send": _cmd_send,
     "multi": _cmd_multi,
     "backup": _cmd_backup,
+    "cards": _cmd_cards,
 }
-_OFFLINE = {"banks", "list", "find", "ports"}
+_OFFLINE = {"banks", "list", "find", "ports", "cards"}
 
 
 def _offline(args: argparse.Namespace) -> bool:
@@ -701,10 +837,37 @@ def build_parser() -> argparse.ArgumentParser:
             f"(default: {_livenames.default_path()}; safe to delete)"
         ),
     )
+    parser.add_argument(
+        "--cards",
+        dest="cards",
+        default=None,
+        help=(f"HCard bank archive (default: {_cards.default_path()}; safe to delete)"),
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     kinds = [banks.Kind.PERFORMANCE, banks.Kind.PATCH]
     sub.add_parser("banks", help="the bank table (no unit needed)")
+    sp = sub.add_parser(
+        "cards", help="the HCard's forty banks and their archive (no unit needed)"
+    )
+    sp.add_argument(
+        "bank",
+        nargs="?",
+        default=None,
+        help="show one bank, 00-39 (default: the whole table)",
+    )
+    sp.add_argument(
+        "--kind",
+        choices=kinds,
+        default=None,
+        help="which kind --syx should hold (default: neither)",
+    )
+    sp.add_argument(
+        "--syx",
+        default=None,
+        metavar="FILE",
+        help="write one archived bank as a .syx (names only; '-' for stdout)",
+    )
     sp = sub.add_parser("list", help="one bank's slots (no unit needed)")
     sp.add_argument("bank")
     sp.add_argument("kind", choices=kinds)
