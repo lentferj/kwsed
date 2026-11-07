@@ -1607,6 +1607,10 @@ class KwsedApp(App[None]):
         if not self._exchange.acquire(blocking=False):
             self.notify_status("busy", refused=True)
             return
+        self.notify_status(
+            "capturing the Card bank — reading performances and patches "
+            "(a few seconds)…"
+        )
         self._capture_card_worker(None)
 
     def action_card_sweep(self) -> None:
@@ -1649,6 +1653,10 @@ class KwsedApp(App[None]):
         if not proceed:
             self._card_sweep_finish(filed, index)
             return
+        self.notify_status(
+            "capturing the Card bank — reading performances and patches "
+            "(a few seconds)…"
+        )
         self._capture_card_worker(index, next_index=index + 1, filed=filed, sweep=True)
 
     def _card_sweep_finish(self, filed: int, stopped_at: int) -> None:

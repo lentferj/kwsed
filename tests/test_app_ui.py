@@ -495,6 +495,25 @@ class TestTheCardSubList:
             assert cards.load(app._cards_path)[7].name == 'Korg WPC-13 "Performance 3"'
             assert "captured Card 07" in str(app.query_one("#status").content)
 
+    async def test_c_notifies_the_progress_line_before_the_read(self, tmp_path):
+        from kws import cards
+
+        app = self._app(tmp_path, card_name='Korg WPC-13 "Performance 3"', seeded=False)
+        recorded = []
+
+        def spy(*args, **kwargs):
+            recorded.append((args, kwargs))
+
+        app.notify_status = spy
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.action_capture_card()
+            await settle(pilot, 30)
+        texts = [str(entry[0][0]) for entry in recorded if entry[0]]
+        assert any("capturing the Card bank" in text for text in texts)
+        assert any("captured Card" in text for text in texts)
+        assert cards.load(app._cards_path)[7].name == 'Korg WPC-13 "Performance 3"'
+
     async def test_an_unknown_card_name_is_refused_not_filed(self, tmp_path):
         app = self._app(tmp_path, card_name="Not In The Table", seeded=False)
         async with app.run_test() as pilot:

@@ -37,11 +37,24 @@ from kwsed.demo import DemoDevice
 # gitignored and present or absent depending on who generated it.
 NO_CATALOG = os.path.join(os.sep, "nonexistent", "kwsed-test-catalog.json")
 NO_CARDS = os.path.join(os.sep, "nonexistent", "kwsed-test-cards.json")
+# A live-names path that cannot exist, so no real machine cache is read.
+NO_LIVE_NAMES = os.path.join(os.sep, "nonexistent", "kwsed-test-live-names.json")
 
 
 def run(argv):
     """main() with the demo device, returning its exit code."""
-    return cli.main(["--demo", "--catalog", NO_CATALOG, "--cards", NO_CARDS] + argv)
+    return cli.main(
+        [
+            "--demo",
+            "--catalog",
+            NO_CATALOG,
+            "--cards",
+            NO_CARDS,
+            "--live-names",
+            NO_LIVE_NAMES,
+        ]
+        + argv
+    )
 
 
 class TestTable:
