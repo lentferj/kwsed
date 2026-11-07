@@ -72,6 +72,7 @@ def test_the_legend_matches_the_family() -> None:
             "m channels",
             "e edit multi",
             "S scan",
+            "C capture card",
             "V rating filter",
             "z undo",
             "w write gate",

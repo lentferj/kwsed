@@ -65,6 +65,7 @@ from textual.screen import ModalScreen
 from textual.widgets import DataTable, Header, Input, Label, Select, Static
 
 from kws import banks
+from kws import cards as _cards
 from kws import messages as m
 from kws import catalog as cat
 from kws import livenames as _livenames
@@ -141,6 +142,7 @@ KEY_HINTS = (
     "m channels",
     "e edit multi",
     "S scan",
+    "C capture card",
     "V rating filter",
     "z undo",
     "w write gate",
@@ -749,6 +751,7 @@ class KwsedApp(App[None]):
         Binding("tab", "switch_pane", "Switch pane"),
         Binding("q", "quit", "Quit"),
         Binding("S", "scan_device", "Scan"),
+        Binding("C", "capture_card", "Capture card"),
         Binding("V", "rating_filter", "Rating filter"),
         Binding("z", "undo", "Undo"),
         Binding("w", "toggle_write_gate", "Write gate"),
@@ -762,6 +765,7 @@ class KwsedApp(App[None]):
         favorites: Optional[Favorites] = None,
         config_path: Optional[str] = None,
         live_path: Optional[str] = None,
+        cards_path: Optional[str] = None,
         allow_write: bool = False,
     ) -> None:
         super().__init__()
@@ -779,17 +783,39 @@ class KwsedApp(App[None]):
         #: Where hardware-read names are cached between runs. None disables
         #: persistence, as in tests and --demo.
         self._live_path = live_path
+        #: The HCard archive, beside the favourites database. None keeps
+        #: captures in memory only, as in tests and --demo.
+        self._cards_path = cards_path
+        self._archive: Dict[int, _cards.CapturedBank] = (
+            _cards.load(cards_path) if cards_path is not None else {}
+        )
         self._lock = threading.RLock()
         #: The left pane lists bank-and-kind pairs, because a Wavestation
         #: bank holds 50 performances *and* 35 patches and they are
         #: different things. A pane listing banks alone would need a second
         #: control to say which kind, for no gain.
-        self._pairs: List[Tuple[int, str]] = [
+        #:
+        #: The physical Card is not one row pair: an HCard multiplexes
+        #: forty banks behind it (docs/HCARD.md, decision 4-A1), so it
+        #: expands into forty sub-banks, each listed once per kind.
+        self._real_pairs: List[Tuple[int, str]] = [
             (entry.number, kind)
             for entry in banks.BANKS
+            if entry.id != "CARD"
             for kind in (banks.Kind.PERFORMANCE, banks.Kind.PATCH)
         ]
+        self._pairs: List[Tuple[int, str]] = self._real_pairs + [
+            (banks.bank("CARD").number, kind)
+            for _number in _cards.bank_numbers()
+            for kind in (banks.Kind.PERFORMANCE, banks.Kind.PATCH)
+        ]
+        #: Which HCard sub-bank each row of ``_pairs`` is, or None for the
+        #: ten physical banks that are not the Card.
+        self._row_cards: List[Optional[int]] = [None] * len(self._real_pairs) + [
+            number for number in _cards.bank_numbers() for _kind in range(2)
+        ]
         self._current_pair = self._pairs[0]
+        self._current_card: Optional[int] = None
         self._current: List[banks.Slot] = []
         self._busy_gate = BusyGate()
         self._exchange = threading.Lock()
@@ -1036,6 +1062,44 @@ class KwsedApp(App[None]):
         # module's KEY_HINTS global, which a library cannot do.
         yield KeyHints(KEY_HINTS)
 
+    def _row_key(self, pair: Tuple[int, str], card: Optional[int]) -> str:
+        """The stable key of one left-pane row."""
+        number, kind = pair
+        if card is None:
+            return f"{number}:{kind}"
+        return f"card:{card:02d}:{kind}"
+
+    def _card_row_name(self, number: int) -> str:
+        """The name cell of one HCard sub-bank.
+
+        Not captured is greyed rather than hidden: the forty banks are the
+        reason the Card row exists, and a bank that has not been read is
+        still a place a capture can land.
+        """
+        captured = self._archive.get(number)
+        if captured is None:
+            return "[dim]not captured[/dim]"
+        printed = _cards.card(number).name
+        name = captured.name or printed
+        if name.strip().casefold() != printed.strip().casefold():
+            return f"{name} [dim]*[/dim]"
+        return name
+
+    def _bank_row(self, pair: Tuple[int, str], card: Optional[int]) -> List[str]:
+        number, kind = pair
+        entry = banks.bank(number)
+        marked = len(self._favorite_keys(entry.id, kind))
+        return [
+            entry.label if card is None else f"Card {card:02d}",
+            kind[:4],
+            str(banks.count_for(kind)),
+            "" if entry.writable else "ro",
+            "" if card is None else self._card_row_name(card),
+            # blank rather than "0": a column of zeroes is
+            # noise, and the eye wants the few that differ
+            str(marked) if marked else "",
+        ]
+
     def on_mount(self) -> None:
         self.title = "kwsed"
         table = self.query_one("#bank-table", DataTable)
@@ -1044,21 +1108,14 @@ class KwsedApp(App[None]):
             ("kind", "kind"),
             ("n", "n"),
             ("", "rw"),
+            ("name", "name"),
             ("♥", "fav"),
         ):
             table.add_column(label, key=key)
-        for number, kind in self._pairs:
-            entry = banks.bank(number)
-            marked = len(self._favorite_keys(entry.id, kind))
+        for pair, card in zip(self._pairs, self._row_cards):
             table.add_row(
-                entry.label,
-                kind[:4],
-                str(banks.count_for(kind)),
-                "" if entry.writable else "ro",
-                # blank rather than "0": a column of zeroes is
-                # noise, and the eye wants the few that differ
-                str(marked) if marked else "",
-                key=f"{number}:{kind}",
+                *self._bank_row(pair, card),
+                key=self._row_key(pair, card),
             )
 
         slots = self.query_one("#slot-table", DataTable)
@@ -1094,7 +1151,13 @@ class KwsedApp(App[None]):
         for favourite in self.favorites.all(order="bank"):
             wanted.setdefault(favourite.bank_id, set()).add(favourite.number)
         out: List[banks.Slot] = []
-        for number, kind in self._pairs:
+        # The Card's forty sub-banks share the one CARD key (decision 8-B1),
+        # so a favourite there is listed once, not forty times.
+        pairs = self._real_pairs + [
+            (banks.bank("CARD").number, kind)
+            for kind in (banks.Kind.PERFORMANCE, banks.Kind.PATCH)
+        ]
+        for number, kind in pairs:
             entry = banks.bank(number)
             numbers = wanted.get(favorite_bank_id(entry.id, kind))
             if not numbers:
@@ -1312,28 +1375,41 @@ class KwsedApp(App[None]):
     def _refill_keeping_place(self) -> None:
         table = self.query_one("#slot-table", DataTable)
         row = table.cursor_row or 0
-        self._fill(self._current_pair)
+        self._fill(self._current_pair, self._current_card)
         if self._current:
             table.move_cursor(row=min(row, len(self._current) - 1))
 
-    def _fill(self, pair: Tuple[int, str]) -> None:
+    def _card_slot_name(self, card: int, kind: str, number: int) -> str:
+        captured = self._archive.get(card)
+        if captured is None:
+            return ""
+        return captured.names(kind).get(number, "")
+
+    def _slot_shown_name(self, item: banks.Slot, card: Optional[int]) -> str:
+        if card is not None:
+            name = self._card_slot_name(card, item.kind, item.number)
+            return f"[b]{name}[/b]" if name else "[dim]not captured[/dim]"
+        name = self.catalog.display_name(item.bank.id, item.number, item.kind)
+        if self.catalog.differs(item.bank.id, item.number, item.kind):
+            return f"[b]{name}[/b] [dim]*[/dim]"
+        if self.catalog.is_live(item.bank.id, item.number, item.kind):
+            return f"[b]{name}[/b]"
+        return name
+
+    def _fill(self, pair: Tuple[int, str], card: Optional[int] = None) -> None:
         table = self.query_one("#slot-table", DataTable)
         self._current_pair = pair
+        self._current_card = card
         self._current = self._visible(pair)
         self._filling = True
         try:
             table.clear()
             for item in self._current:
-                name = self.catalog.display_name(item.bank.id, item.number, item.kind)
-                if self.catalog.differs(item.bank.id, item.number, item.kind):
-                    shown = f"[b]{name}[/b] [dim]*[/dim]"
-                elif self.catalog.is_live(item.bank.id, item.number, item.kind):
-                    shown = f"[b]{name}[/b]"
-                else:
-                    shown = name
+                shown = self._slot_shown_name(item, card)
                 marked = self._favorite_keys(item.bank.id, item.kind)
+                where = f"Card {card:02d}" if card is not None else item.bank.label
                 label = (
-                    f"{item.bank.label} {item.kind[:4]} {item.number:02d}"
+                    f"{where} {item.kind[:4]} {item.number:02d}"
                     if self.view_mode == VIEW_ALL_FAVOURITES
                     else f"{item.number:02d}"
                 )
@@ -1352,6 +1428,9 @@ class KwsedApp(App[None]):
             self.query_one("#detail", Static).update("")
             return
         item = self._current[row]
+        if self._current_card is not None:
+            self._detail_card(item)
+            return
         name = self.catalog.display_name(item.bank.id, item.number, item.kind)
         note = ""
         if self.catalog.differs(item.bank.id, item.number, item.kind):
@@ -1370,6 +1449,25 @@ class KwsedApp(App[None]):
             f"a Bank Select actually reaches is not established[/dim]"
         )
 
+    def _detail_card(self, item: banks.Slot) -> None:
+        """The detail line for one HCard sub-bank."""
+        number = self._current_card
+        if number is None:  # pragma: no cover - the caller checked
+            return
+        entry = _cards.card(number)
+        captured = self._archive.get(number)
+        name = self._card_slot_name(number, item.kind, item.number)
+        if captured is None:
+            status = "not captured — select this bank on the HCard and press C"
+            shown = name or "[dim](no archive)[/dim]"
+        else:
+            status = f"captured {captured.captured_at}"
+            shown = name or "[dim](unnamed)[/dim]"
+        self.query_one("#detail", Static).update(
+            f"[b]Card {number:02d} {item.kind} {item.number:02d}[/b]  {shown}\n"
+            f"{entry.name}   [dim]{status}[/dim]"
+        )
+
     def notify_status(self, message: str, *, refused: bool = False) -> None:
         prefix = "[b]refused[/b] · " if refused else ""
         self.query_one("#status", Static).update(prefix + message)
@@ -1382,7 +1480,7 @@ class KwsedApp(App[None]):
         if event.data_table.id == "bank-table":
             row = event.cursor_row
             if 0 <= row < len(self._pairs):
-                self._fill(self._pairs[row])
+                self._fill(self._pairs[row], self._row_cards[row])
         elif event.data_table.id == "slot-table":
             self._detail(event.cursor_row)
 
@@ -1435,6 +1533,13 @@ class KwsedApp(App[None]):
         )
 
     def action_read_names(self) -> None:
+        if self._current_card is not None:
+            self.notify_status(
+                "this is one of the Card's forty banks -- select it on the "
+                "HCard and press C to capture it",
+                refused=True,
+            )
+            return
         if self._busy:
             self.notify_status("busy", refused=True)
             return
@@ -1442,6 +1547,94 @@ class KwsedApp(App[None]):
             self.notify_status("busy", refused=True)
             return
         self._read_worker(*self._current_pair)
+
+    def action_capture_card(self) -> None:
+        """Read the active HCard bank and file it in the archive.
+
+        Reads the card name and both name lists, resolves which of the
+        forty banks is in front of the synth, and writes one archive
+        record. **Read-only** on the unit: nothing is selected, written or
+        changed.
+        """
+        if self._busy:
+            self.notify_status("busy", refused=True)
+            return
+        if not self._exchange.acquire(blocking=False):
+            self.notify_status("busy", refused=True)
+            return
+        self._capture_card_worker(None)
+
+    @work(thread=True)
+    def _capture_card_worker(self, expected: Optional[int]) -> None:
+        """**MIDI only** -- the archive is updated on the main thread."""
+        failure: BaseException | None = None
+        payload: Any = None
+        try:
+            with self._busy_gate, self._lock:
+                reader = getattr(self.device, "read_card_name", None)
+                name = reader() if callable(reader) else None
+                _, performances = self.device.read_bank_names(
+                    "CARD", banks.Kind.PERFORMANCE
+                )
+                _, patches = self.device.read_bank_names("CARD", banks.Kind.PATCH)
+            payload = (name, performances, patches)
+        except _BRIDGE_ERRORS as exc:
+            failure = exc
+        finally:
+            self._exchange.release()
+        if failure is not None:
+            self.call_from_thread(
+                self.notify_status, f"capture: {failure}", refused=True
+            )
+            return
+        self.call_from_thread(self._file_capture, payload, expected)
+
+    def _file_capture(self, payload: Any, expected: Optional[int]) -> bool:
+        name, performances, patches = payload
+        number = expected
+        if number is None:
+            number = _cards.resolve(
+                name,
+                performances.get(0),
+                patches.get(0),
+                captured=self._archive,
+            )
+        if number is None:
+            self.notify_status(
+                "capture: could not tell which Card bank this is. Select "
+                "its row and capture again to file it there.",
+                refused=True,
+            )
+            return False
+        captured = _cards.capture(
+            number,
+            name or _cards.card(number).name,
+            performances,
+            patches,
+        )
+        self._archive[number] = captured
+        if self._cards_path is not None:
+            _cards.save(captured, self._cards_path)
+        self._refresh_card_row(number)
+        if self._current_card == number:
+            self._fill(self._current_pair, number)
+        message = (
+            f"captured Card {number:02d} {captured.name!r}: "
+            f"{len(performances)} performances, {len(patches)} patches"
+        )
+        if not name:
+            message += " (no card name; identified from its contents)"
+        self.notify_status(message)
+        return True
+
+    def _refresh_card_row(self, number: int) -> None:
+        table = self.query_one("#bank-table", DataTable)
+        for kind in (banks.Kind.PERFORMANCE, banks.Kind.PATCH):
+            key = self._row_key((banks.bank("CARD").number, kind), number)
+            try:
+                table.update_cell(key, "name", self._card_row_name(number))
+            except Exception:  # noqa: S110 - the row may be filtered away
+                pass
 
     @work(thread=True)
     def _read_worker(self, bank_id: int, kind: str) -> None:
@@ -1471,7 +1664,7 @@ class KwsedApp(App[None]):
             self.catalog.set_live_name(entry.id, number, name, kind)
         differing = sum(1 for n in names if self.catalog.differs(entry.id, n, kind))
         if self._current_pair == (entry.number, kind):
-            self._fill(self._current_pair)
+            self._fill(self._current_pair, self._current_card)
         if self._live_path is not None:
             flat = {
                 _livenames.key(entry.id, number, kind): name
@@ -1516,9 +1709,9 @@ class KwsedApp(App[None]):
     @work(thread=True)
     def _scan_worker(self) -> None:
         done = 0
-        total = len(self._pairs)
+        total = len(self._real_pairs)
         try:
-            for number, kind in self._pairs:
+            for number, kind in self._real_pairs:
                 if self._scan_cancel.is_set():
                     break
                 try:
@@ -1556,7 +1749,7 @@ class KwsedApp(App[None]):
     def _has_cached_names(self) -> bool:
         return any(
             self.catalog.is_live(banks.bank(n).id, slot.number, k)
-            for n, k in self._pairs
+            for n, k in self._real_pairs
             for slot in banks.slots(n, k)
         )
 
@@ -1950,12 +2143,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         if getattr(args, "demo", False)
         else (getattr(args, "live_names", None) or _livenames.default_path())
     )
+    cards_path = None if getattr(args, "demo", False) else _cards.default_path()
     app = KwsedApp(
         device,
         catalog=cat.load(args.catalog),
         favorites=store,
         config_path=config_path,
         live_path=live_path,
+        cards_path=cards_path,
         allow_write=getattr(args, "allow_write", False),
     )
     try:

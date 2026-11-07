@@ -367,10 +367,10 @@ class TestWithoutAFavouritesStore:
 
 
 class TestTheBankTable:
-    async def test_it_lists_twelve_banks_twice_over(self, app):
+    async def test_it_lists_ten_banks_twice_and_the_card_forty_ways(self, app):
         async with app.run_test() as pilot:
             await pilot.pause()
-            assert app.query_one("#bank-table").row_count == 24
+            assert app.query_one("#bank-table").row_count == 22 + 80
 
     async def test_moving_down_it_changes_bank_and_sends_nothing(self, app):
         async with app.run_test() as pilot:
@@ -399,3 +399,90 @@ class TestRatingFilterKeysOnKindQualifiedBankId:
         app.rating_filter = RatingFilter(stars=3, at_least=True)
         out = app._by_rating(entries)
         assert [e.number for e in out] == [0]
+
+
+class TestTheCardSubList:
+    """The Card row expands into the HCard's forty banks (decision 4-A1).
+
+    An unread bank is greyed rather than hidden, because the forty rows are
+    why the Card exists here; a captured one shows the name it reported and
+    a `*` where that differs from the printed table.
+    """
+
+    def _app(self, tmp_path, *, card_name=None, seeded=True):
+        from kws import cards
+
+        path = str(tmp_path / "cards.json")
+        if seeded:
+            cards.save(
+                cards.capture(
+                    7,
+                    "Invented Card",
+                    {0: "Opening"},
+                    {0: "Bell"},
+                    captured_at="2026-11-07T12:00:00+00:00",
+                ),
+                path,
+            )
+        return KwsedApp(
+            DemoDevice(card_name=card_name),
+            catalog=cat.Catalog(),
+            cards_path=path,
+        )
+
+    async def test_unread_banks_are_greyed_not_captured(self, tmp_path):
+        app = self._app(tmp_path, seeded=False)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            table = app.query_one("#bank-table")
+            cells = [str(cell) for cell in table.get_row("card:08:performance")]
+            assert "not captured" in " ".join(cells)
+
+    async def test_a_captured_bank_shows_its_name(self, tmp_path):
+        app = self._app(tmp_path)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            table = app.query_one("#bank-table")
+            cells = [str(cell) for cell in table.get_row("card:07:performance")]
+            assert "Invented Card" in " ".join(cells)
+
+    async def test_the_right_pane_shows_archive_names(self, tmp_path):
+        app = self._app(tmp_path)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            table = app.query_one("#bank-table")
+            table.move_cursor(
+                row=app._pairs.index((banks.bank("CARD").number, "performance")) + 7 * 2
+            )
+            await settle(pilot)
+            assert slot_row(app) == 50
+            assert "Opening" in str(app.query_one("#slot-table").get_row_at(0))
+
+    async def test_c_captures_the_active_bank(self, tmp_path):
+        from kws import cards
+
+        app = self._app(tmp_path, card_name='WPC-13 "Performance 3"', seeded=False)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.action_capture_card()
+            await settle(pilot, 30)
+            assert 7 in app._archive
+            assert cards.load(app._cards_path)[7].name == 'WPC-13 "Performance 3"'
+            assert "captured Card 07" in str(app.query_one("#status").content)
+
+    async def test_an_unknown_card_name_is_refused_not_filed(self, tmp_path):
+        app = self._app(tmp_path, card_name="Not In The Table", seeded=False)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.action_capture_card()
+            await settle(pilot, 30)
+            assert app._archive == {}
+            assert "could not tell" in str(app.query_one("#status").content)
+
+    async def test_r_on_a_card_row_points_at_capture(self, tmp_path):
+        app = self._app(tmp_path, seeded=False)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._fill((banks.bank("CARD").number, "performance"), 7)
+            app.action_read_names()
+            assert "press C" in str(app.query_one("#status").content)

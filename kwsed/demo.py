@@ -75,8 +75,16 @@ def demo_name(bank_id: str, kind: str, number: int) -> str:
 class DemoDevice:
     """Answers the subset of the protocol kwsed speaks."""
 
-    def __init__(self, *, latency: float = 0.0, channel: int = 4) -> None:
+    def __init__(
+        self,
+        *,
+        latency: float = 0.0,
+        channel: int = 4,
+        card_name: Optional[str] = None,
+    ) -> None:
         self.description = "demo (no MIDI ports opened)"
+        #: The name the fake card reports. Invented, like every demo name.
+        self.card_name = card_name
         #: Not channel 0: a fake on the default would let a caller that
         #: never set the channel work by accident and fail on real hardware.
         self.channel = channel
@@ -175,6 +183,11 @@ class DemoDevice:
     ) -> Tuple[str, Dict[int, str]]:
         dump = self.read_bank(bank, kind)
         return dump.kind, dump.names()
+
+    def read_card_name(self, *, timeout: Optional[float] = None) -> Optional[str]:
+        """The fake card's name, or ``None`` when it has not got one."""
+        self._tick()
+        return self.card_name
 
     def select(self, slot: banks.Slot, *, channel: Optional[int] = None) -> None:
         self._tick()
