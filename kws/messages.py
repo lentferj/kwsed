@@ -210,6 +210,9 @@ DATA_OFFSET = {
     # look like data -- the names even decode -- so this is the difference
     # between a right answer and a plausible wrong one.
     Function.MULTISET_DUMP: 7,
+    # The System Setup dump carries no bank and no number, so its data
+    # starts immediately after the function byte.
+    Function.SYSTEM_SETUP_DUMP: 5,
 }
 
 

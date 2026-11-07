@@ -68,6 +68,8 @@ __all__ = [
     "SEND_GAP",
     "DEFAULT_TIMEOUT",
     "DUMP_TIMEOUT",
+    "CARD_NAME_OFFSET",
+    "CARD_NAME_LEN",
     "MidiUnavailable",
     "DeviceError",
     "DeviceRefused",
@@ -97,6 +99,18 @@ SINGLE_OBJECT_TIMEOUT = 15.0
 #: How long to wait for a bank dump. A patch bank is nearly 30 kB, which is
 #: about eight seconds of 31250-baud MIDI before the unit's own delay.
 DUMP_TIMEOUT = 20.0
+
+#: Where the card-name field sits in the **decoded** System Setup dump
+#: (function ``0x51``), and how long it is.
+#:
+#: CONFIRM AGAINST HARDWARE: the offset is the one wire fact this feature
+#: does not yet have. It is 0 until the read-only probe
+#: (``tools/probe_card_name.py``) is compared against a real unit; until
+#: then :meth:`WavestationBridge.read_card_name` returns whatever the first
+#: sixteen bytes decode to, and the archive's identity resolution treats an
+#: implausible name as unknown rather than filing it under a wrong bank.
+CARD_NAME_OFFSET = 0
+CARD_NAME_LEN = 16
 
 #: Which dump a bank request for a kind draws. The manual documents both;
 #: kwsed sent only the patch one for its whole life and read the end of
@@ -781,6 +795,55 @@ class WavestationBridge:
         """``(kind, {number: name})`` for one bank of one kind. Silent."""
         dump = self.read_bank(bank, kind, timeout=timeout)
         return dump.kind, dump.names()
+
+    def read_system_setup(self, *, timeout: Optional[float] = None) -> Optional[bytes]:
+        """The System Setup dump (``0x51``) as decoded bytes. Read-only.
+
+        One small request, no selection and no sound. ``None`` rather than
+        a timeout exception: the card name this dump carries is a hint used
+        to identify which HCard bank is in front of the synth, and a unit
+        that does not answer is "unknown", not a failure of the browser.
+        An explicit refusal still raises :class:`DeviceRefused`, because
+        that is a different answer from silence.
+        """
+        self._drain()
+        self._send(m.frame(m.Function.SYSTEM_SETUP_REQUEST, [], channel=self.channel))
+        deadline = time.time() + (DEFAULT_TIMEOUT if timeout is None else timeout)
+        while time.time() < deadline:
+            message = self._in.get_message()
+            if message is None:
+                time.sleep(0.002)
+                continue
+            packet = m.parse(message[0])
+            if packet is None or packet.channel != self.channel:
+                continue
+            if packet.is_error:
+                raise DeviceRefused(packet.function)
+            if packet.function != m.Function.SYSTEM_SETUP_DUMP:
+                continue
+            return packet.data()
+        return None
+
+    def read_card_name(self, *, timeout: Optional[float] = None) -> Optional[str]:
+        """The card name the synth reports, or ``None`` when it has none.
+
+        The HCard rewrites this field whenever a bank is selected on the
+        card (docs/HCARD.md section 2), so it is the only identity signal
+        the Wavestation exposes for "which of the forty banks is active".
+
+        ``None`` is not an error: a real card may hold no name, an empty
+        field decodes to nothing, and a unit that has not answered leaves
+        the question open. The caller resolves identity from the first
+        performance and patch names in that case.
+        """
+        data = self.read_system_setup(timeout=timeout)
+        if data is None:
+            return None
+        end = CARD_NAME_OFFSET + CARD_NAME_LEN
+        if len(data) < end:
+            return None
+        name = m.decode_name(data[CARD_NAME_OFFSET:end])
+        return name or None
 
     def select(self, slot: banks.Slot, *, channel: Optional[int] = None) -> None:
         """Select a performance or patch. **This changes the sound.**

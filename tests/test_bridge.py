@@ -122,6 +122,9 @@ class Unit:
         self.contents = contents
         self.answer = answer
         self.mode = mode
+        #: The decoded System Setup payload the double answers with. Long
+        #: enough for the card-name field at the constants' current offset.
+        self.system_setup = bytearray(64)
         self.bridge = WavestationBridge(self.midi_in, self.midi_out, channel=0)
         # Replacing a method on the instance is the point of this double.
         self.midi_out.send_message = self._sent  # type: ignore[method-assign]
@@ -212,12 +215,24 @@ class Unit:
             return m.frame(m.Function.WRITE_ERROR, channel=0)
         return _multiset_dump()
 
+    def _system_setup_request(self, data):
+        if self.mode == "read_error":
+            return m.frame(m.Function.WRITE_ERROR, channel=0)
+        if self.mode == "short_setup":
+            return m.frame(m.Function.SYSTEM_SETUP_DUMP, [0, 0], channel=0)
+        return m.frame(
+            m.Function.SYSTEM_SETUP_DUMP,
+            list(m.to_nibbles(bytes(self.system_setup))),
+            channel=0,
+        )
+
     _HANDLERS = {
         0x7E: _identity,
         m.Function.SINGLE_PATCH_REQUEST: _patch_request,
         m.Function.SINGLE_PATCH_DUMP: _patch_dump,
         m.Function.PATCH_WRITE: _patch_write,
         m.Function.MULTI_REQUEST: _multi_request,
+        m.Function.SYSTEM_SETUP_REQUEST: _system_setup_request,
     }
 
 
@@ -471,3 +486,44 @@ class TestTheDrain:
         unit.midi_in.queue.append((list(stale), 0.0))
         unit.bridge._drain()
         assert unit.midi_in.queue == [], "the stale reply is gone"
+
+
+class TestReadCardName:
+    """The System Setup dump is the only place a card's name is exposed.
+
+    Its offset is the one wire fact docs/HCARD.md leaves open, so these
+    tests pin the contract around it: a name at the constants, nothing at
+    all when the field is empty, and ``None`` rather than an exception when
+    the unit stays silent. A refusal is still a refusal.
+    """
+
+    def test_a_blank_field_is_none_not_an_empty_string(self):
+        assert Unit().bridge.read_card_name(timeout=0.1) is None
+
+    def test_the_name_at_the_constants_comes_back(self):
+        unit = Unit()
+        name = b"WPC-13 Perf 3"
+        unit.system_setup[: len(name)] = name
+        assert unit.bridge.read_card_name(timeout=0.1) == "WPC-13 Perf 3"
+
+    def test_the_request_is_the_system_setup_one(self):
+        unit = Unit()
+        unit.bridge.read_card_name(timeout=0.1)
+        assert unit.midi_out.sent[-1][4] == m.Function.SYSTEM_SETUP_REQUEST
+
+    def test_silence_is_none_rather_than_a_timeout_error(self):
+        assert Unit(answer=False).bridge.read_card_name(timeout=0.01) is None
+
+    def test_a_refusal_is_still_raised(self):
+        with pytest.raises(DeviceRefused):
+            Unit(mode="read_error").bridge.read_card_name(timeout=0.1)
+
+    def test_a_dump_too_short_for_the_field_is_none(self):
+        assert Unit(mode="short_setup").bridge.read_card_name(timeout=0.1) is None
+
+    def test_the_raw_setup_dump_is_available_for_the_probe(self):
+        unit = Unit()
+        unit.system_setup[0:4] = b"ABCD"
+        data = unit.bridge.read_system_setup(timeout=0.1)
+        assert data is not None
+        assert data[:4] == b"ABCD"
