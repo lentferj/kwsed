@@ -48,6 +48,7 @@ silent and permanent.
 
 from __future__ import annotations
 
+import re
 import signal
 import sys
 import time
@@ -106,9 +107,10 @@ DUMP_TIMEOUT = 20.0
 #: CONFIRM AGAINST HARDWARE: the offset is the one wire fact this feature
 #: does not yet have. It is 0 until the read-only probe
 #: (``tools/probe_card_name.py``) is compared against a real unit; until
-#: then :meth:`WavestationBridge.read_card_name` returns whatever the first
-#: sixteen bytes decode to, and the archive's identity resolution treats an
-#: implausible name as unknown rather than filing it under a wrong bank.
+#: then :meth:`WavestationBridge.read_card_name` accepts the first sixteen
+#: bytes only when they look like a name, so the archive's identity
+#: resolution treats anything implausible as unknown rather than filing it
+#: under a wrong bank.
 CARD_NAME_OFFSET = 0
 CARD_NAME_LEN = 16
 
@@ -842,8 +844,13 @@ class WavestationBridge:
         end = CARD_NAME_OFFSET + CARD_NAME_LEN
         if len(data) < end:
             return None
-        name = m.decode_name(data[CARD_NAME_OFFSET:end])
-        return name or None
+        name = m.decode_name(data[CARD_NAME_OFFSET:end]).strip()
+        # CONFIRM AGAINST HARDWARE: while the offset is unconfirmed, trust
+        # the field only if it reads as a name; probes belong in
+        # tools/probe_card_name.py, and garbage here is "no usable name".
+        if re.fullmatch(r"[ -~]{4,}", name) is None:
+            return None
+        return name
 
     def select(self, slot: banks.Slot, *, channel: Optional[int] = None) -> None:
         """Select a performance or patch. **This changes the sound.**

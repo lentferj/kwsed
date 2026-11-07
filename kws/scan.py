@@ -35,9 +35,11 @@ ScanOffer = str
 
 SCAN_OFFER = (
     "There is no name catalog yet, so the programs show as numbers.\n\n"
-    "Scanning reads the names back from the unit. Every bank is read "
-    "silently, one bulk message each: nothing is selected and nothing "
-    "sounds. This changes nothing on the unit."
+    "Scanning reads the names back from the unit's internal banks (RAM 1-3 "
+    "and the ROM banks), one bulk message each: nothing is selected and "
+    "nothing sounds. Card banks are captured separately: the C capture "
+    "reads the bank on the card, and the X card sweep walks all forty. "
+    "This changes nothing on the unit."
 )
 
 

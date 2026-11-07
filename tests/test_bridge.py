@@ -506,6 +506,22 @@ class TestReadCardName:
         unit.system_setup[: len(name)] = name
         assert unit.bridge.read_card_name(timeout=0.1) == "WPC-13 Perf 3"
 
+    def test_a_garbage_field_is_none_not_a_plausible_name(self):
+        """The offset is unconfirmed, so binary in the field is "unknown".
+
+        The first sixteen decoded bytes used to be returned whatever they
+        were; a control-byte field is now no usable name rather than a
+        name that files a capture under the wrong bank.
+        """
+        unit = Unit()
+        unit.system_setup[:16] = bytes(range(1, 17))
+        assert unit.bridge.read_card_name(timeout=0.1) is None
+
+    def test_a_name_shorter_than_four_characters_is_none(self):
+        unit = Unit()
+        unit.system_setup[:2] = b"AB"
+        assert unit.bridge.read_card_name(timeout=0.1) is None
+
     def test_the_request_is_the_system_setup_one(self):
         unit = Unit()
         unit.bridge.read_card_name(timeout=0.1)
