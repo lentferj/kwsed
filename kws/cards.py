@@ -38,17 +38,24 @@ backups -- decision 8-B1. The forty banks are a browse overlay over it.
 
 from __future__ import annotations
 
+import json
+import os
+import sys
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Dict, List, Optional, Tuple
 
-from kws.banks import PATCHES_PER_BANK, PERFORMANCES_PER_BANK, count_for
+from kws import favorites
+from kws.banks import PATCHES_PER_BANK, PERFORMANCES_PER_BANK, Kind, count_for
 
 __all__ = [
     "Category",
     "Card",
+    "CapturedBank",
     "USER_FIRST",
     "USER_LAST",
     "CARDS",
+    "FILE_NAME",
     "PATCHES_PER_BANK",
     "PERFORMANCES_PER_BANK",
     "cards",
@@ -56,7 +63,18 @@ __all__ = [
     "is_user",
     "bank_numbers",
     "count_for",
+    "capture",
+    "default_path",
+    "load",
+    "save",
 ]
+
+#: The archive's filename, beside the favourites database and the live-name
+#: cache.
+FILE_NAME = "cards.json"
+
+#: The schema version this module writes and the highest it reads.
+VERSION = 1
 
 #: The first user bank. 00-24 are factory, preload and ROM-card banks.
 USER_FIRST = 25
@@ -195,3 +213,171 @@ def is_user(number: int) -> bool:
 def bank_numbers() -> List[int]:
     """00-39, in order."""
     return [entry.number for entry in CARDS]
+
+
+# --- the per-bank archive ----------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CapturedBank:
+    """What one HCard bank held when it was read off the unit.
+
+    The card-name field is separate from the slot names on purpose: the
+    name identifies *which* bank is physically in front of the synth, and
+    the slot names are what that bank contains. Keeping them in one record
+    means a capture is one atomic statement rather than two files that can
+    disagree.
+    """
+
+    number: int  #: 00-39.
+    name: str  #: The name the card reported, or the table's if it said none.
+    captured_at: str  #: ISO-8601, UTC.
+    performances: Dict[int, str]  #: {slot: name}
+    patches: Dict[int, str]  #: {slot: name}
+
+    def names(self, kind: str) -> Dict[int, str]:
+        """The captured names of one kind."""
+        if kind == Kind.PERFORMANCE:
+            return dict(self.performances)
+        if kind == Kind.PATCH:
+            return dict(self.patches)
+        raise LookupError(
+            f"no bank kind {kind!r}; have {Kind.PERFORMANCE}, {Kind.PATCH}"
+        )
+
+
+def capture(
+    number: int,
+    name: str,
+    performances: Dict[int, str],
+    patches: Dict[int, str],
+    *,
+    captured_at: Optional[str] = None,
+) -> CapturedBank:
+    """Bundle one bank's read into a record. Does no MIDI and no I/O."""
+    return CapturedBank(
+        number=card(number).number,
+        name=name.strip(),
+        captured_at=captured_at or datetime.now(UTC).isoformat(timespec="seconds"),
+        performances={int(slot): str(value) for slot, value in performances.items()},
+        patches={int(slot): str(value) for slot, value in patches.items()},
+    )
+
+
+def default_path() -> str:
+    """Where the archive lives, beside the favourites database."""
+    return os.path.join(favorites.data_dir(), FILE_NAME)
+
+
+def _as_slot_names(raw: object) -> Dict[int, str]:
+    """A JSON object of slot -> name, keeping only usable entries."""
+    if not isinstance(raw, dict):
+        return {}
+    out: Dict[int, str] = {}
+    for slot, name in raw.items():
+        try:
+            number = int(slot)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= number < max(PERFORMANCES_PER_BANK, PATCHES_PER_BANK) and isinstance(
+            name, str
+        ):
+            out[number] = name
+    return out
+
+
+def _bank_from_json(key: str, raw: object) -> Optional[CapturedBank]:
+    if not isinstance(raw, dict):
+        return None
+    try:
+        number = int(key)
+    except (TypeError, ValueError):
+        return None
+    if not 0 <= number < len(CARDS):
+        return None
+    name = raw.get("name")
+    captured_at = raw.get("captured_at")
+    if not isinstance(name, str) or not isinstance(captured_at, str):
+        return None
+    return CapturedBank(
+        number=number,
+        name=name,
+        captured_at=captured_at,
+        performances=_as_slot_names(raw.get("performances")),
+        patches=_as_slot_names(raw.get("patches")),
+    )
+
+
+def load(path: Optional[str] = None) -> Dict[int, CapturedBank]:
+    """Every captured bank, keyed by number. Empty if there are none.
+
+    A missing file is normal: nothing has been captured yet. A corrupt one
+    is worth a warning rather than an exception -- the archive is a
+    convenience, and names can be read off the unit again.
+    """
+    where = path or default_path()
+    try:
+        with open(where, encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as exc:
+        print(
+            f"kwsed: ignoring {where}: {exc}. It is a cache of card banks "
+            "read from the unit; delete it and capture them again.",
+            file=sys.stderr,
+        )
+        return {}
+    if not isinstance(raw, dict) or not isinstance(raw.get("banks"), dict):
+        return {}
+    version = raw.get("version", VERSION)
+    if not isinstance(version, int) or version > VERSION:
+        return {}
+    out: Dict[int, CapturedBank] = {}
+    for key, value in raw["banks"].items():
+        bank = _bank_from_json(str(key), value)
+        if bank is not None:
+            out[bank.number] = bank
+    return out
+
+
+def _to_json(bank: CapturedBank) -> Dict[str, object]:
+    return {
+        "name": bank.name,
+        "captured_at": bank.captured_at,
+        "performances": {str(slot): name for slot, name in bank.performances.items()},
+        "patches": {str(slot): name for slot, name in bank.patches.items()},
+    }
+
+
+def save(bank: CapturedBank, path: Optional[str] = None) -> None:
+    """Write one bank into the archive, merging rather than replacing.
+
+    Read-modify-write, exactly as :mod:`vinsynlib.livenames` does: losing
+    every other bank because one was captured would be a poor trade.
+    Best effort -- a capture is still on screen if the disk is full.
+    """
+    where = path or default_path()
+    banks = load(where)
+    banks[bank.number] = bank
+    _write(banks, where)
+
+
+def _write(banks: Dict[int, CapturedBank], where: str) -> None:
+    payload = {
+        "version": VERSION,
+        "banks": {
+            f"{number:02d}": _to_json(bank) for number, bank in sorted(banks.items())
+        },
+    }
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(where)), exist_ok=True)
+        # Write-then-rename: a crash or a full disk mid-write leaves the
+        # previous archive intact rather than a half-written one.
+        temp = where + ".tmp"
+        with open(temp, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=1, sort_keys=True, ensure_ascii=False)
+            handle.write("\n")
+        os.replace(temp, where)
+    except OSError:
+        pass

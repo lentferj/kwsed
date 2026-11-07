@@ -3,7 +3,10 @@
 #
 # This file is part of kwsed.
 
-"""The HCard's forty-bank table, transcribed from docs/HCARD.md section 2."""
+"""The HCard's forty-bank table and its per-bank archive."""
+
+import json
+import os
 
 import pytest
 
@@ -65,3 +68,100 @@ class TestAccessors:
     def test_counts_are_the_banks_module_s(self):
         assert cards.count_for(banks.Kind.PERFORMANCE) == 50
         assert cards.count_for(banks.Kind.PATCH) == 35
+
+
+class TestTheArchive:
+    def _captured(self, number=7, name='WPC-13 "Performance 3"'):
+        return cards.capture(
+            number,
+            name,
+            {0: "First Performance", 1: "Second"},
+            {0: "First Patch"},
+            captured_at="2026-11-07T12:00:00+00:00",
+        )
+
+    def test_round_trip_save_load(self, tmp_path):
+        path = str(tmp_path / "cards.json")
+        bank = self._captured()
+        cards.save(bank, path)
+        assert cards.load(path) == {7: bank}
+
+    def test_the_schema_is_versioned_and_keyed_by_two_digits(self, tmp_path):
+        path = tmp_path / "cards.json"
+        cards.save(self._captured(), str(path))
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        assert raw["version"] == 1
+        assert set(raw["banks"]) == {"07"}
+        assert raw["banks"]["07"]["name"] == 'WPC-13 "Performance 3"'
+        assert raw["banks"]["07"]["performances"] == {
+            "0": "First Performance",
+            "1": "Second",
+        }
+        assert raw["banks"]["07"]["patches"] == {"0": "First Patch"}
+
+    def test_a_second_save_keeps_the_first_bank(self, tmp_path):
+        path = str(tmp_path / "cards.json")
+        cards.save(self._captured(7), path)
+        cards.save(self._captured(8, "User 01"), path)
+        loaded = cards.load(path)
+        assert set(loaded) == {7, 8}
+        assert loaded[8].name == "User 01"
+
+    def test_a_missing_archive_is_not_an_error(self, tmp_path):
+        assert cards.load(str(tmp_path / "absent.json")) == {}
+
+    def test_a_damaged_archive_is_ignored_with_a_warning(self, tmp_path, capsys):
+        path = tmp_path / "cards.json"
+        path.write_text("{not json", encoding="utf-8")
+        assert cards.load(str(path)) == {}
+        assert "ignoring" in capsys.readouterr().err
+
+    def test_a_future_version_is_ignored(self, tmp_path):
+        path = tmp_path / "cards.json"
+        path.write_text(json.dumps({"version": 99, "banks": {}}), encoding="utf-8")
+        assert cards.load(str(path)) == {}
+
+    def test_malformed_entries_are_dropped_not_guessed(self, tmp_path):
+        path = tmp_path / "cards.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "banks": {
+                        "07": {"name": "Good", "captured_at": "now"},
+                        "x": "not a bank",
+                        "08": {"name": 3, "captured_at": "now"},
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        loaded = cards.load(str(path))
+        assert set(loaded) == {7}
+        assert loaded[7].performances == {}
+
+    def test_the_directory_is_created_and_no_temporary_file_is_left(self, tmp_path):
+        path = tmp_path / "nested" / "deeper" / "cards.json"
+        cards.save(self._captured(7), str(path))
+        cards.save(self._captured(8, "User 01"), str(path))
+        assert sorted(p.name for p in path.parent.iterdir()) == ["cards.json"]
+
+    def test_default_path_is_beside_the_favourites_database(
+        self, tmp_path, monkeypatch
+    ):
+        from kws import favorites
+
+        monkeypatch.setattr(favorites, "data_dir", lambda: str(tmp_path))
+        path = cards.default_path()
+        assert os.path.basename(path) == "cards.json"
+        assert os.path.dirname(path) == str(tmp_path)
+
+    def test_names_are_selected_by_kind(self):
+        bank = self._captured()
+        assert bank.names(banks.Kind.PERFORMANCE) == {
+            0: "First Performance",
+            1: "Second",
+        }
+        assert bank.names(banks.Kind.PATCH) == {0: "First Patch"}
+        with pytest.raises(LookupError):
+            bank.names("waveseq")
