@@ -247,6 +247,31 @@ class TestTheCursorContract:
             await settle(pilot, 10)
             assert len(app.device.selected_log) == 1
 
+    async def test_select_refuses_a_patch_row_and_sends_nothing(self, app):
+        """The SR has no patch mode: Enter picks a Performance, and a
+        patch row is refused before anything is sent (cf8be55 had the
+        bridge refuse it; the browser now says so itself, first)."""
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._fill((0, banks.Kind.PATCH))
+            app.query_one("#slot-table").focus()
+            await pilot.press("enter")
+            await settle(pilot)
+            assert app.device.selected_log == []
+            assert "select a Performance instead" in panel_text(app, "#status")
+            assert "refused" in panel_text(app, "#status")
+
+    async def test_select_still_proceeds_for_a_performance_row(self, app):
+        """Same key, performance bank: the refusal is about the kind."""
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._fill((0, banks.Kind.PERFORMANCE))
+            app.query_one("#slot-table").focus()
+            await pilot.press("enter")
+            await settle(pilot, 10)
+            assert len(app.device.selected_log) == 1
+            assert "heard through a Performance" not in panel_text(app, "#status")
+
     async def test_nothing_is_selected_when_the_pane_is_empty(self, app):
         async with app.run_test() as pilot:
             await pilot.pause()

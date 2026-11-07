@@ -1530,13 +1530,26 @@ class KwsedApp(App[None]):
                 refused=True,
             )
             return
+        entry = self._current[row]
+        # The SR has no patch mode: a Program Change selects a Performance,
+        # never a patch -- cf8be55 made the bridge refuse below, and refusing
+        # here, before the busy/exchange dance, keeps that friendly instead
+        # of a raised error from the worker.
+        if entry.kind == banks.Kind.PATCH:
+            self.notify_status(
+                "a patch is not independently playable on the SR -- it is "
+                "heard through a Performance that uses it; select a "
+                "Performance instead",
+                refused=True,
+            )
+            return
         if self._busy:
             self.notify_status("busy", refused=True)
             return
         if not self._exchange.acquire(blocking=False):
             self.notify_status("busy", refused=True)
             return
-        self._select_worker(self._current[row])
+        self._select_worker(entry)
 
     @work(thread=True)
     def _select_worker(self, entry: banks.Slot) -> None:
@@ -2126,7 +2139,11 @@ A performance combines up to eight parts, each pointing at a patch. A
 patch is a sound: four oscillators playing waves or wave sequences. They
 are different objects; performance 7 is not patch 7.
 
-  ⏎   select the slot on the unit -- it will sound
+  ⏎   select the Performance on the unit -- it will sound. A patch
+      is never selected: the SR has no patch mode, so Enter refuses
+      a patch row -- a patch is heard through a Performance that
+      uses it. Patches are read, written and favourited like any
+      other slot.
   r   read this bank's names from the unit -- SILENT, nothing is selected
   /   search names
   m   channels: the 32 Multisets, and which performance answers on each
