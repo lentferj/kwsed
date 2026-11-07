@@ -1096,7 +1096,7 @@ class KwsedApp(App[None]):
     def _bank_row(self, pair: Tuple[int, str], card: Optional[int]) -> List[str]:
         number, kind = pair
         entry = banks.bank(number)
-        marked = len(self._favorite_keys(entry.id, kind))
+        marked = len(self._favorite_keys(entry.id, kind)) if card is None else 0
         return [
             entry.label if card is None else f"Card {card:02d}",
             kind[:4],
@@ -1104,8 +1104,10 @@ class KwsedApp(App[None]):
             "" if entry.writable else "ro",
             "" if card is None else self._card_row_name(card),
             # blank rather than "0": a column of zeroes is
-            # noise, and the eye wants the few that differ
-            str(marked) if marked else "",
+            # noise, and the eye wants the few that differ.
+            # Card rows all share the one CARD favourite count, so
+            # repeating it on forty rows is noise too.
+            "" if card is not None else (str(marked) if marked else ""),
         ]
 
     def on_mount(self) -> None:
@@ -1396,7 +1398,11 @@ class KwsedApp(App[None]):
     def _slot_shown_name(self, item: banks.Slot, card: Optional[int]) -> str:
         if card is not None:
             name = self._card_slot_name(card, item.kind, item.number)
-            return f"[b]{name}[/b]" if name else "[dim]not captured[/dim]"
+            if name:
+                return f"[b]{name}[/b]"
+            if card not in self._archive:
+                return "[dim]not captured[/dim]"
+            return "[dim](unnamed)[/dim]"
         name = self.catalog.display_name(item.bank.id, item.number, item.kind)
         if self.catalog.differs(item.bank.id, item.number, item.kind):
             return f"[b]{name}[/b] [dim]*[/dim]"
@@ -1517,6 +1523,13 @@ class KwsedApp(App[None]):
         row = table.cursor_row
         if not 0 <= row < len(self._current):
             return
+        if self._current_card is not None:
+            self.notify_status(
+                "Enter auditions the physical card's active bank -- select "
+                "the bank on the HCard and capture it with C",
+                refused=True,
+            )
+            return
         if self._busy:
             self.notify_status("busy", refused=True)
             return
@@ -1572,6 +1585,9 @@ class KwsedApp(App[None]):
         record. **Read-only** on the unit: nothing is selected, written or
         changed.
         """
+        if self._card_sweeping:
+            self.notify_status("a card sweep is running", refused=True)
+            return
         if self._busy:
             self.notify_status("busy", refused=True)
             return
@@ -1588,6 +1604,9 @@ class KwsedApp(App[None]):
         files it; Escape stops cleanly between banks. **Read-only** on the
         unit throughout.
         """
+        if self._card_sweeping:
+            self.notify_status("a card sweep is running", refused=True)
+            return
         if self._busy:
             self.notify_status("busy", refused=True)
             return
@@ -1679,14 +1698,17 @@ class KwsedApp(App[None]):
         filed: int = 0,
     ) -> bool:
         name, performances, patches = payload
-        number = expected
-        if number is None:
-            number = _cards.resolve(
-                name,
-                performances.get(0),
-                patches.get(0),
-                captured=self._archive,
-            )
+        resolved = _cards.resolve(
+            name,
+            performances.get(0),
+            patches.get(0),
+            captured=self._archive,
+        )
+        mismatch = (
+            expected is not None and resolved is not None and resolved != expected
+        )
+        say_so = expected is not None and resolved is None
+        number = expected if (expected is not None and resolved is None) else resolved
         if number is None:
             self.notify_status(
                 "capture: could not tell which Card bank this is. Select "
@@ -1714,6 +1736,13 @@ class KwsedApp(App[None]):
         )
         if not name:
             message += " (no card name; identified from its contents)"
+        if mismatch and expected is not None:
+            message += (
+                f" — you selected bank {expected:02d} but the card "
+                f"resolved to {number:02d} — filed under {number:02d}"
+            )
+        elif say_so:
+            message += f" (filed as bank {number:02d} on your say-so)"
         self.notify_status(message)
         if next_index is not None:
             self._card_sweep_next(next_index, filed + 1)
