@@ -165,3 +165,88 @@ class TestTheArchive:
         assert bank.names(banks.Kind.PATCH) == {0: "First Patch"}
         with pytest.raises(LookupError):
             bank.names("waveseq")
+
+
+class TestResolution:
+    """Which bank is active, from a name and two slot names.
+
+    The card's name is the only identity signal the synth exposes, and it
+    is sixteen bytes, so both exact names and a truncated report are real
+    inputs. Ambiguity is answered with ``None``: guessing a bank files a
+    capture under the wrong one, which is worse than asking.
+    """
+
+    def _archive(self):
+        return {
+            7: cards.capture(
+                7,
+                'WPC-13 "Performance 3"',
+                {0: "Opening", 1: "Second"},
+                {0: "Bell"},
+                captured_at="2026-11-07T12:00:00+00:00",
+            ),
+            25: cards.capture(
+                25,
+                "User 01",
+                {0: "Mine"},
+                {0: "My Patch"},
+                captured_at="2026-11-07T12:00:00+00:00",
+            ),
+        }
+
+    def test_an_exact_table_name_resolves(self):
+        assert cards.resolve("WS Internal ROM", None, None, captured={}) == 0
+
+    def test_an_exact_captured_name_resolves(self):
+        assert cards.resolve("User 01", None, None, captured=self._archive()) == 25
+
+    def test_a_truncated_name_field_still_resolves(self):
+        assert cards.resolve('WPC-13 "Perf', None, None, captured={}) == 7
+
+    def test_a_name_collision_is_ambiguous(self):
+        archive = self._archive()
+        archive[8] = cards.capture(
+            8,
+            "User 01",
+            {0: "Other"},
+            {0: "Other Patch"},
+            captured_at="2026-11-07T12:00:00+00:00",
+        )
+        assert cards.resolve("User 01", None, None, captured=archive) is None
+
+    def test_a_fingerprint_breaks_a_name_collision(self):
+        archive = self._archive()
+        archive[8] = cards.capture(
+            8,
+            "User 01",
+            {0: "Other"},
+            {0: "Other Patch"},
+            captured_at="2026-11-07T12:00:00+00:00",
+        )
+        assert cards.resolve("User 01", "Mine", "My Patch", captured=archive) == 25
+
+    def test_an_unknown_name_falls_back_to_the_fingerprint(self):
+        assert (
+            cards.resolve("No Such Bank", "Opening", "Bell", captured=self._archive())
+            == 7
+        )
+
+    def test_an_unknown_name_with_no_fingerprint_is_none(self):
+        assert (
+            cards.resolve("No Such Bank", None, None, captured=self._archive()) is None
+        )
+
+    def test_an_unknown_fingerprint_is_none(self):
+        assert (
+            cards.resolve(
+                "No Such Bank", "Nothing", "Nothing", captured=self._archive()
+            )
+            is None
+        )
+
+    def test_empty_inputs_are_none(self):
+        assert cards.resolve(None, None, None, captured=self._archive()) is None
+        assert cards.resolve("", "", "", captured=self._archive()) is None
+
+    def test_no_captures_and_no_table_name_is_none(self):
+        assert cards.resolve("No Such Bank", "A", "B", captured={}) is None

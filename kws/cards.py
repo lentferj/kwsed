@@ -66,6 +66,7 @@ __all__ = [
     "capture",
     "default_path",
     "load",
+    "resolve",
     "save",
 ]
 
@@ -361,6 +362,95 @@ def save(bank: CapturedBank, path: Optional[str] = None) -> None:
     banks = load(where)
     banks[bank.number] = bank
     _write(banks, where)
+
+
+def _name_key(name: Optional[str]) -> str:
+    return (name or "").strip().casefold()
+
+
+def _name_matches(query: str, candidate: str) -> bool:
+    """Whether a card's name field identifies this bank.
+
+    Exact after case and padding, or a prefix long enough to be a real
+    name: the name field is sixteen bytes, and several of the table's
+    names (``WPC-13 "Performance 3"``) are longer than that. A two-letter
+    prefix is not evidence, so shorter queries do not count.
+    """
+    query = _name_key(query)
+    candidate = _name_key(candidate)
+    if not query or not candidate:
+        return False
+    if query == candidate:
+        return True
+    return len(query) >= 8 and candidate.startswith(query)
+
+
+def _fingerprint_matches(
+    bank: CapturedBank, perf0: Optional[str], patch0: Optional[str]
+) -> bool:
+    """Whether a captured bank's first slot names match what was read.
+
+    Only the checks the caller can supply are made. No names at all is no
+    evidence rather than a match, or every unknown bank would fingerprint
+    to every captured one.
+    """
+    checks: List[bool] = []
+    if perf0:
+        checks.append(_name_key(bank.performances.get(0)) == _name_key(perf0))
+    if patch0:
+        checks.append(_name_key(bank.patches.get(0)) == _name_key(patch0))
+    return bool(checks) and all(checks)
+
+
+def resolve(
+    card_name: Optional[str],
+    perf0: Optional[str],
+    patch0: Optional[str],
+    *,
+    captured: Optional[Dict[int, CapturedBank]] = None,
+) -> Optional[int]:
+    """Which HCard bank is active, or ``None`` when that cannot be said.
+
+    The order is docs/HCARD.md section 6:
+
+    1. **Exact card-name match** against the table or a captured bank's
+       stored name.
+    2. **Fingerprint fallback**: the first performance and patch names
+       against previously captured banks.
+    3. Ambiguous or unknown -> ``None``. The caller offers "new / user
+       bank" filing rather than guessing.
+
+    ``captured`` defaults to the archive on disk. Passing it in is how the
+    browser resolves against the archive it already holds, and how a test
+    says what was captured without writing a file.
+    """
+    archive = load() if captured is None else captured
+
+    named: set[int] = set()
+    query = _name_key(card_name)
+    if query:
+        for entry in CARDS:
+            if _name_matches(query, entry.name):
+                named.add(entry.number)
+        for number, bank in archive.items():
+            if _name_matches(query, bank.name):
+                named.add(number)
+
+    fingerprinted = {
+        number
+        for number, bank in archive.items()
+        if _fingerprint_matches(bank, perf0, patch0)
+    }
+
+    if len(named) == 1:
+        return next(iter(named))
+    if len(named) > 1:
+        # The name alone is ambiguous; the contents may still separate two
+        # banks that report the same name.
+        narrowed = named & fingerprinted
+        return next(iter(narrowed)) if len(narrowed) == 1 else None
+    # No usable name: the fingerprint is the only evidence left.
+    return next(iter(fingerprinted)) if len(fingerprinted) == 1 else None
 
 
 def _write(banks: Dict[int, CapturedBank], where: str) -> None:
