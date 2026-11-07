@@ -40,6 +40,7 @@ assumed, rather than claiming to have selected something it cannot reach.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import sys
 import threading
 from typing import (
@@ -61,6 +62,7 @@ from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
+from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import DataTable, Header, Input, Label, Select, Static
 
@@ -143,6 +145,7 @@ KEY_HINTS = (
     "e edit multi",
     "S scan",
     "C capture card",
+    "X card sweep",
     "V rating filter",
     "z undo",
     "w write gate",
@@ -752,6 +755,7 @@ class KwsedApp(App[None]):
         Binding("q", "quit", "Quit"),
         Binding("S", "scan_device", "Scan"),
         Binding("C", "capture_card", "Capture card"),
+        Binding("X", "card_sweep", "Card sweep", show=False),
         Binding("V", "rating_filter", "Rating filter"),
         Binding("z", "undo", "Undo"),
         Binding("w", "toggle_write_gate", "Write gate"),
@@ -824,6 +828,9 @@ class KwsedApp(App[None]):
         #: Scan state
         self._scanning = False
         self._scan_cancel = threading.Event()
+        #: Card sweep: one bank at a time, waiting for a person to select
+        #: the next bank on the HCard itself.
+        self._card_sweeping = False
         if config_path is not None:
             try:
                 from kws import config as _cfg
@@ -1441,13 +1448,17 @@ class KwsedApp(App[None]):
             note = "   [dim]" + cat.disagreement_words(item.bank.writable) + "[/dim]"
         elif not item.bank.writable:
             note = "   [dim]ROM — read only[/dim]"
-        self.query_one("#detail", Static).update(
-            f"[b]{item.bank.label} {item.kind} {item.number:02d}[/b]  "
-            f"{name}{note}\n"
-            f"Bank Select LSB [b]{item.bank.sysex}[/b]   Program Change "
-            f"[b]{item.number}[/b]   [dim]the wire byte is sent; which bank "
-            f"a Bank Select actually reaches is not established[/dim]"
-        )
+        # A RowHighlighted event can still be queued when the app is torn
+        # down, after the default screen has gone. Updating a widget that
+        # is no longer there is not a reason to fail the session.
+        with contextlib.suppress(NoMatches):
+            self.query_one("#detail", Static).update(
+                f"[b]{item.bank.label} {item.kind} {item.number:02d}[/b]  "
+                f"{name}{note}\n"
+                f"Bank Select LSB [b]{item.bank.sysex}[/b]   Program Change "
+                f"[b]{item.number}[/b]   [dim]the wire byte is sent; which bank "
+                f"a Bank Select actually reaches is not established[/dim]"
+            )
 
     def _detail_card(self, item: banks.Slot) -> None:
         """The detail line for one HCard sub-bank."""
@@ -1463,10 +1474,12 @@ class KwsedApp(App[None]):
         else:
             status = f"captured {captured.captured_at}"
             shown = name or "[dim](unnamed)[/dim]"
-        self.query_one("#detail", Static).update(
-            f"[b]Card {number:02d} {item.kind} {item.number:02d}[/b]  {shown}\n"
-            f"{entry.name}   [dim]{status}[/dim]"
-        )
+        with contextlib.suppress(NoMatches):
+            self.query_one("#detail", Static).update(
+                f"[b]Card {number:02d} {item.kind} {item.number:02d}[/b]  "
+                f"{shown}\n"
+                f"{entry.name}   [dim]{status}[/dim]"
+            )
 
     def notify_status(self, message: str, *, refused: bool = False) -> None:
         prefix = "[b]refused[/b] · " if refused else ""
@@ -1564,8 +1577,69 @@ class KwsedApp(App[None]):
             return
         self._capture_card_worker(None)
 
+    def action_card_sweep(self) -> None:
+        """Walk the HCard's forty banks, prompting for each selection.
+
+        The card cannot be switched remotely, so between banks this stops
+        and asks the person to select the bank physically. Enter reads and
+        files it; Escape stops cleanly between banks. **Read-only** on the
+        unit throughout.
+        """
+        if self._busy:
+            self.notify_status("busy", refused=True)
+            return
+        if self._scanning:
+            self.notify_status("a scan is running", refused=True)
+            return
+        if not self._exchange.acquire(blocking=False):
+            self.notify_status("busy", refused=True)
+            return
+        self._card_sweeping = True
+        self.notify_status("card sweep: select bank 00 on the HCard")
+        self._card_sweep_next(0, 0)
+
+    def _card_sweep_next(self, index: int, filed: int) -> None:
+        if index >= len(_cards.CARDS):
+            self._card_sweep_finish(filed, len(_cards.CARDS))
+            return
+        entry = _cards.card(index)
+        self.push_screen(
+            _scan.CardSweepScreen(index, entry.name, entry.needs_pcm),
+            lambda proceed: self._card_sweep_answered(index, filed, proceed),
+        )
+
+    def _card_sweep_answered(
+        self, index: int, filed: int, proceed: Optional[bool]
+    ) -> None:
+        if not proceed:
+            self._card_sweep_finish(filed, index)
+            return
+        self._capture_card_worker(index, next_index=index + 1, filed=filed, sweep=True)
+
+    def _card_sweep_finish(self, filed: int, stopped_at: int) -> None:
+        self._card_sweeping = False
+        if self._exchange.locked():
+            try:
+                self._exchange.release()
+            except RuntimeError:  # pragma: no cover - already released
+                pass
+        if stopped_at >= len(_cards.CARDS):
+            self.notify_status(f"card sweep finished: filed {filed} of 40 banks")
+        else:
+            self.notify_status(
+                f"card sweep stopped between banks: filed {filed}, "
+                f"stopped before bank {stopped_at:02d}"
+            )
+
     @work(thread=True)
-    def _capture_card_worker(self, expected: Optional[int]) -> None:
+    def _capture_card_worker(
+        self,
+        expected: Optional[int],
+        *,
+        next_index: Optional[int] = None,
+        filed: int = 0,
+        sweep: bool = False,
+    ) -> None:
         """**MIDI only** -- the archive is updated on the main thread."""
         failure: BaseException | None = None
         payload: Any = None
@@ -1581,15 +1655,26 @@ class KwsedApp(App[None]):
         except _BRIDGE_ERRORS as exc:
             failure = exc
         finally:
-            self._exchange.release()
+            # A sweep holds the exchange across the whole walk; a single
+            # capture owns and releases it here.
+            if not sweep:
+                self._exchange.release()
         if failure is not None:
             self.call_from_thread(
                 self.notify_status, f"capture: {failure}", refused=True
             )
+            if next_index is not None:
+                self.call_from_thread(self._card_sweep_next, next_index, filed)
             return
-        self.call_from_thread(self._file_capture, payload, expected)
+        self.call_from_thread(self._file_capture, payload, expected, next_index, filed)
 
-    def _file_capture(self, payload: Any, expected: Optional[int]) -> bool:
+    def _file_capture(
+        self,
+        payload: Any,
+        expected: Optional[int],
+        next_index: Optional[int] = None,
+        filed: int = 0,
+    ) -> bool:
         name, performances, patches = payload
         number = expected
         if number is None:
@@ -1605,6 +1690,8 @@ class KwsedApp(App[None]):
                 "its row and capture again to file it there.",
                 refused=True,
             )
+            if next_index is not None:
+                self._card_sweep_next(next_index, filed)
             return False
         captured = _cards.capture(
             number,
@@ -1625,6 +1712,8 @@ class KwsedApp(App[None]):
         if not name:
             message += " (no card name; identified from its contents)"
         self.notify_status(message)
+        if next_index is not None:
+            self._card_sweep_next(next_index, filed + 1)
         return True
 
     def _refresh_card_row(self, number: int) -> None:

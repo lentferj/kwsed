@@ -486,3 +486,58 @@ class TestTheCardSubList:
             app._fill((banks.bank("CARD").number, "performance"), 7)
             app.action_read_names()
             assert "press C" in str(app.query_one("#status").content)
+
+
+class TestCardSweep:
+    """Walking the forty banks with a prompt between each.
+
+    The HCard cannot be switched remotely, so the sweep is only as good as
+    its pause: it must file the bank it asked for, and stop between banks
+    rather than mid-read.
+    """
+
+    async def test_it_files_the_prompted_bank_and_stops_on_request(self, tmp_path):
+        screens = []
+        app = KwsedApp(
+            DemoDevice(card_name='WPC-11 "Performance 1"'),
+            # A non-empty catalog keeps the scan offer from firing and
+            # pushing a screen this fake would also have to answer.
+            catalog=cat.Catalog(
+                [cat.Entry("RAM1", 0, "Book Name", banks.Kind.PERFORMANCE)]
+            ),
+            cards_path=str(tmp_path / "cards.json"),
+        )
+        original_push = app.push_screen
+
+        def fake_push(screen, callback=None):
+            screens.append(screen)
+            if callback is not None:
+                callback(len(screens) == 1)
+
+        app.push_screen = fake_push  # type: ignore[assignment]
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                app.action_card_sweep()
+                for _ in range(60):
+                    await pilot.pause()
+                    if not app._card_sweeping:
+                        break
+                status = str(app.query_one("#status", Static).content)
+        finally:
+            app.push_screen = original_push  # type: ignore[method-assign]
+
+        assert len(screens) == 2, "one bank captured, then the stop screen"
+        assert screens[0].number == 0
+        assert screens[1].number == 1
+        assert set(app._archive) == {0}
+        assert not app._exchange.locked()
+        assert "stopped between banks" in status
+
+    async def test_it_refuses_while_busy(self, app):
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._busy = True
+            app.action_card_sweep()
+            app._busy = False
+            assert "busy" in str(app.query_one("#status").content)

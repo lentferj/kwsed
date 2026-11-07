@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import contextlib
 import threading
-from typing import ClassVar
+from typing import ClassVar, Optional
 
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -23,7 +23,13 @@ from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import Button, Static
 
-__all__ = ["SCAN_OFFER", "ScanOffer", "ScanOfferScreen", "ScanScreen"]
+__all__ = [
+    "SCAN_OFFER",
+    "ScanOffer",
+    "ScanOfferScreen",
+    "ScanScreen",
+    "CardSweepScreen",
+]
 
 ScanOffer = str
 
@@ -134,3 +140,68 @@ class ScanScreen(ModalScreen[None]):
     @property
     def cancelled(self) -> bool:
         return self._cancelled
+
+
+class CardSweepScreen(ModalScreen[bool]):
+    """One step of a card sweep: select bank NN, then say "read it".
+
+    The HCard has no remote bank switch (docs/HCARD.md section 2), so a
+    sweep is a person pressing a pad on the card between reads. This screen
+    is the pause where that happens; Enter proceeds, Escape stops between
+    banks. Reading is silent and changes nothing on the unit.
+    """
+
+    DEFAULT_CSS = """
+    CardSweepScreen { align: center middle; }
+    CardSweepScreen > Vertical {
+        width: 76; height: auto; border: thick $accent;
+        background: $surface; padding: 1 2;
+    }
+    CardSweepScreen .title { margin-bottom: 1; }
+    CardSweepScreen .hint { color: $text-muted; }
+    CardSweepScreen > Vertical > Horizontal {
+        height: auto; align: center middle;
+    }
+    CardSweepScreen Button { margin: 0 1; }
+    """
+
+    BINDINGS: ClassVar[list[Binding]] = [
+        Binding("enter", "capture", "Capture this bank"),
+        Binding("escape", "stop", "Stop"),
+        Binding("q", "stop", "Stop"),
+    ]  # type: ignore[assignment]
+
+    def __init__(self, number: int, name: str, needs_pcm: Optional[str] = None) -> None:
+        super().__init__()
+        self.number = number
+        self.bank_name = name
+        self.needs_pcm = needs_pcm
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Static(
+                f"[b]Card sweep[/b] — bank {self.number:02d} of 39",
+                classes="title",
+            )
+            yield Static(
+                f"Select bank [b]{self.number:02d}[/b] on the HCard, then press Enter."
+            )
+            yield Static(f"Expected: {self.bank_name}", classes="hint")
+            if self.needs_pcm is not None:
+                yield Static(
+                    f"[dim]This bank needs the {self.needs_pcm} PCM card to "
+                    "sound right.[/dim]",
+                    classes="hint",
+                )
+            with Horizontal():
+                yield Button("Capture this bank", variant="primary", id="capture")
+                yield Button("Stop", id="stop")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        self.dismiss(event.button.id == "capture")
+
+    def action_capture(self) -> None:
+        self.dismiss(True)
+
+    def action_stop(self) -> None:
+        self.dismiss(False)
