@@ -67,6 +67,7 @@ from textual.screen import ModalScreen
 from textual.widgets import DataTable, Header, Input, Label, Select, Static
 
 from kws import banks
+from kws.multi import MULTISETS
 from kws import cards as _cards
 from kws import messages as m
 from kws import catalog as cat
@@ -728,6 +729,10 @@ class PromptScreen(ModalScreen[Optional[str]]):
         self.dismiss(None)
 
 
+MULTI_BANK = -1
+MULTI_KIND = "multiset"
+
+
 class KwsedApp(App[None]):
     """The browser."""
 
@@ -834,18 +839,31 @@ class KwsedApp(App[None]):
             if entry.id != "CARD"
             for kind in (banks.Kind.PERFORMANCE, banks.Kind.PATCH)
         ]
-        self._pairs: List[Tuple[int, str]] = self._real_pairs + [
+        _card_pairs = [
             (banks.bank("CARD").number, kind)
             for _number in _cards.bank_numbers()
             for kind in (banks.Kind.PERFORMANCE, banks.Kind.PATCH)
         ]
+        self._pairs: List[Tuple[int, str]] = (
+            self._real_pairs + _card_pairs + [(MULTI_BANK, MULTI_KIND)] * MULTISETS
+        )
         #: Which HCard sub-bank each row of ``_pairs`` is, or None for the
         #: ten physical banks that are not the Card.
-        self._row_cards: List[Optional[int]] = [None] * len(self._real_pairs) + [
-            number for number in _cards.bank_numbers() for _kind in range(2)
-        ]
+        self._row_cards: List[Optional[int]] = (
+            [None] * len(self._real_pairs)
+            + [number for number in _cards.bank_numbers() for _kind in range(2)]
+            + [None] * MULTISETS
+        )
+        #: Which Multiset (0..31) each row of ``_pairs`` is, or None.
+        self._row_multis: List[Optional[int]] = [None] * (
+            len(self._real_pairs) + 2 * len(_cards.CARDS)
+        ) + list(range(MULTISETS))
         self._current_pair = self._pairs[0]
         self._current_card: Optional[int] = None
+        self._current_multi: Optional[int] = None
+        self._slot_mode: Optional[str] = None
+        self._multisets: List[Any] = []
+        self._multi_sets = self._multisets
         #: Which HCard bank was last confirmed or asserted active. Persisted
         #: so a new session can warn before auditioning from a different
         #: bank: the card is switched physically and the synth cannot be
@@ -1102,8 +1120,12 @@ class KwsedApp(App[None]):
         # module's KEY_HINTS global, which a library cannot do.
         yield KeyHints(KEY_HINTS)
 
-    def _row_key(self, pair: Tuple[int, str], card: Optional[int]) -> str:
+    def _row_key(
+        self, pair: Tuple[int, str], card: Optional[int], multi: Optional[int] = None
+    ) -> str:
         """The stable key of one left-pane row."""
+        if multi is not None:
+            return f"multi:{multi:02d}"
         number, kind = pair
         if card is None:
             return f"{number}:{kind}"
@@ -1150,7 +1172,19 @@ class KwsedApp(App[None]):
             return f"[dim][i]{body}[/i][/dim]"
         return body
 
-    def _bank_row(self, pair: Tuple[int, str], card: Optional[int]) -> List[str]:
+    def _bank_row(
+        self, pair: Tuple[int, str], card: Optional[int], multi: Optional[int] = None
+    ) -> List[str]:
+        if multi is not None:
+            multisets = getattr(self, "_multisets", None)
+            if multisets is None:
+                multisets = getattr(self, "_multi_sets", []) or []
+            name = ""
+            if 0 <= multi < len(multisets):
+                name = getattr(multisets[multi], "name", "") or ""
+            if not name:
+                name = "[dim]--[/dim]"
+            return [f"Multi {multi:02d}", "set", "16", "", name, ""]
         number, kind = pair
         entry = banks.bank(number)
         marked = len(self._favorite_keys(entry.id, kind)) if card is None else 0
@@ -1186,17 +1220,13 @@ class KwsedApp(App[None]):
             ("♥", "fav"),
         ):
             table.add_column(label, key=key)
-        for pair, card in zip(self._pairs, self._row_cards):
+        for pair, card, multi in zip(self._pairs, self._row_cards, self._row_multis):
             table.add_row(
-                *self._bank_row(pair, card),
-                key=self._row_key(pair, card),
+                *self._bank_row(pair, card, multi),
+                key=self._row_key(pair, card, multi),
             )
 
-        slots = self.query_one("#slot-table", DataTable)
-        # The favourite marker leads the row: a gutter mark the eye runs
-        # down, rather than a character glued to the name.
-        for label, key in (("♥", "fav"), ("#", "num"), ("name", "name")):
-            slots.add_column(label, key=key)
+        self._ensure_slot_columns("slots")
         if self._live_path is not None:
             _livenames.apply_to(self.catalog, self._live_path)
         self._fill(self._current_pair)
@@ -1452,6 +1482,9 @@ class KwsedApp(App[None]):
         self.push_screen(RatingFilterScreen(current), apply)
 
     def _refill_keeping_place(self) -> None:
+        if self._current_multi is not None:
+            self._fill_multiset(self._current_multi)
+            return
         table = self.query_one("#slot-table", DataTable)
         row = table.cursor_row or 0
         self._fill(self._current_pair, self._current_card)
@@ -1479,7 +1512,28 @@ class KwsedApp(App[None]):
             return f"[b]{name}[/b]"
         return name
 
+    def _ensure_slot_columns(self, mode: str) -> None:
+        if mode == self._slot_mode:
+            return
+        table = self.query_one("#slot-table", DataTable)
+        table.clear(columns=True)
+        if mode == "slots":
+            for label, key in (("♥", "fav"), ("#", "num"), ("name", "name")):
+                table.add_column(label, key=key)
+        else:
+            for label, key in (
+                ("ch", "ch"),
+                ("perf", "perf"),
+                ("name", "name"),
+                ("level", "level"),
+                ("on", "on"),
+            ):
+                table.add_column(label, key=key)
+        self._slot_mode = mode
+
     def _fill(self, pair: Tuple[int, str], card: Optional[int] = None) -> None:
+        self._current_multi = None
+        self._ensure_slot_columns("slots")
         table = self.query_one("#slot-table", DataTable)
         self._current_pair = pair
         self._current_card = card
@@ -1506,7 +1560,93 @@ class KwsedApp(App[None]):
             self._filling = False
         self._detail(0)
 
+    def _fill_multiset(self, number: int) -> None:
+        self._current_multi = number
+        self._current_card = None
+        self._current = []
+        self._ensure_slot_columns("multi")
+        table = self.query_one("#slot-table", DataTable)
+        table.clear()
+        multisets = getattr(self, "_multisets", None)
+        if multisets is None:
+            multisets = getattr(self, "_multi_sets", []) or []
+        if 0 <= number < len(multisets):
+            ms = multisets[number]
+            for part in ms.parts:
+                if part.used:
+                    perf = f"{_bank_label(part.bank)} {part.performance:02d}"
+                    try:
+                        bank_entry = banks.by_sysex(part.bank)
+                        name = self.catalog.display_name(
+                            bank_entry.id, part.performance, banks.Kind.PERFORMANCE
+                        )
+                    except Exception:
+                        name = ""
+                    on = "on" if part.flag else "--"
+                else:
+                    perf = "--"
+                    name = ""
+                    on = "--"
+                table.add_row(
+                    f"{part.channel:02d}",
+                    perf,
+                    name,
+                    str(part.level),
+                    on,
+                    key=f"multi:{number:02d}:{part.channel:02d}",
+                )
+        else:
+            for i in range(16):
+                table.add_row(
+                    f"{i + 1:02d}",
+                    "--",
+                    "[dim]press m to read[/dim]" if i == 0 else "",
+                    "--",
+                    "--",
+                    key=f"multi:{number:02d}:{i + 1:02d}",
+                )
+        ms_name = ""
+        if 0 <= number < len(multisets):
+            ms_name = getattr(multisets[number], "name", "") or ""
+        with contextlib.suppress(NoMatches):
+            self.query_one("#detail", Static).update(
+                f"[b]Multi {number:02d} {ms_name}[/b]\n"
+                "[dim]m reads the setup and e edits it[/dim]"
+            )
+
     def _detail(self, row: int) -> None:
+        if self._current_multi is not None:
+            multisets = getattr(self, "_multisets", None)
+            if multisets is None:
+                multisets = getattr(self, "_multi_sets", []) or []
+            number = self._current_multi
+            if not (0 <= number < len(multisets)):
+                return
+            ms = multisets[number]
+            parts = getattr(ms, "parts", ())
+            if row is None or row >= len(parts):
+                return
+            part = parts[row]
+            try:
+                bank_entry = banks.by_sysex(part.bank)
+                name = self.catalog.display_name(
+                    bank_entry.id, part.performance, banks.Kind.PERFORMANCE
+                )
+            except Exception:
+                name = ""
+            perf = (
+                f"{_bank_label(part.bank)} {part.performance:02d}"
+                if part.used
+                else "--"
+            )
+            with contextlib.suppress(NoMatches):
+                self.query_one("#detail", Static).update(
+                    f"[b]Multi {number:02d} {getattr(ms, 'name', '') or ''}[/b]  "
+                    f"ch {part.channel}  {perf}  {name}\n"
+                    f"[dim]level {part.level} · "
+                    f"{'on' if part.flag else 'off'}[/dim]"
+                )
+            return
         if not self._current or row >= len(self._current):
             with contextlib.suppress(NoMatches):
                 self.query_one("#detail", Static).update("")
@@ -1580,8 +1720,12 @@ class KwsedApp(App[None]):
             return
         if event.data_table.id == "bank-table":
             row = event.cursor_row
-            if 0 <= row < len(self._pairs):
-                self._fill(self._pairs[row], self._row_cards[row])
+            if 0 <= row < len(self._row_multis):
+                multi = self._row_multis[row]
+                if multi is not None:
+                    self._fill_multiset(multi)
+                else:
+                    self._fill(self._pairs[row], self._row_cards[row])
         elif event.data_table.id == "slot-table":
             self._detail(event.cursor_row)
 
@@ -2201,6 +2345,7 @@ class KwsedApp(App[None]):
             self.notify_status(f"multi: {exc}", refused=True)
             return
         self._multi_sets = sets
+        self._multisets = list(sets)
         self.push_screen(
             MultiScreen(
                 sets,
@@ -2280,6 +2425,7 @@ class KwsedApp(App[None]):
                 self._record_write(payload)
             if hasattr(self, "_multi_sets"):
                 self._multi_sets = list(multisets)
+                self._multisets = list(multisets)
         except Exception:  # noqa: S110
             pass
         try:

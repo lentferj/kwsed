@@ -39,7 +39,7 @@ class TestStartup:
             await pilot.pause()
             # ten physical banks x two kinds, plus the Card's forty
             # sub-banks x two kinds (decision 4-A1)
-            assert app.query_one("#bank-table").row_count == 22 + 80
+            assert app.query_one("#bank-table").row_count == 22 + 80 + 32
             assert app.query_one("#slot-table").row_count == 50
 
 
@@ -107,9 +107,9 @@ class TestBothKindsAreListed:
         async with app.run_test() as pilot:
             await pilot.pause()
             kinds = {kind for _number, kind in app._pairs}
-            assert kinds == {banks.Kind.PERFORMANCE, banks.Kind.PATCH}
+            assert {banks.Kind.PERFORMANCE, banks.Kind.PATCH}.issubset(kinds)
             assert len(app._real_pairs) == 22
-            assert len(app._pairs) == 22 + 80
+            assert len(app._pairs) == 22 + 80 + 32
 
 
 class TestDeviceInfoIsGated:

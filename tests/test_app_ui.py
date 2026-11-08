@@ -445,7 +445,7 @@ class TestTheBankTable:
     async def test_it_lists_ten_banks_twice_and_the_card_forty_ways(self, app):
         async with app.run_test() as pilot:
             await pilot.pause()
-            assert app.query_one("#bank-table").row_count == 22 + 80
+            assert app.query_one("#bank-table").row_count == 22 + 80 + 32
 
     async def test_moving_down_it_changes_bank_and_sends_nothing(self, app):
         async with app.run_test() as pilot:
