@@ -94,6 +94,10 @@ class DemoDevice:
         self.selected_log: List[banks.Slot] = []
         self.selected_multi: Optional[int] = None
         self.selected_multi_log: List[int] = []
+        #: The last Multi Mode Setup the fake was asked to store, and how
+        #: many times: the editor's fence is exercised without a unit.
+        self.multi_written: Optional[bytes] = None
+        self.multi_write_count: int = 0
         self.received: List[bytes] = []
         self.identify_calls: int = 0
         self._closed = False
@@ -200,3 +204,43 @@ class DemoDevice:
         self._tick()
         self.selected_multi = number
         self.selected_multi_log.append(number)
+
+    def read_multi(self, *, timeout: Optional[float] = None) -> bytes:
+        """A 0x62 dump: 32 invented Multisets, each assigning RAM 1."""
+        from kws import multi as multi_mod
+
+        self._tick()
+        data = bytearray(
+            multi_mod.NAME_BASE + multi_mod.MULTISETS * multi_mod.NAME_SIZE
+        )
+        for number in range(multi_mod.MULTISETS):
+            base = number * multi_mod.MULTISET_SIZE
+            for channel in range(multi_mod.CHANNELS):
+                at = base + multi_mod.PART_BASE + channel * multi_mod.PART_SIZE
+                data[at] = 0  # RAM 1's wire byte
+                data[at + 1] = (number + channel) % banks.PERFORMANCES_PER_BANK
+                data[at + 2] = 100
+            name = f"Demo Set {number:02d}".encode()
+            at = multi_mod.NAME_BASE + number * multi_mod.NAME_SIZE
+            data[at : at + len(name)] = name
+        return bytes(
+            m.frame(
+                m.Function.MULTISET_DUMP,
+                [0, 1] + list(m.to_nibbles(bytes(data))),
+                channel=self.channel,
+            )
+        )
+
+    def write_multi(
+        self,
+        data: Any,
+        *,
+        backup_dir: str,
+        verify: bool = True,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Accept a Multi Mode Setup write; a fake has nothing to verify."""
+        self._tick()
+        self.multi_written = bytes(data)
+        self.multi_write_count += 1
+        return {"backup": None, "verified": True, "mismatch": None}

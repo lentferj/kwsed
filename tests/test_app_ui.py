@@ -1021,3 +1021,52 @@ class TestCardPcmWording:
             joined = " ".join(cells)
             assert "not captured" in joined
             assert "needs WSC-01" in joined
+
+
+class TestTheMultisetBrowser:
+    """The 32 Multisets are browser rows, not a modal."""
+
+    async def test_m_reads_and_focuses_the_multiset_rows(self, app):
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.action_multi()
+            await settle(pilot, 30)
+            assert len(app._multisets) == 32
+            assert len(app.screen_stack) == 1
+            assert app._current_multi is not None
+            assert app.query_one("#slot-table").row_count == 16
+            table = app.query_one("#bank-table", DataTable)
+            row = " ".join(str(cell) for cell in table.get_row("multi:03"))
+            assert "Demo Set 03" in row
+
+    async def test_enter_on_a_multiset_row_selects_it(self, app):
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.action_multi()
+            await settle(pilot, 30)
+            table = app.query_one("#bank-table", DataTable)
+            table.move_cursor(row=app._row_multis.index(3))
+            await settle(pilot)
+            assert app._current_multi == 3
+            table.focus()
+            await pilot.press("enter")
+            await settle(pilot, 10)
+            assert app.device.selected_multi == 3
+            assert "Multiset 03" in panel_text(app, "#status")
+
+    async def test_e_before_m_refuses(self, app):
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.action_edit_multi()
+            assert "read multi first" in panel_text(app, "#status")
+
+    def test_the_demo_answers_a_multi_dump(self):
+        from kws import messages as msgs
+        from kws import multi as multi_mod
+
+        dump = DemoDevice().read_multi()
+        packet = msgs.parse(dump)
+        assert packet is not None
+        sets = multi_mod.parse(packet.data())
+        assert len(sets) == 32
+        assert sets[3].name == "Demo Set 03"
