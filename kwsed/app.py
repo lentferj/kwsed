@@ -145,6 +145,7 @@ KEY_HINTS = (
     "e edit multi",
     "S scan",
     "C capture card",
+    "L label card",
     "X card sweep",
     "V rating filter",
     "z undo",
@@ -755,6 +756,7 @@ class KwsedApp(App[None]):
         Binding("q", "quit", "Quit"),
         Binding("S", "scan_device", "Scan"),
         Binding("C", "capture_card", "Capture card"),
+        Binding("L", "label_card", "Label card"),
         Binding("X", "card_sweep", "Card sweep", show=False),
         Binding("V", "rating_filter", "Rating filter"),
         Binding("z", "undo", "Undo"),
@@ -1088,10 +1090,18 @@ class KwsedApp(App[None]):
         pcm = f" · needs {entry.needs_pcm}" if entry.needs_pcm else ""
         if captured is None:
             return f"[dim]not captured{pcm}[/dim]"
-        name = captured.name or entry.name
-        if name.strip().casefold() != entry.name.strip().casefold():
-            return f"{name} [dim]*[/dim]"
-        return name
+        title = _cards.bank_title(captured, entry)
+        # A `*` marks a real read name that disagrees with the printed
+        # table -- only for non-user banks, and never for a user label.
+        marker = ""
+        if (
+            not (captured.label or "").strip()
+            and (captured.name or "").strip()
+            and entry.category != _cards.Category.USER
+            and captured.name.strip().casefold() != entry.name.strip().casefold()
+        ):
+            marker = " [dim]*[/dim]"
+        return f"{title}{marker}"
 
     def _bank_row(self, pair: Tuple[int, str], card: Optional[int]) -> List[str]:
         number, kind = pair
@@ -1487,7 +1497,7 @@ class KwsedApp(App[None]):
             self.query_one("#detail", Static).update(
                 f"[b]Card {number:02d} {item.kind} {item.number:02d}[/b]  "
                 f"{shown}\n"
-                f"{entry.name}   [dim]{status}[/dim]\n"
+                f"{_cards.bank_title(captured, entry)}   [dim]{status}[/dim]\n"
                 f"[dim]Enter auditions this slot from whichever HCard bank "
                 f"is currently active on the card.[/dim]"
             )
@@ -1616,6 +1626,44 @@ class KwsedApp(App[None]):
         )
         self._capture_card_worker(self._current_card)
 
+    def action_label_card(self) -> None:
+        """Set a local label on the captured bank under the cursor.
+
+        Labels are archive metadata only -- nothing is written to the card
+        or to any slot. **No MIDI.**
+        """
+        if self._current_card is None:
+            self.notify_status(
+                "no card row selected; capture a bank first with C",
+                refused=True,
+            )
+            return
+        number = self._current_card
+        captured = self._archive.get(number)
+        if captured is None:
+            self.notify_status(
+                f"Card {number:02d} is not captured yet; capture it first with C",
+                refused=True,
+            )
+            return
+
+        def apply(value: Optional[str]) -> None:
+            if value is None:
+                return
+            try:
+                updated = _cards.set_label(number, value, self._cards_path)
+            except LookupError as exc:
+                self.notify_status(str(exc), refused=True)
+                return
+            self._archive[number] = updated
+            self._refresh_card_row(number)
+            if self._current_card == number:
+                self._fill(self._current_pair, number)
+            title = _cards.bank_title(updated, _cards.card(number))
+            self.notify_status(f"labelled Card {number:02d}: {title}")
+
+        self.push_screen(PromptScreen("Card bank name:", captured.label), apply)
+
     def action_card_sweep(self) -> None:
         """Walk the HCard's forty banks, prompting for each selection.
 
@@ -1742,11 +1790,13 @@ class KwsedApp(App[None]):
             if next_index is not None:
                 self._card_sweep_next(next_index, filed)
             return False
+        existing = self._archive.get(number)
         captured = _cards.capture(
             number,
-            name or _cards.card(number).name,
+            name or "",
             performances,
             patches,
+            label=existing.label if existing is not None else "",
         )
         self._archive[number] = captured
         if self._cards_path is not None:
@@ -1759,7 +1809,10 @@ class KwsedApp(App[None]):
             f"{len(performances)} performances, {len(patches)} patches"
         )
         if not name:
-            message += " (no card name; identified from its contents)"
+            message += (
+                " (no card name read; the card name is not readable over "
+                "MIDI, press L to label it)"
+            )
         if mismatch and expected is not None:
             message += (
                 f" — you selected bank {expected:02d} but the card "

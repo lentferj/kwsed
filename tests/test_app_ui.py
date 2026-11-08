@@ -543,7 +543,7 @@ class TestTheCardSubList:
             app.action_capture_card()
             await settle(pilot, 30)
             assert 33 in app._archive
-            assert app._archive[33].name == "User 09"
+            assert app._archive[33].name == ""
             status = panel_text(app, "#status")
             assert "captured Card 33" in status
             assert "filed as bank 33 on your say-so" in status
@@ -554,7 +554,7 @@ class TestTheCardSubList:
             )
             assert "Velvet Stack" in slot
             row = " ".join(str(cell) for cell in table.get_row("card:33:performance"))
-            assert "User 09" in row
+            assert "(unnamed)" in row
 
     async def test_no_selected_card_still_resolves_from_contents(self, tmp_path):
         """With no Card row selected, a captured fingerprint still files."""

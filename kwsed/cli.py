@@ -103,7 +103,11 @@ def _cmd_cards(_device: Any, args: argparse.Namespace) -> int:
             rows.append(
                 [
                     f"{entry.number:02d}",
-                    bank.name if bank is not None else entry.name,
+                    (
+                        _cards.bank_title(bank, entry)
+                        if bank is not None
+                        else entry.name
+                    ),
                     _cards_status(bank, entry),
                     str(len(bank.performances)) if bank else "-",
                     str(len(bank.patches)) if bank else "-",
@@ -122,7 +126,24 @@ def _cmd_cards(_device: Any, args: argparse.Namespace) -> int:
     if getattr(args, "syx", None) is not None:
         return _dump_card_syx(args, entry, bank)
 
-    print(f"Card {number:02d} — {bank.name if bank else entry.name}")
+    if getattr(args, "label", None) is not None:
+        if bank is None:
+            print(
+                f"error: Card {number:02d} is not captured, so it cannot be "
+                f"labelled. Select it on the HCard and press C first.",
+                file=sys.stderr,
+            )
+            return spec.EXIT_USAGE
+        try:
+            updated = _cards.set_label(number, args.label, _cards_path(args))
+        except LookupError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return spec.EXIT_USAGE
+        print(f"Card {number:02d} — {_cards.bank_title(updated, entry)}")
+        return spec.EXIT_OK
+
+    shown = _cards.bank_title(bank, entry) if bank is not None else entry.name
+    print(f"Card {number:02d} — {shown}")
     print(f"{_cards_status(bank, entry)}")
     print()
     rows = []
@@ -868,6 +889,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="FILE",
         help="write one archived bank as a .syx (names only; '-' for stdout)",
+    )
+    sp.add_argument(
+        "--label",
+        default=None,
+        metavar="TEXT",
+        help="set a local label on a captured bank (offline)",
     )
     sp = sub.add_parser("list", help="one bank's slots (no unit needed)")
     sp.add_argument("bank")

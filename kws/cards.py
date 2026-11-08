@@ -65,6 +65,8 @@ __all__ = [
     "bank_numbers",
     "count_for",
     "capture",
+    "set_label",
+    "bank_title",
     "default_path",
     "load",
     "resolve",
@@ -253,6 +255,7 @@ class CapturedBank:
     captured_at: str  #: ISO-8601, UTC.
     performances: Dict[int, str]  #: {slot: name}
     patches: Dict[int, str]  #: {slot: name}
+    label: str = ""  #: A user-supplied name for the bank, local only.
 
     def names(self, kind: str) -> Dict[int, str]:
         """The captured names of one kind."""
@@ -272,6 +275,7 @@ def capture(
     patches: Dict[int, str],
     *,
     captured_at: Optional[str] = None,
+    label: str = "",
 ) -> CapturedBank:
     """Bundle one bank's read into a record. Does no MIDI and no I/O."""
     return CapturedBank(
@@ -280,6 +284,7 @@ def capture(
         captured_at=captured_at or datetime.now(UTC).isoformat(timespec="seconds"),
         performances={int(slot): str(value) for slot, value in performances.items()},
         patches={int(slot): str(value) for slot, value in patches.items()},
+        label=label.strip() if isinstance(label, str) else str(label).strip(),
     )
 
 
@@ -318,12 +323,26 @@ def _bank_from_json(key: str, raw: object) -> Optional[CapturedBank]:
     captured_at = raw.get("captured_at")
     if not isinstance(name, str) or not isinstance(captured_at, str):
         return None
+    label = raw.get("label", "")
+    if not isinstance(label, str):
+        label = ""
+    entry = _BY_NUMBER.get(number)
+    # An old archive stored the table's placeholder ("User 05") as the
+    # card name for user banks. That was never a real read; treat it as
+    # unread so it does not masquerade as the bank's identity.
+    if (
+        entry is not None
+        and entry.category == Category.USER
+        and name.strip() == entry.name.strip()
+    ):
+        name = ""
     return CapturedBank(
         number=number,
         name=name,
         captured_at=captured_at,
         performances=_as_slot_names(raw.get("performances")),
         patches=_as_slot_names(raw.get("patches")),
+        label=label,
     )
 
 
@@ -363,6 +382,7 @@ def load(path: Optional[str] = None) -> Dict[int, CapturedBank]:
 def _to_json(bank: CapturedBank) -> Dict[str, object]:
     return {
         "name": bank.name,
+        "label": bank.label,
         "captured_at": bank.captured_at,
         "performances": {str(slot): name for slot, name in bank.performances.items()},
         "patches": {str(slot): name for slot, name in bank.patches.items()},
@@ -469,6 +489,49 @@ def resolve(
         return next(iter(narrowed)) if len(narrowed) == 1 else None
     # No usable name: the fingerprint is the only evidence left.
     return next(iter(fingerprinted)) if len(fingerprinted) == 1 else None
+
+
+def set_label(number: int, label: str, path: Optional[str] = None) -> CapturedBank:
+    """Set (or clear) the local label of one already-captured bank.
+
+    Read-modify-write on the archive. A bank that has not been captured
+    cannot be labelled: there is no record to attach the label to.
+    """
+    where = path or default_path()
+    banks = load(where)
+    if number not in banks:
+        raise LookupError(f"Card {number:02d} is not captured; capture it first with C")
+    bank = banks[number]
+    updated = CapturedBank(
+        number=bank.number,
+        name=bank.name,
+        captured_at=bank.captured_at,
+        performances=dict(bank.performances),
+        patches=dict(bank.patches),
+        label=(label or "").strip(),
+    )
+    banks[number] = updated
+    _write(banks, where)
+    return updated
+
+
+def bank_title(captured: Optional[CapturedBank], entry: Card) -> str:
+    """The name to show for one bank, in display precedence.
+
+    A user label wins over everything (it is an explicit choice). Then the
+    name the card actually reported. For factory/preload/rom-card banks the
+    manual's table name is the expected identity, so it is the fallback;
+    for user banks there is no expected name, so an unread one is
+    "(unnamed)".
+    """
+    if captured is not None:
+        if (captured.label or "").strip():
+            return captured.label.strip()
+        if (captured.name or "").strip():
+            return captured.name.strip()
+    if entry.category != Category.USER:
+        return entry.name
+    return "(unnamed)"
 
 
 def _write(banks: Dict[int, CapturedBank], where: str) -> None:

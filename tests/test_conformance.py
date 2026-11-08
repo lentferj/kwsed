@@ -73,6 +73,7 @@ def test_the_legend_matches_the_family() -> None:
             "e edit multi",
             "S scan",
             "C capture card",
+            "L label card",
             "X card sweep",
             "V rating filter",
             "z undo",
