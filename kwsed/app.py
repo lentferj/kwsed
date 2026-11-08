@@ -822,6 +822,7 @@ class KwsedApp(App[None]):
         ]
         self._current_pair = self._pairs[0]
         self._current_card: Optional[int] = None
+        self._active_card: Optional[int] = None
         self._current: List[banks.Slot] = []
         self._busy_gate = BusyGate()
         self._exchange = threading.Lock()
@@ -1088,8 +1089,9 @@ class KwsedApp(App[None]):
         captured = self._archive.get(number)
         entry = _cards.card(number)
         pcm = f" · needs {entry.needs_pcm}" if entry.needs_pcm else ""
+        prefix = "• " if self._active_card == number else ""
         if captured is None:
-            return f"[dim]not captured{pcm}[/dim]"
+            return f"{prefix}[dim]not captured{pcm}[/dim]"
         title = _cards.bank_title(captured, entry)
         # A `*` marks a real read name that disagrees with the printed
         # table -- only for non-user banks, and never for a user label.
@@ -1101,7 +1103,7 @@ class KwsedApp(App[None]):
             and captured.name.strip().casefold() != entry.name.strip().casefold()
         ):
             marker = " [dim]*[/dim]"
-        return f"{title}{marker}"
+        return f"{prefix}{title}{marker}"
 
     def _bank_row(self, pair: Tuple[int, str], card: Optional[int]) -> List[str]:
         number, kind = pair
@@ -1493,6 +1495,12 @@ class KwsedApp(App[None]):
         else:
             status += f"  {captured.captured_at}"
             shown = name or "[dim](unnamed)[/dim]"
+            if self._active_card == number:
+                status += (
+                    f"  active; last confirmed capture {captured.captured_at[11:16]}"
+                )
+            if captured.verified is False:
+                status += "  unverified — the HCard may be on another bank"
         with contextlib.suppress(NoMatches):
             self.query_one("#detail", Static).update(
                 f"[b]Card {number:02d} {item.kind} {item.number:02d}[/b]  "
@@ -1547,6 +1555,18 @@ class KwsedApp(App[None]):
                 "a patch is not independently playable on the SR -- it is "
                 "heard through a Performance that uses it; select a "
                 "Performance instead",
+                refused=True,
+            )
+            return
+        if (
+            self._current_card is not None
+            and self._active_card is not None
+            and self._current_card != self._active_card
+        ):
+            self.notify_status(
+                f"the HCard is on Card {self._active_card:02d} (last "
+                f"confirmed); select Card {self._current_card:02d} on the "
+                f"HCard first, or press C to re-check",
                 refused=True,
             )
             return
@@ -1741,11 +1761,12 @@ class KwsedApp(App[None]):
             with self._busy_gate, self._lock:
                 reader = getattr(self.device, "read_card_name", None)
                 name = reader() if callable(reader) else None
-                _, performances = self.device.read_bank_names(
-                    "CARD", banks.Kind.PERFORMANCE
-                )
-                _, patches = self.device.read_bank_names("CARD", banks.Kind.PATCH)
-            payload = (name, performances, patches)
+                perf_dump = self.device.read_bank("CARD", banks.Kind.PERFORMANCE)
+                patch_dump = self.device.read_bank("CARD", banks.Kind.PATCH)
+                performances = perf_dump.names()
+                patches = patch_dump.names()
+                digest = _cards.content_digest(perf_dump.records, patch_dump.records)
+            payload = (name, performances, patches, digest)
         except _BRIDGE_ERRORS as exc:
             failure = exc
         finally:
@@ -1762,25 +1783,62 @@ class KwsedApp(App[None]):
             return
         self.call_from_thread(self._file_capture, payload, expected, next_index, filed)
 
-    def _file_capture(
+    def _file_capture(  # noqa: C901
         self,
         payload: Any,
         expected: Optional[int],
         next_index: Optional[int] = None,
         filed: int = 0,
     ) -> bool:
-        name, performances, patches = payload
-        resolved = _cards.resolve(
-            name,
-            performances.get(0),
-            patches.get(0),
-            captured=self._archive,
+        name, performances, patches, digest = payload
+        by_digest = _cards.resolve_by_digest(digest, self._archive)
+        resolved = (
+            by_digest
+            if by_digest is not None
+            else _cards.resolve(
+                name,
+                performances.get(0),
+                patches.get(0),
+                captured=self._archive,
+                digest=digest,
+            )
         )
-        mismatch = (
-            expected is not None and resolved is not None and resolved != expected
-        )
-        say_so = expected is not None and resolved is None
-        number = expected if (expected is not None and resolved is None) else resolved
+        expected_given = expected is not None
+        evidence_bank: Optional[int] = by_digest if by_digest is not None else resolved
+
+        verified = False
+        number: Optional[int] = None
+        message_suffix = ""
+        if expected_given:
+            if evidence_bank is not None and evidence_bank != expected:
+                # different bank
+                number = evidence_bank
+                verified = True
+                message_suffix = (
+                    f" — the card is Card {number:02d}, not "
+                    f"{expected:02d} — filed under {number:02d}. "
+                    f"Switch the HCard to {expected:02d} if that is the "
+                    f"bank you meant."
+                )
+            elif evidence_bank == expected:
+                number = expected
+                verified = True
+                message_suffix = " — confirmed"
+            else:
+                # no evidence
+                number = expected
+                verified = False
+                message_suffix = (
+                    " — unverified; select that bank on the HCard and "
+                    "capture again (filed as bank "
+                    f"{expected:02d} on your say-so)"
+                )
+        elif evidence_bank is not None:
+            number = evidence_bank
+            verified = by_digest is not None
+        else:
+            number = None
+
         if number is None:
             self.notify_status(
                 "capture: could not tell which Card bank this is. Select "
@@ -1790,6 +1848,7 @@ class KwsedApp(App[None]):
             if next_index is not None:
                 self._card_sweep_next(next_index, filed)
             return False
+
         existing = self._archive.get(number)
         captured = _cards.capture(
             number,
@@ -1797,10 +1856,13 @@ class KwsedApp(App[None]):
             performances,
             patches,
             label=existing.label if existing is not None else "",
+            digest=digest,
+            verified=verified,
         )
         self._archive[number] = captured
         if self._cards_path is not None:
             _cards.save(captured, self._cards_path)
+        self._active_card = number
         self._refresh_card_row(number)
         if self._current_card == number:
             self._fill(self._current_pair, number)
@@ -1813,13 +1875,7 @@ class KwsedApp(App[None]):
                 " (no card name read; the card name is not readable over "
                 "MIDI, press L to label it)"
             )
-        if mismatch and expected is not None:
-            message += (
-                f" — you selected bank {expected:02d} but the card "
-                f"resolved to {number:02d} — filed under {number:02d}"
-            )
-        elif say_so:
-            message += f" (filed as bank {number:02d} on your say-so)"
+        message += message_suffix
         self.notify_status(message)
         if next_index is not None:
             self._card_sweep_next(next_index, filed + 1)
