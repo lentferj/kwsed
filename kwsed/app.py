@@ -168,6 +168,19 @@ def _bank_label(sysex_byte: int) -> str:
         return f"bank {sysex_byte}"
 
 
+def _clip(text: str, limit: int = 26) -> str:
+    """Clip ``text`` to at most ``limit`` characters.
+
+    A trailing "…" marks the clip. Text that already fits is returned
+    unchanged. Non-positive limits yield just the ellipsis.
+    """
+    if len(text) <= limit:
+        return text
+    if limit <= 1:
+        return "…"
+    return text[: limit - 1] + "…"
+
+
 class MultiScreen(ModalScreen[None]):
     """The 32 Multisets and what each assigns to the 16 MIDI channels.
 
@@ -725,13 +738,15 @@ class KwsedApp(App[None]):
        of a label -- the table scrolls sideways and clips the
        *start*, so a bank reads as nonsense rather than as narrow. */
     #bank-table {
-        width: auto; min-width: 20; max-width: 52;
+        width: auto; min-width: 20; max-width: 64;
         border-right: solid $panel;
     }
     #slot-table { width: 1fr; }
     DataTable { height: 1fr; }
-    #detail { height: 3; padding: 0 1; border-top: solid $panel; }
-    #status { height: 1; background: $boost; color: $text; padding: 0 1; }
+    #detail { height: auto; max-height: 5; padding: 0 1; border-top: solid $panel; }
+    #status {
+        height: auto; max-height: 3; background: $boost; color: $text; padding: 0 1;
+    }
     """
 
     BINDINGS = [
@@ -1079,6 +1094,10 @@ class KwsedApp(App[None]):
             return f"{number}:{kind}"
         return f"card:{card:02d}:{kind}"
 
+    def _clip(self, text: str, limit: int = 26) -> str:
+        """Instance wrapper around the module-level :func:`_clip`."""
+        return _clip(text, limit)
+
     def _card_row_name(self, number: int) -> str:
         """The name cell of one HCard sub-bank.
 
@@ -1092,7 +1111,7 @@ class KwsedApp(App[None]):
         prefix = "• " if self._active_card == number else ""
         if captured is None:
             return f"{prefix}[dim]not captured{pcm}[/dim]"
-        title = _cards.bank_title(captured, entry)
+        title = _clip(_cards.bank_title(captured, entry))
         # A `*` marks a real read name that disagrees with the printed
         # table -- only for non-user banks, and never for a user label.
         marker = ""
