@@ -1487,7 +1487,9 @@ class KwsedApp(App[None]):
             self.query_one("#detail", Static).update(
                 f"[b]Card {number:02d} {item.kind} {item.number:02d}[/b]  "
                 f"{shown}\n"
-                f"{entry.name}   [dim]{status}[/dim]"
+                f"{entry.name}   [dim]{status}[/dim]\n"
+                f"[dim]Enter auditions this slot from whichever HCard bank "
+                f"is currently active on the card.[/dim]"
             )
 
     def notify_status(self, message: str, *, refused: bool = False) -> None:
@@ -1523,18 +1525,13 @@ class KwsedApp(App[None]):
         row = table.cursor_row
         if not 0 <= row < len(self._current):
             return
-        if self._current_card is not None:
-            self.notify_status(
-                "Enter auditions the physical card's active bank -- select "
-                "the bank on the HCard and capture it with C",
-                refused=True,
-            )
-            return
         entry = self._current[row]
         # The SR has no patch mode: a Program Change selects a Performance,
         # never a patch -- cf8be55 made the bridge refuse below, and refusing
         # here, before the busy/exchange dance, keeps that friendly instead
-        # of a raised error from the worker.
+        # of a raised error from the worker. This check runs for every row,
+        # including card sub-bank rows, so a card PATCH row is refused as a
+        # patch rather than silently allowed.
         if entry.kind == banks.Kind.PATCH:
             self.notify_status(
                 "a patch is not independently playable on the SR -- it is "
@@ -1549,10 +1546,10 @@ class KwsedApp(App[None]):
         if not self._exchange.acquire(blocking=False):
             self.notify_status("busy", refused=True)
             return
-        self._select_worker(entry)
+        self._select_worker(entry, card=self._current_card)
 
     @work(thread=True)
-    def _select_worker(self, entry: banks.Slot) -> None:
+    def _select_worker(self, entry: banks.Slot, card: Optional[int] = None) -> None:
         """**MIDI only.**"""
         failure: BaseException | None = None
         try:
@@ -1565,6 +1562,13 @@ class KwsedApp(App[None]):
         if failure is not None:
             self.call_from_thread(
                 self.notify_status, f"select: {failure}", refused=True
+            )
+            return
+        if card is not None:
+            self.call_from_thread(
+                self.notify_status,
+                f"selected Card {card:02d} from the HCard bank active on "
+                f"the unit (active HCard bank) — slot {entry.number:02d}",
             )
             return
         self.call_from_thread(
@@ -2151,7 +2155,8 @@ are different objects; performance 7 is not patch 7.
       is never selected: the SR has no patch mode, so Enter refuses
       a patch row -- a patch is heard through a Performance that
       uses it. Patches are read, written and favourited like any
-      other slot.
+      other slot. On a Card sub-bank row, Enter selects that slot
+      from whichever HCard bank is currently active on the card.
   r   read this bank's names from the unit -- SILENT, nothing is selected
   /   search names
   m   channels: the 32 Multisets, and which performance answers on each
