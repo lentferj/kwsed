@@ -602,23 +602,41 @@ alike. Worth doing as shared work rather than five times over.
 
 **Blocked on:** nothing but the decoding. Nothing here depends on it.
 
-## 23. The HCard card-name field's offset is unconfirmed
+## 23. The HCard card-name: reading is closed, writing is possible — parked
 
-**Status:** open; read-only probe written, hardware not yet compared.
+**Status:** read path closed by the documentation; write path designed, not
+built.
 
-`kws.bridge.read_card_name()` takes the card name from the System Setup dump
-(`0x51`) at `CARD_NAME_OFFSET`/`CARD_NAME_LEN`, marked
-`# CONFIRM AGAINST HARDWARE`. Until a real unit's dump is compared against
-the name on the card's own display, an unknown offset can make the archive
-file a capture under the wrong bank.
+The card name is **not readable** over MIDI, and that is now established
+rather than suspected:
 
-`tools/probe_card_name.py` prints the raw `0x51` bytes, read-only, so the
-field can be located. The safe behaviour meanwhile is already in place:
-`read_card_name()` returns `None`, and identity resolution falls back to the
-first performance and patch names captured from the bank.
+- The System Setup dump (`0x51`) is exactly the 34-field `system` structure
+  of Reference Appendix 4 §5.8 and has no name field.
+- The accompanying expanded dumps (`0x5C`, `0x61`) are 20 and 9 bytes
+  (§5.9, §5.10) and have none either.
+- The dump-request list (§1.1) has **no parameter-read request**.
+- `CARD_NAME` exists only as **parameter #1** in the parameter table
+  (§5.15), and Parameter Change (`0x41`) is a *set* message. Appendix 3
+  lists no parameter-change transmission, so the SR never reports it.
 
-**Blocked on:** one read-only session with the HCard fitted. No writes are
-needed or permitted for this.
+`read_card_name()` therefore cannot work; the archive falls back to a local
+label (`cards.json` `label`) plus content evidence (item 25).
+`CARD_NAME_OFFSET` is dead as a read and should be removed when the method
+is next touched; `tools/probe_card_name.py` remains useful only for
+confirming the dump's shape.
+
+**Writing** it is documented: Appendix 4 §2.1.17 — function `0x41`,
+parameter #1, the value as 7-bit ASCII with `0x7F` = space and a NUL
+terminator, up to 15 characters. `frame(0x41, [1, 0, *ascii, 0])` is the
+whole message. Before shipping, two things need a real unit: whether a
+Parameter Change commits the name to the card (the NAME page auto-saves on
+exit; a parameter change never "enters" the page), and that there is **no
+read-back and no backup** — the old name cannot be read, so the operation is
+not automatically reversible. The HCard's Dynamic Update may also rewrite
+the name on a bank switch.
+
+**Blocked on:** a separate write-verification session. Writing the card name
+is a card write, outside the read-only HCard session.
 
 ## 24. HCard write protection is invisible to the synth
 
@@ -635,3 +653,41 @@ kwsed already has. No part of the read-only HCard support changes it.
 
 **Blocked on:** a separate write-verification session, deliberately outside
 this one.
+
+## 25. Which HCard bank is active cannot be read — identify by content
+
+**Status:** open; design below, not implemented.
+
+Neither the SR nor kwsed can see which of the forty banks is in front of the
+synth: the card name is unreadable (item 23), the SR's `CURRENT_BANK` /
+`CURRENT_PROG` parameters are write-only in the documented SysEx, and the
+HCard itself has no MIDI. The active bank is a property of the card's front
+panel. The workable mechanism is therefore **evidence plus assertion**:
+
+1. **Content digest.** At capture, hash the decoded performance and patch
+   dumps (e.g. SHA-256 over both payloads) and store the digest with the
+   bank in `cards.json`. A fresh read can then be matched against every
+   captured bank without trusting the (unreadable) name.
+2. **Verification against the asserted bank.** `C` on a card sub-bank row
+   passes the row number as the expected bank, as the sweep already does.
+   Compare the digest with that bank's stored digest:
+   - match -> confirmed;
+   - matches a *different* captured bank -> the card is on that bank (or
+     the two are identical); say so and file accordingly;
+   - no match -> new or changed content; file under the asserted number and
+     mark it **unverified**.
+3. **Active-bank marker.** Remember the last confirmed/asserted bank and
+   mark it in the pane. A later read whose digest no longer matches the
+   stored digest means the bank changed since capture (or a different bank
+   is active); say which, rather than silently trusting the row.
+4. **"Switch on the HCard" prompt.** When the user acts on a card row that
+   is not the known-active bank, say so and ask them to select that bank on
+   the HCard first — it cannot be switched remotely. The sweep already
+   works this way; this generalises it to single actions.
+
+Limits to state in the UI: two banks with identical content are
+indistinguishable, a bank never captured cannot be identified, and a bank
+edited on the unit no longer matches its stored digest.
+
+**Blocked on:** nothing technical. It is read-only and testable with the
+existing doubles.
