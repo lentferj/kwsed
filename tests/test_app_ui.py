@@ -25,7 +25,7 @@ write into the user's real one.
 """
 
 import pytest
-from textual.widgets import Static
+from textual.widgets import DataTable, Static
 
 from kws import banks
 from kws import catalog as cat
@@ -714,6 +714,65 @@ class TestTheCardSubList:
             app._fill((banks.bank("CARD").number, "performance"), 7)
             app.action_read_names()
             assert "press C" in str(app.query_one("#status").content)
+
+    async def test_a_long_status_is_not_clipped(self, app):
+        """The status is height:auto up to 3 lines; a 110-character refusal
+        used to be cut to one line."""
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.notify_status(
+                "refused · the HCard is on Card 28 (last confirmed); select "
+                "Card 29 on the HCard first, or press C to re-check",
+                refused=True,
+            )
+            await settle(pilot)
+            assert app.query_one("#status").size.height >= 2
+
+    async def test_a_long_card_label_is_clipped_in_the_row(self, tmp_path):
+        """A long label is shortened with an ellipsis, and the bank table
+        no longer overflows its pane sideways."""
+        from kws import cards
+
+        path = str(tmp_path / "cards.json")
+        cards.save(
+            cards.capture(
+                29,
+                "",
+                {0: "Calliosynth"},
+                {0: "Bell"},
+                label="A Very Long HCard Bank Label For Testing",
+            ),
+            path,
+        )
+        app = KwsedApp(DemoDevice(), catalog=cat.Catalog(), cards_path=path)
+        async with app.run_test(size=(110, 30)) as pilot:
+            await pilot.pause()
+            table = app.query_one("#bank-table", DataTable)
+            cells = [str(cell) for cell in table.get_row("card:29:performance")]
+            assert any(cell.endswith("…") for cell in cells)
+            assert table.virtual_size.width <= table.size.width
+
+    async def test_the_card_detail_fits_its_pane(self, tmp_path):
+        app = self._app(tmp_path)
+        async with app.run_test(size=(110, 30)) as pilot:
+            await pilot.pause()
+            app._fill((banks.bank("CARD").number, "performance"), 7)
+            await settle(pilot)
+            assert app.query_one("#detail").size.height >= 3
+
+    async def test_the_generic_detail_names_the_real_program_change(self, app):
+        """The Bank Select mapping is established now, so the detail says
+        which CC32/PC were sent instead of the old 'not established' note."""
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._fill((banks.bank("ROM4").number, banks.Kind.PERFORMANCE))
+            app.query_one("#slot-table").move_cursor(row=7)
+            await settle(pilot)
+            detail = panel_text(app, "#detail")
+            assert "Bank Select LSB" in detail
+            assert "[b]2[/b]" in detail
+            assert "[b]57[/b]" in detail
+            assert "not established" not in detail
 
 
 class TestCardSweep:

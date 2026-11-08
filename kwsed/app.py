@@ -743,7 +743,10 @@ class KwsedApp(App[None]):
     }
     #slot-table { width: 1fr; }
     DataTable { height: 1fr; }
-    #detail { height: auto; max-height: 5; padding: 0 1; border-top: solid $panel; }
+    /* Fixed: `height: auto` under-counts a wrapped line in this Textual
+       version, and the last line was clipped. Content is kept to two
+       lines, so four gives a wrap of headroom. */
+    #detail { height: 5; padding: 0 1; border-top: solid $panel; }
     #status {
         height: auto; max-height: 3; background: $boost; color: $text; padding: 0 1;
     }
@@ -1494,9 +1497,9 @@ class KwsedApp(App[None]):
             self.query_one("#detail", Static).update(
                 f"[b]{item.bank.label} {item.kind} {item.number:02d}[/b]  "
                 f"{name}{note}\n"
-                f"Bank Select LSB [b]{item.bank.sysex}[/b]   Program Change "
-                f"[b]{item.number}[/b]   [dim]the wire byte is sent; which bank "
-                f"a Bank Select actually reaches is not established[/dim]"
+                f"[dim]Bank Select LSB[/dim] [b]{item.bank.midi_bank}[/b]   "
+                f"[dim]Program Change[/dim] "
+                f"[b]{item.bank.program_base + item.number}[/b]"
             )
 
     def _detail_card(self, item: banks.Slot) -> None:
@@ -1509,24 +1512,22 @@ class KwsedApp(App[None]):
         name = self._card_slot_name(number, item.kind, item.number)
         status = _cards.card_words(captured is not None, entry.needs_pcm)
         if captured is None:
-            status += " — select this bank on the HCard and press C"
+            status += " — press C to capture it"
             shown = name or "[dim](no archive)[/dim]"
         else:
-            status += f"  {captured.captured_at}"
-            shown = name or "[dim](unnamed)[/dim]"
+            status = f"captured {captured.captured_at[:16].replace('T', ' ')}"
+            if entry.needs_pcm is not None:
+                status += f" · needs {entry.needs_pcm}"
             if self._active_card == number:
-                status += (
-                    f"  active; last confirmed capture {captured.captured_at[11:16]}"
-                )
+                status += " · active"
             if captured.verified is False:
-                status += "  unverified — the HCard may be on another bank"
+                status += " · unverified"
+            shown = name or "[dim](unnamed)[/dim]"
         with contextlib.suppress(NoMatches):
             self.query_one("#detail", Static).update(
                 f"[b]Card {number:02d} {item.kind} {item.number:02d}[/b]  "
                 f"{shown}\n"
-                f"{_cards.bank_title(captured, entry)}   [dim]{status}[/dim]\n"
-                f"[dim]Enter auditions this slot from whichever HCard bank "
-                f"is currently active on the card.[/dim]"
+                f"{_cards.bank_title(captured, entry)}   [dim]{status}[/dim]"
             )
 
     def notify_status(self, message: str, *, refused: bool = False) -> None:
