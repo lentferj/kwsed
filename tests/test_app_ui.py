@@ -278,6 +278,7 @@ class TestTheCursorContract:
         PC 50+N) are pinned in test_bridge; this pins the wiring."""
         async with app.run_test() as pilot:
             await pilot.pause()
+            app._active_card = 17
             app._fill((banks.bank("CARD").number, banks.Kind.PERFORMANCE), 17)
             table = app.query_one("#slot-table")
             table.focus()
@@ -633,11 +634,14 @@ class TestTheCardSubList:
             await pilot.press("enter")
             await settle(pilot)
             assert app.device.selected_log == []
-            assert "HCard is on Card 07" in panel_text(app, "#status")
+            assert "was on Card 07" in panel_text(app, "#status")
 
-    async def test_select_allows_a_card_row_when_the_active_bank_is_unknown(
+    async def test_select_refuses_a_card_row_when_the_active_bank_is_unknown(
         self, tmp_path
     ):
+        """A fresh session that has never captured cannot tell which bank
+        the card is on, so it refuses rather than auditioning the wrong
+        bank silently."""
         app = self._app(tmp_path, seeded=False)
         async with app.run_test() as pilot:
             await pilot.pause()
@@ -645,8 +649,43 @@ class TestTheCardSubList:
             app._fill((banks.bank("CARD").number, banks.Kind.PERFORMANCE), 33)
             app.query_one("#slot-table").focus()
             await pilot.press("enter")
-            await settle(pilot, 10)
-            assert len(app.device.selected_log) == 1
+            await settle(pilot)
+            assert app.device.selected_log == []
+            assert "has not confirmed" in panel_text(app, "#status")
+
+    async def test_the_active_bank_survives_a_restart(self, tmp_path):
+        """The last confirmed bank is persisted, so a new session warns
+        before auditioning from a different one."""
+        from kws import cards
+
+        path = str(tmp_path / "cards.json")
+        cards.set_active(28, path)
+        assert cards.load_active(path) == 28
+        # Capturing another bank must not clear the active hint.
+        cards.save(cards.capture(7, "x", {0: "a"}, {0: "b"}), path)
+        assert cards.load_active(path) == 28
+
+        app = KwsedApp(DemoDevice(), catalog=cat.Catalog(), cards_path=path)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert app._active_card == 28
+            app._fill((banks.bank("CARD").number, banks.Kind.PERFORMANCE), 29)
+            app.query_one("#slot-table").focus()
+            await pilot.press("enter")
+            await settle(pilot)
+            assert app.device.selected_log == []
+            assert "was on Card 28" in panel_text(app, "#status")
+
+    async def test_a_capture_persists_the_active_bank(self, tmp_path):
+        from kws import cards
+
+        app = self._app(tmp_path, card_name=None, seeded=False)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._fill((banks.bank("CARD").number, banks.Kind.PERFORMANCE), 33)
+            app.action_capture_card()
+            await settle(pilot, 30)
+            assert cards.load_active(app._cards_path) == 33
 
     async def test_no_selected_card_still_resolves_from_contents(self, tmp_path):
         """With no Card row selected, a captured fingerprint still files."""

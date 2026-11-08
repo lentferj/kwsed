@@ -840,7 +840,13 @@ class KwsedApp(App[None]):
         ]
         self._current_pair = self._pairs[0]
         self._current_card: Optional[int] = None
-        self._active_card: Optional[int] = None
+        #: Which HCard bank was last confirmed or asserted active. Persisted
+        #: so a new session can warn before auditioning from a different
+        #: bank: the card is switched physically and the synth cannot be
+        #: asked (docs/HCARD.md, TODO item 25).
+        self._active_card = (
+            _cards.load_active(cards_path) if cards_path is not None else None
+        )
         self._current: List[banks.Slot] = []
         self._busy_gate = BusyGate()
         self._exchange = threading.Lock()
@@ -1578,18 +1584,23 @@ class KwsedApp(App[None]):
                 refused=True,
             )
             return
-        if (
-            self._current_card is not None
-            and self._active_card is not None
-            and self._current_card != self._active_card
-        ):
-            self.notify_status(
-                f"the HCard is on Card {self._active_card:02d} (last "
-                f"confirmed); select Card {self._current_card:02d} on the "
-                f"HCard first, or press C to re-check",
-                refused=True,
-            )
-            return
+        if self._current_card is not None:
+            if self._active_card is None:
+                self.notify_status(
+                    "the app has not confirmed which HCard bank is active; "
+                    f"select Card {self._current_card:02d} on the HCard and "
+                    "press C once, then select again",
+                    refused=True,
+                )
+                return
+            if self._current_card != self._active_card:
+                self.notify_status(
+                    f"the HCard was on Card {self._active_card:02d} at the "
+                    f"last capture; select Card {self._current_card:02d} on "
+                    f"the HCard first, or press C to re-check",
+                    refused=True,
+                )
+                return
         if self._busy:
             self.notify_status("busy", refused=True)
             return
@@ -1880,9 +1891,10 @@ class KwsedApp(App[None]):
             verified=verified,
         )
         self._archive[number] = captured
+        self._active_card = number
         if self._cards_path is not None:
             _cards.save(captured, self._cards_path)
-        self._active_card = number
+            _cards.set_active(number, self._cards_path)
         self._refresh_card_row(number)
         if self._current_card == number:
             self._fill(self._current_pair, number)

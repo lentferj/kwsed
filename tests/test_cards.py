@@ -173,6 +173,32 @@ class TestTheArchive:
         assert os.path.basename(path) == "cards.json"
         assert os.path.dirname(path) == str(tmp_path)
 
+    def test_the_active_bank_is_persisted_and_survives_a_save(self, tmp_path):
+        path = str(tmp_path / "cards.json")
+        cards.set_active(28, path)
+        assert cards.load_active(path) == 28
+        # Capturing a bank must not clear the active-bank hint.
+        cards.save(self._captured(7), path)
+        assert cards.load_active(path) == 28
+        assert set(cards.load(path)) == {7}
+
+    def test_an_invalid_active_value_is_ignored(self, tmp_path):
+        path = tmp_path / "cards.json"
+        path.write_text(
+            json.dumps({"version": 1, "banks": {}, "active": 99}),
+            encoding="utf-8",
+        )
+        assert cards.load_active(str(path)) is None
+        path.write_text(
+            json.dumps({"version": 1, "banks": {}, "active": True}),
+            encoding="utf-8",
+        )
+        assert cards.load_active(str(path)) is None
+
+    def test_set_active_rejects_an_unknown_bank(self, tmp_path):
+        with pytest.raises(LookupError):
+            cards.set_active(40, str(tmp_path / "cards.json"))
+
     def test_names_are_selected_by_kind(self):
         bank = self._captured()
         assert bank.names(banks.Kind.PERFORMANCE) == {

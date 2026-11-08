@@ -44,7 +44,7 @@ import os
 import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from kws import favorites
 from kws.banks import PATCHES_PER_BANK, PERFORMANCES_PER_BANK, Kind, count_for
@@ -71,9 +71,11 @@ __all__ = [
     "content_digest",
     "default_path",
     "load",
+    "load_active",
     "resolve",
     "resolve_by_digest",
     "save",
+    "set_active",
 ]
 
 #: The archive's filename, beside the favourites database and the live-name
@@ -396,6 +398,38 @@ def load(path: Optional[str] = None) -> Dict[int, CapturedBank]:
     return out
 
 
+def _read_payload(where: str) -> Dict[str, Any]:
+    """The archive file as a dict, or {} when it is absent or unusable."""
+    try:
+        with open(where, encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def load_active(path: Optional[str] = None) -> Optional[int]:
+    """The HCard bank last confirmed or asserted as active, or ``None``.
+
+    This is a hint, not a reading: the active bank is a property of the
+    card's front panel and cannot be asked for (TODO item 25). It is
+    persisted so a new session can warn before auditioning from the wrong
+    bank, and it is only ever updated when a capture confirms or asserts
+    one.
+    """
+    value = _read_payload(path or default_path()).get("active")
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if 0 <= value < len(CARDS) else None
+
+
+def set_active(number: int, path: Optional[str] = None) -> None:
+    """Record which bank is believed active, preserving the captured banks."""
+    entry = card(number)
+    where = path or default_path()
+    _write(load(where), where, active=entry.number)
+
+
 def _to_json(bank: CapturedBank) -> Dict[str, object]:
     return {
         "name": bank.name,
@@ -418,7 +452,8 @@ def save(bank: CapturedBank, path: Optional[str] = None) -> None:
     where = path or default_path()
     banks = load(where)
     banks[bank.number] = bank
-    _write(banks, where)
+    # Preserve the active-bank hint; capturing a bank must not clear it.
+    _write(banks, where, active=load_active(where))
 
 
 def _name_key(name: Optional[str]) -> str:
@@ -593,13 +628,17 @@ def bank_title(captured: Optional[CapturedBank], entry: Card) -> str:
     return "(unnamed)"
 
 
-def _write(banks: Dict[int, CapturedBank], where: str) -> None:
-    payload = {
+def _write(
+    banks: Dict[int, CapturedBank], where: str, *, active: Optional[int] = None
+) -> None:
+    payload: Dict[str, object] = {
         "version": VERSION,
         "banks": {
             f"{number:02d}": _to_json(bank) for number, bank in sorted(banks.items())
         },
     }
+    if active is not None:
+        payload["active"] = active
     try:
         os.makedirs(os.path.dirname(os.path.abspath(where)), exist_ok=True)
         # Write-then-rename: a crash or a full disk mid-write leaves the
