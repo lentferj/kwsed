@@ -544,8 +544,11 @@ class TestTheCardSubList:
             await settle(pilot, 30)
             assert 33 in app._archive
             assert app._archive[33].name == ""
+            assert app._archive[33].verified is False
+            assert app._active_card == 33
             status = panel_text(app, "#status")
             assert "captured Card 33" in status
+            assert "unverified" in status
             assert "filed as bank 33 on your say-so" in status
             # The slot list and the Card row were refreshed from the capture.
             assert app._current_card == 33
@@ -555,6 +558,95 @@ class TestTheCardSubList:
             assert "Velvet Stack" in slot
             row = " ".join(str(cell) for cell in table.get_row("card:33:performance"))
             assert "(unnamed)" in row
+
+    @staticmethod
+    def _demo_digest():
+        """The digest of the demo device's fixed CARD content."""
+        from kws import cards
+
+        device = DemoDevice()
+        perf = device.read_bank("CARD", banks.Kind.PERFORMANCE)
+        patch = device.read_bank("CARD", banks.Kind.PATCH)
+        return cards.content_digest(perf.records, patch.records)
+
+    def _seeded_with_digest(self, tmp_path, digest):
+        from kws import cards
+
+        path = str(tmp_path / "cards.json")
+        cards.save(
+            cards.capture(
+                7,
+                "Invented Card",
+                {0: "Opening"},
+                {0: "Bell"},
+                captured_at="2026-11-07T12:00:00+00:00",
+                digest=digest,
+                verified=True,
+            ),
+            path,
+        )
+        return KwsedApp(DemoDevice(), catalog=cat.Catalog(), cards_path=path)
+
+    async def test_capture_confirms_the_bank_by_content_digest(self, tmp_path):
+        """The same content as the archive's Card 07 confirms bank 07."""
+        app = self._seeded_with_digest(tmp_path, self._demo_digest())
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._fill((banks.bank("CARD").number, banks.Kind.PERFORMANCE), 7)
+            app.action_capture_card()
+            await settle(pilot, 30)
+            assert app._active_card == 7
+            assert app._archive[7].verified is True
+            assert "confirmed" in panel_text(app, "#status")
+            row = " ".join(
+                str(cell)
+                for cell in app.query_one("#bank-table").get_row("card:07:performance")
+            )
+            assert "• " in row
+
+    async def test_capture_of_another_banks_content_files_under_the_evidence(
+        self, tmp_path
+    ):
+        """Content that is Card 07, captured from the Card 33 row, files
+        under 07 and says to switch the HCard if 33 was meant."""
+        app = self._seeded_with_digest(tmp_path, self._demo_digest())
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._fill((banks.bank("CARD").number, banks.Kind.PERFORMANCE), 33)
+            app.action_capture_card()
+            await settle(pilot, 30)
+            assert app._active_card == 7
+            assert 33 not in app._archive
+            status = panel_text(app, "#status")
+            assert "filed under 07" in status
+            assert "Switch the HCard to 33" in status
+
+    async def test_select_refuses_a_card_row_that_is_not_the_active_bank(
+        self, tmp_path
+    ):
+        app = self._seeded_with_digest(tmp_path, self._demo_digest())
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._active_card = 7
+            app._fill((banks.bank("CARD").number, banks.Kind.PERFORMANCE), 33)
+            app.query_one("#slot-table").focus()
+            await pilot.press("enter")
+            await settle(pilot)
+            assert app.device.selected_log == []
+            assert "HCard is on Card 07" in panel_text(app, "#status")
+
+    async def test_select_allows_a_card_row_when_the_active_bank_is_unknown(
+        self, tmp_path
+    ):
+        app = self._app(tmp_path, seeded=False)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert app._active_card is None
+            app._fill((banks.bank("CARD").number, banks.Kind.PERFORMANCE), 33)
+            app.query_one("#slot-table").focus()
+            await pilot.press("enter")
+            await settle(pilot, 10)
+            assert len(app.device.selected_log) == 1
 
     async def test_no_selected_card_still_resolves_from_contents(self, tmp_path):
         """With no Card row selected, a captured fingerprint still files."""
