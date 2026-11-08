@@ -647,6 +647,8 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
                 app._multi_sets = list(self._multisets_copy)
             if hasattr(app, "_multisets"):
                 app._multisets = list(self._multisets_copy)
+            if hasattr(app, "_after_multi_write"):
+                app._after_multi_write()
         except Exception:  # noqa: S110
             pass
         self.dismiss(result if isinstance(result, dict) else {"result": result})
@@ -2449,6 +2451,24 @@ class KwsedApp(App[None]):
             return
         self.call_from_thread(self._show_multi, raw)
 
+    def _refresh_multi_rows(self) -> None:
+        """Rewrite the Multi rows' name cells from ``self._multisets``."""
+        table = self.query_one("#bank-table", DataTable)
+        for number in range(len(self._multisets)):
+            try:
+                name = getattr(self._multisets[number], "name", "") or ""
+                table.update_cell(
+                    f"multi:{number:02d}", "name", name or "[dim]--[/dim]"
+                )
+            except Exception:  # noqa: S110
+                pass
+
+    def _after_multi_write(self) -> None:
+        """The editor stored a new setup: show what it wrote."""
+        self._refresh_multi_rows()
+        if self._current_multi is not None:
+            self._fill_multiset(self._current_multi)
+
     def _show_multi(self, raw: bytes) -> None:
         from kws import multi as multi_mod
 
@@ -2467,16 +2487,8 @@ class KwsedApp(App[None]):
         self._multisets = list(sets)
         # Refresh the Multi rows in the bank table so their name cells
         # show the freshly read Multiset names.
+        self._refresh_multi_rows()
         table = self.query_one("#bank-table", DataTable)
-        for number in range(len(sets)):
-            row_key = f"multi:{number:02d}"
-            try:
-                name = getattr(sets[number], "name", "") or ""
-                if not name:
-                    name = "[dim]--[/dim]"
-                table.update_cell(row_key, "name", name)
-            except Exception:  # noqa: S110
-                pass
         number = self._current_multi if self._current_multi is not None else 0
         if not (0 <= number < len(sets)):
             number = 0

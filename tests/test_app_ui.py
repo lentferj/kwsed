@@ -25,7 +25,7 @@ write into the user's real one.
 """
 
 import pytest
-from textual.widgets import DataTable, Static
+from textual.widgets import DataTable, Label, Static
 
 from kws import banks
 from kws import catalog as cat
@@ -1070,3 +1070,64 @@ class TestTheMultisetBrowser:
         sets = multi_mod.parse(packet.data())
         assert len(sets) == 32
         assert sets[3].name == "Demo Set 03"
+
+
+class TestTheMultisetEditor:
+    async def _open(self, app, pilot):
+        from kwsed.app import MultiEditScreen
+
+        await pilot.pause()
+        app.action_multi()
+        await settle(pilot, 30)
+        table = app.query_one("#bank-table", DataTable)
+        table.move_cursor(row=app._row_multis.index(3))
+        await settle(pilot)
+        app.action_edit_multi()
+        await settle(pilot, 6)
+        assert isinstance(app.screen, MultiEditScreen)
+        return app.screen
+
+    async def test_it_shows_the_sixteen_channels(self, app):
+        async with app.run_test() as pilot:
+            screen = await self._open(app, pilot)
+            table = screen.query_one("#multi-edit-table", DataTable)
+            assert table.row_count == 16
+            assert "Multiset 03" in str(
+                screen.query_one("#multi-edit-title", Label).content
+            )
+
+    async def test_w_before_arm_refuses_and_writes_nothing(self, app):
+        async with app.run_test() as pilot:
+            screen = await self._open(app, pilot)
+            screen.action_fire()
+            assert app.device.multi_write_count == 0
+            assert "not armed" in panel_text(screen, "#multi-edit-state")
+
+    async def test_arm_then_write_stores_the_edited_setup(self, app):
+        from dataclasses import replace
+
+        from kws import multi as multi_mod
+
+        async with app.run_test() as pilot:
+            screen = await self._open(app, pilot)
+            part = screen._ms().parts[0]
+            screen._set_part(0, replace(part, level=42))
+            screen.action_arm()
+            screen.action_fire()
+            await settle(pilot, 30)
+            assert app.device.multi_write_count == 1
+            written = multi_mod.parse(app.device.multi_written)
+            assert written[3].parts[0].level == 42
+            # The browser keeps what the write put there.
+            assert app._multisets[3].parts[0].level == 42
+
+    async def test_cancel_leaves_the_original_unchanged(self, app):
+        from dataclasses import replace
+
+        async with app.run_test() as pilot:
+            screen = await self._open(app, pilot)
+            part = screen._ms().parts[0]
+            screen._set_part(0, replace(part, level=42))
+            await pilot.press("escape")
+            await settle(pilot)
+            assert app._multisets[3].parts[0].level == part.level
