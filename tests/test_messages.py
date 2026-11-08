@@ -221,3 +221,24 @@ class TestChecksum:
         assert packet is not None and packet.bank == 3
         # the checksum rides along in the data, so it is trimmed by length
         assert packet.data()[: len(data)] == data
+
+
+class TestMultiSelect:
+    """Appendix 4 §2.1.20/§2.1.21: 0-15 uses 0x5B, 16-31 the SR 0x63."""
+
+    @pytest.mark.parametrize(
+        ("number", "function"),
+        [(0, 0x5B), (15, 0x5B), (16, 0x63), (31, 0x63)],
+    )
+    def test_the_documented_function_and_number(self, number, function):
+        assert m.multi_select(number) == bytes(
+            [0xF0, 0x42, 0x30, 0x28, function, number, 0xF7]
+        )
+
+    def test_the_channel_rides_in_the_format_byte(self):
+        assert m.multi_select(16, channel=5)[2] == 0x35
+
+    @pytest.mark.parametrize("number", [-1, 32])
+    def test_an_unknown_multiset_is_refused(self, number):
+        with pytest.raises(m.ProtocolError, match="outside 0-31"):
+            m.multi_select(number)

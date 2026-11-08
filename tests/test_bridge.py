@@ -449,6 +449,16 @@ class TestSelect:
                 banks.slot("RAM1", banks.Kind.PERFORMANCE, 0), channel=16
             )
 
+    def test_multi_select_sends_the_documented_frame(self):
+        unit = Unit()
+        unit.bridge.select_multi(16)
+        assert unit.midi_out.sent == [bytes([0xF0, 0x42, 0x30, 0x28, 0x63, 0x10, 0xF7])]
+
+    def test_multi_select_refuses_an_unknown_multiset(self):
+        unit = Unit()
+        with pytest.raises(m.ProtocolError, match="outside 0-31"):
+            unit.bridge.select_multi(32)
+
 
 class TestClose:
     def test_it_closes_both_ports(self):
