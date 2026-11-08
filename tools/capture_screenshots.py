@@ -50,7 +50,6 @@ from kws import scan as _scan  # noqa: E402
 from kws.multi import Multiset, Part  # noqa: E402
 from kwsed.app import (  # noqa: E402
     KwsedApp,
-    MultiScreen,
     SendScreen,
 )
 from kwsed.demo import DemoDevice  # noqa: E402
@@ -61,7 +60,6 @@ DEFAULT_OUT = REPO_ROOT / "docs" / "screenshots"
 SCREEN_W = 820
 SCREEN_NAMES = [
     "browser",
-    "multi",
     "send",
     "scan-offer",
     "scan",
@@ -224,19 +222,6 @@ def _make_multisets() -> list[Multiset]:
     return sets
 
 
-async def shot_multi(app: KwsedApp, pilot: Any) -> None:
-    """The multi/channel assignment screen."""
-    multisets = _make_multisets()
-    app.push_screen(
-        MultiScreen(
-            multisets,
-            bank_label=str,
-            on_edit=None,
-        )
-    )
-    await wait_for_screen(app, pilot, MultiScreen)
-
-
 async def shot_send(app: KwsedApp, pilot: Any) -> None:
     """The send/write screen."""
     app.push_screen(
@@ -281,7 +266,6 @@ async def shot_reports(app: KwsedApp, pilot: Any) -> None:
 
 MARKERS: dict[str, list[str]] = {
     "browser": ["Book Name"],
-    "multi": ["Multi mode"],
     "send": ["Write a bank"],
     "scan-offer": ["no name catalog"],
     "scan": ["Scanning"],
@@ -291,7 +275,6 @@ MARKERS: dict[str, list[str]] = {
 
 SHOT_FUNCTIONS: dict[str, Callable[[KwsedApp, Any], Awaitable[None]]] = {
     "browser": shot_browser,
-    "multi": shot_multi,
     "send": shot_send,
     "scan-offer": shot_scan_offer,
     "scan": shot_scan,

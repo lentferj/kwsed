@@ -182,92 +182,6 @@ def _clip(text: str, limit: int = 26) -> str:
     return text[: limit - 1] + "…"
 
 
-class MultiScreen(ModalScreen[None]):
-    """The 32 Multisets and what each assigns to the 16 MIDI channels.
-
-    Read-only, and reading it makes no sound: one request, three replies,
-    nothing selected.
-
-    This is MIDI multi mode, not a performance's eight parts -- the two are
-    both called "multi" on this instrument and are different objects. See
-    :mod:`kws.multi`.
-    """
-
-    DEFAULT_CSS = """
-    MultiScreen { align: center middle; }
-    MultiScreen > Vertical {
-        width: 92; height: 86%; border: thick $accent;
-        background: $surface; padding: 1 2;
-    }
-    MultiScreen DataTable { height: 1fr; }
-    """
-
-    BINDINGS = [
-        Binding("escape", "close", "Close"),
-        Binding("q", "close", "Close"),
-        Binding("e", "edit", "Edit", show=False),
-    ]
-
-    def __init__(
-        self,
-        multisets: Sequence[Any],
-        bank_label: Optional[Callable[[int], str]] = None,
-        on_edit: Optional[Callable[[Sequence[Any]], None]] = None,
-    ) -> None:
-        super().__init__()
-        self._multisets = list(multisets)
-        self._bank_label = bank_label or (lambda n: str(n))
-        self._on_edit = on_edit
-
-    def action_edit(self) -> None:
-        if self._on_edit is not None:
-            self._on_edit(self._multisets)
-
-    def compose(self) -> ComposeResult:
-        with Vertical():
-            yield Label("[b]Multi mode -- 32 Multisets[/b]")
-            yield DataTable(id="multi-table", cursor_type="row")
-            yield Static("", id="multi-detail")
-            yield Static("[dim]arrows to move, esc / q to close[/dim]")
-
-    def on_mount(self) -> None:
-        table = self.query_one("#multi-table", DataTable)
-        for label, key in (("#", "num"), ("name", "name"), ("channels used", "used")):
-            table.add_column(label, key=key)
-        for entry in self._multisets:
-            used = sum(1 for part in entry.parts if part.used)
-            table.add_row(
-                f"{entry.number:02d}",
-                entry.name or "[dim]--[/dim]",
-                str(used),
-                key=str(entry.number),
-            )
-        self._detail(0)
-
-    def on_data_table_row_highlighted(self, event: DataTable.RowHighlighted) -> None:
-        self._detail(event.cursor_row)
-
-    def _detail(self, row: int) -> None:
-        if not self._multisets or row is None or row >= len(self._multisets):
-            return
-        entry = self._multisets[row]
-        lines = []
-        for part in entry.parts:
-            if not part.used:
-                lines.append(f"ch {part.channel:2d}  --")
-                continue
-            lines.append(
-                f"ch {part.channel:2d}  {self._bank_label(part.bank)} "
-                f"perf {part.performance:02d}  level {part.level}"
-            )
-        half = (len(lines) + 1) // 2
-        rows = [f"{a:38s}{b}" for a, b in zip(lines[:half], lines[half:] + [""])]
-        self.query_one("#multi-detail", Static).update("\n".join(rows))
-
-    def action_close(self) -> None:
-        self.dismiss(None)
-
-
 class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
     """Edit the Multi Mode Setup (0x06). **Destructive.**"""
 
@@ -1733,6 +1647,13 @@ class KwsedApp(App[None]):
         """Enter on a slot. It arrives here, not as a binding."""
         if event.data_table.id == "slot-table":
             self.action_select()
+            return
+        if event.data_table.id == "bank-table":
+            row = event.cursor_row
+            if 0 <= row < len(self._row_multis):
+                multi = self._row_multis[row]
+                if multi is not None:
+                    self.action_select_multi(multi)
 
     def action_switch_pane(self) -> None:
         left = self.query_one("#bank-table", DataTable)
@@ -2313,6 +2234,37 @@ class KwsedApp(App[None]):
             return
         self._multi_worker()
 
+    def action_select_multi(self, number: int) -> None:
+        """Make a Multiset current on the unit (Multi mode)."""
+        if self._busy:
+            self.notify_status("busy", refused=True)
+            return
+        if not self._exchange.acquire(blocking=False):
+            self.notify_status("busy", refused=True)
+            return
+        self._multi_select_worker(number)
+
+    @work(thread=True)
+    def _multi_select_worker(self, number: int) -> None:
+        failure: BaseException | None = None
+        try:
+            with self._busy_gate, self._lock:
+                self.device.select_multi(number)
+        except _BRIDGE_ERRORS as exc:
+            failure = exc
+        finally:
+            self._exchange.release()
+        if failure is not None:
+            self.call_from_thread(
+                self.notify_status, f"select multi: {failure}", refused=True
+            )
+            return
+        self.call_from_thread(
+            self.notify_status,
+            f"selected Multiset {number:02d} on the unit — switch the unit "
+            "to MULTI mode to hear it",
+        )
+
     @work(thread=True)
     def _multi_worker(self) -> None:
         """**MIDI only** -- the screen is built on the main thread."""
@@ -2344,28 +2296,38 @@ class KwsedApp(App[None]):
         except Exception as exc:
             self.notify_status(f"multi: {exc}", refused=True)
             return
-        self._multi_sets = sets
+        self._multi_sets = list(sets)
         self._multisets = list(sets)
-        self.push_screen(
-            MultiScreen(
-                sets,
-                bank_label=lambda n: _bank_label(n),
-                on_edit=self._edit_multi_sets,
-            )
-        )
-        self.notify_status(f"{len(sets)} multisets")
-
-    def _edit_multi_sets(self, sets: Sequence[Any]) -> None:
-        self.push_screen(
-            MultiEditScreen(
-                multisets=sets,
-                device=self.device,
-                backup_dir=None,
-            )
+        # Refresh the Multi rows in the bank table so their name cells
+        # show the freshly read Multiset names.
+        table = self.query_one("#bank-table", DataTable)
+        for number in range(len(sets)):
+            row_key = f"multi:{number:02d}"
+            try:
+                name = getattr(sets[number], "name", "") or ""
+                if not name:
+                    name = "[dim]--[/dim]"
+                table.update_cell(row_key, "name", name)
+            except Exception:  # noqa: S110
+                pass
+        number = self._current_multi if self._current_multi is not None else 0
+        if not (0 <= number < len(sets)):
+            number = 0
+        self._current_multi = number
+        try:
+            row_index = table.get_row_index(f"multi:{number:02d}")
+            table.move_cursor(row=row_index)
+        except Exception:  # noqa: S110
+            pass
+        table.focus()
+        self._fill_multiset(number)
+        self.notify_status(
+            f"read {len(sets)} Multisets — Enter selects one on the unit "
+            "(Multi mode), e edits"
         )
 
     def action_edit_multi(self) -> None:
-        sets = getattr(self, "_multi_sets", None)
+        sets = getattr(self, "_multisets", None)
         if not sets:
             self.notify_status("read multi first (m)", refused=True)
             return
