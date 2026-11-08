@@ -38,12 +38,13 @@ backups -- decision 8-B1. The forty banks are a browse overlay over it.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from kws import favorites
 from kws.banks import PATCHES_PER_BANK, PERFORMANCES_PER_BANK, Kind, count_for
@@ -67,9 +68,11 @@ __all__ = [
     "capture",
     "set_label",
     "bank_title",
+    "content_digest",
     "default_path",
     "load",
     "resolve",
+    "resolve_by_digest",
     "save",
 ]
 
@@ -256,6 +259,8 @@ class CapturedBank:
     performances: Dict[int, str]  #: {slot: name}
     patches: Dict[int, str]  #: {slot: name}
     label: str = ""  #: A user-supplied name for the bank, local only.
+    digest: str = ""  #: Hex SHA-256 of the bank's decoded content.
+    verified: bool = False  #: Confirmed against evidence rather than asserted.
 
     def names(self, kind: str) -> Dict[int, str]:
         """The captured names of one kind."""
@@ -276,6 +281,8 @@ def capture(
     *,
     captured_at: Optional[str] = None,
     label: str = "",
+    digest: str = "",
+    verified: bool = False,
 ) -> CapturedBank:
     """Bundle one bank's read into a record. Does no MIDI and no I/O."""
     return CapturedBank(
@@ -285,6 +292,8 @@ def capture(
         performances={int(slot): str(value) for slot, value in performances.items()},
         patches={int(slot): str(value) for slot, value in patches.items()},
         label=label.strip() if isinstance(label, str) else str(label).strip(),
+        digest=digest if isinstance(digest, str) else str(digest),
+        verified=bool(verified),
     )
 
 
@@ -326,6 +335,12 @@ def _bank_from_json(key: str, raw: object) -> Optional[CapturedBank]:
     label = raw.get("label", "")
     if not isinstance(label, str):
         label = ""
+    digest = raw.get("digest", "")
+    if not isinstance(digest, str):
+        digest = ""
+    verified = raw.get("verified", False)
+    if not isinstance(verified, bool):
+        verified = False
     entry = _BY_NUMBER.get(number)
     # An old archive stored the table's placeholder ("User 05") as the
     # card name for user banks. That was never a real read; treat it as
@@ -343,6 +358,8 @@ def _bank_from_json(key: str, raw: object) -> Optional[CapturedBank]:
         performances=_as_slot_names(raw.get("performances")),
         patches=_as_slot_names(raw.get("patches")),
         label=label,
+        digest=digest,
+        verified=verified,
     )
 
 
@@ -386,6 +403,8 @@ def _to_json(bank: CapturedBank) -> Dict[str, object]:
         "captured_at": bank.captured_at,
         "performances": {str(slot): name for slot, name in bank.performances.items()},
         "patches": {str(slot): name for slot, name in bank.patches.items()},
+        "digest": bank.digest,
+        "verified": bank.verified,
     }
 
 
@@ -440,12 +459,43 @@ def _fingerprint_matches(
     return bool(checks) and all(checks)
 
 
+def content_digest(*groups: Sequence[bytes]) -> str:
+    """Hex SHA-256 of the records, unambiguously framed.
+
+    Each record is length-prefixed (four big-endian bytes) before hashing,
+    so two record lists that concatenate to the same bytes but differ in
+    their split cannot collide. ``groups`` are hashed in caller order
+    (performances, then patches). Empty groups contribute nothing.
+    """
+    hasher = hashlib.sha256()
+    for group in groups:
+        for record in group:
+            hasher.update(len(record).to_bytes(4, "big"))
+            hasher.update(record)
+    return hasher.hexdigest()
+
+
+def resolve_by_digest(digest: str, captured: Dict[int, CapturedBank]) -> Optional[int]:
+    """The single captured bank whose stored digest equals ``digest``.
+
+    ``None`` for an empty digest, no match, or more than one match
+    (ambiguous -- never guess).
+    """
+    if not digest:
+        return None
+    matches = [number for number, bank in captured.items() if bank.digest == digest]
+    if len(matches) != 1:
+        return None
+    return matches[0]
+
+
 def resolve(
     card_name: Optional[str],
     perf0: Optional[str],
     patch0: Optional[str],
     *,
     captured: Optional[Dict[int, CapturedBank]] = None,
+    digest: Optional[str] = None,
 ) -> Optional[int]:
     """Which HCard bank is active, or ``None`` when that cannot be said.
 
@@ -463,6 +513,13 @@ def resolve(
     says what was captured without writing a file.
     """
     archive = load() if captured is None else captured
+
+    # Content evidence first: the digest is the strongest signal we have,
+    # since the card name is unreadable and fingerprints can collide.
+    if digest is not None:
+        by_digest = resolve_by_digest(digest, archive)
+        if by_digest is not None:
+            return by_digest
 
     named: set[int] = set()
     query = _name_key(card_name)
@@ -509,6 +566,8 @@ def set_label(number: int, label: str, path: Optional[str] = None) -> CapturedBa
         performances=dict(bank.performances),
         patches=dict(bank.patches),
         label=(label or "").strip(),
+        digest=bank.digest,
+        verified=bank.verified,
     )
     banks[number] = updated
     _write(banks, where)
