@@ -656,7 +656,10 @@ this one.
 
 ## 25. Which HCard bank is active cannot be read — identify by content
 
-**Status:** open; design below, not implemented.
+**Status:** implemented — fec2c49 (content digest and digest resolution in
+`kws/cards.py`), 9f97d16 + 550eafd (verification, active-bank marker and
+switch prompt in the app), and the `kwscli cards` output this item
+describes. The original design text is kept below.
 
 Neither the SR nor kwsed can see which of the forty banks is in front of the
 synth: the card name is unreadable (item 23), the SR's `CURRENT_BANK` /
@@ -685,9 +688,12 @@ panel. The workable mechanism is therefore **evidence plus assertion**:
    the HCard first — it cannot be switched remotely. The sweep already
    works this way; this generalises it to single actions.
 
-Limits to state in the UI: two banks with identical content are
-indistinguishable, a bank never captured cannot be identified, and a bank
-edited on the unit no longer matches its stored digest.
+**Only open point:** the recorded limit — two banks captured with identical
+content are indistinguishable by digest and `resolve_by_digest` returns
+`None` for them rather than guessing (docs/HCARD.md §6, "Limits"). A bank
+never captured cannot be identified and a bank edited on the unit no longer
+matches its stored digest are inherent to the evidence scheme and are stated
+in the UI, not open work.
 
-**Blocked on:** nothing technical. It is read-only and testable with the
-existing doubles.
+**Blocked on:** nothing. It is read-only and covered by the existing
+doubles in `tests/`.

@@ -848,6 +848,72 @@ class TestCardsVerb:
         assert "00-39" in capsys.readouterr().err
 
 
+class TestCardsVerificationWords:
+    """`kwscli cards` says whether a capture was confirmed by content.
+
+    A capture filed on the row's say-so is `unverified` — the HCard may be
+    on another bank — and one a digest confirmed is `verified`. Both words
+    are the app's (9f97d16); the CLI repeats them so the archive can be
+    read without opening the browser. Offline like every other `cards`
+    invocation: the words come from the archive record, `--cards` points at
+    a file under tmp, and no port is opened.
+    """
+
+    def _save(self, tmp_path, *, verified, digest):
+        path = str(tmp_path / "cards.json")
+        cards.save(
+            cards.capture(
+                7,
+                'Korg WPC-13 "Performance 3"',
+                {0: "Opening"},
+                {0: "Bell"},
+                captured_at="2026-11-07T12:00:00+00:00",
+                digest=digest,
+                verified=verified,
+            ),
+            path,
+        )
+        return path
+
+    def test_one_bank_says_unverified_for_a_say_so_capture(self, tmp_path, capsys):
+        path = self._save(tmp_path, verified=False, digest="")
+        assert cli.main(["--cards", path, "cards", "07"]) == 0
+        out = capsys.readouterr().out
+        assert "unverified" in out
+        assert "digest: (none)" in out
+
+    def test_one_bank_says_verified_and_shows_the_digest_prefix(self, tmp_path, capsys):
+        digest = cards.content_digest([b"perf"], [b"patch"])
+        path = self._save(tmp_path, verified=True, digest=digest)
+        assert cli.main(["--cards", path, "cards", "07"]) == 0
+        out = capsys.readouterr().out
+        assert "unverified" not in out
+        assert "verified" in out
+        # The reference is the archive, so the line shows a short prefix —
+        # enough to eyeball two captures against each other — not the hash.
+        assert f"digest: {digest[:8]}" in out
+
+    def test_the_listing_marks_only_an_unverified_bank(self, tmp_path, capsys):
+        path = self._save(tmp_path, verified=False, digest="")
+        assert cli.main(["--cards", path, "cards"]) == 0
+        out = capsys.readouterr().out
+        assert "unverified" in out
+        assert "not captured" in out
+        assert out.count("not captured") == 39
+
+    def test_a_verified_bank_is_unmarked_in_the_listing(self, tmp_path, capsys):
+        digest = cards.content_digest([b"perf"], [b"patch"])
+        path = self._save(tmp_path, verified=True, digest=digest)
+        assert cli.main(["--cards", path, "cards"]) == 0
+        out = capsys.readouterr().out
+        assert "unverified" not in out
+        assert out.count("not captured") == 39
+
+    def test_the_verb_stays_offline(self):
+        args = cli.build_parser().parse_args(["cards"])
+        assert cli._offline(args)
+
+
 def test_one_banks_kind_filter_narrows_the_display(tmp_path, capsys):
     path = str(tmp_path / "cards.json")
     cards.save(

@@ -87,6 +87,23 @@ def _cards_status(bank: _cards.CapturedBank | None, entry: _cards.Card) -> str:
     return _cards.card_words(bank is not None, entry.needs_pcm)
 
 
+def _cards_verification(bank: _cards.CapturedBank) -> str:
+    """One word for whether the capture was confirmed by content.
+
+    The words are the app's: ``verified`` says a digest matched the bank it
+    was captured under; ``unverified`` says it was filed on the user's
+    say-so and the HCard may actually be on another bank.
+    """
+    return "verified" if bank.verified else "unverified"
+
+
+def _cards_digest(bank: _cards.CapturedBank) -> str:
+    """A short digest prefix, or ``(none)`` for a capture without one."""
+    if bank.digest:
+        return f"digest: {bank.digest[:8]}"
+    return "digest: (none)"
+
+
 def _cmd_cards(_device: Any, args: argparse.Namespace) -> int:
     """The HCard's forty banks: the table, one archive, or one .syx.
 
@@ -100,15 +117,18 @@ def _cmd_cards(_device: Any, args: argparse.Namespace) -> int:
         rows = []
         for entry in _cards.cards():
             bank = archive.get(entry.number)
+            status = _cards_status(bank, entry)
+            # A capture filed on the row's say-so says so in the archive
+            # column: "unverified" in place of "captured" (the PCM warning
+            # after the semicolon is kept). Verified and uncaptured rows
+            # stay word for word what they were.
+            if bank is not None and bank.verified is False:
+                status = status.replace("captured", "unverified", 1)
             rows.append(
                 [
                     f"{entry.number:02d}",
-                    (
-                        _cards.bank_title(bank, entry)
-                        if bank is not None
-                        else entry.name
-                    ),
-                    _cards_status(bank, entry),
+                    _cards.bank_title(bank, entry) if bank is not None else entry.name,
+                    status,
                     str(len(bank.performances)) if bank else "-",
                     str(len(bank.patches)) if bank else "-",
                 ]
@@ -145,6 +165,8 @@ def _cmd_cards(_device: Any, args: argparse.Namespace) -> int:
     shown = _cards.bank_title(bank, entry) if bank is not None else entry.name
     print(f"Card {number:02d} — {shown}")
     print(f"{_cards_status(bank, entry)}")
+    if bank is not None:
+        print(f"{_cards_verification(bank)}  {_cards_digest(bank)}")
     print()
     rows = []
     wanted_kind = getattr(args, "kind", None)

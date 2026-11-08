@@ -70,7 +70,9 @@ address space.
       "name": "WPC-13 \"Performance 3\"",
       "captured_at": "2026-11-07T…",
       "performances": {"0": "…", "…": "…"},
-      "patches": {"0": "…", "…": "…"}
+      "patches": {"0": "…", "…": "…"},
+      "digest": "<sha256 hex>",
+      "verified": true
     }
   }
 }
@@ -78,16 +80,63 @@ address space.
 
 Atomic write, corrupt-file tolerance and a merge (not replace) save, exactly
 as `vinsynlib.livenames` does. Captured names are keyed by slot number; the
-card-name field is separate from the slot names.
+card-name field is separate from the slot names. `digest` is the SHA-256 hex
+hash of the bank's decoded performance and patch records
+(`cards.content_digest`); `verified` says the capture was **confirmed by
+content evidence** — a digest that matched — rather than only asserted by the
+bank row it was captured under.
 
 ## 6. Identity resolution
 
-`resolve(card_name, perf0, patch0) -> bank | None`:
+Neither the card name (item 23 in `TODO.md`) nor which bank is active can be
+read over MIDI — the SR's `CURRENT_BANK`/`CURRENT_PROG` are write-only in the
+documented SysEx, and the HCard itself has no MIDI. Identity is therefore
+resolved from content, strongest evidence first.
+`resolve(card_name, perf0, patch0, digest=…) -> bank | None` in
+`kws/cards.py`, in the order actually implemented:
 
-1. Exact card-name match against the table or a captured bank's stored name.
-2. Fingerprint fallback: match `perf0`/`patch0` against previously captured
-   banks.
-3. Ambiguous or unknown → `None`; the UI offers "new / user bank" filing.
+1. **Content digest match** — the SHA-256 of the read's decoded performance
+   and patch records against every captured bank's stored digest
+   (`resolve_by_digest`). One match identifies the bank outright; the digest
+   never needed the name we cannot read.
+2. **Exact card-name match** against the static table or a captured bank's
+   stored name — kept for when a name is ever supplied (Dynamic Update
+   echoing a bank's name into the WS, or a user label).
+3. **First-slot-name fingerprint** — `performances[0]`/`patches[0]` against
+   previously captured banks; also narrows a name that matched more than one
+   bank.
+4. **Ambiguous or unknown → `None`**; the caller offers "new / user bank"
+   filing rather than guessing.
+
+### The active-bank flow
+
+Captures resolve against the card row the user has highlighted (decision
+4-A1): `C` on a card sub-bank row reads the live card, digests it, and files
+the capture against the evidence:
+
+- The digest matches the highlighted row's stored digest → the capture is
+  **confirmed** and marked `verified`.
+- The digest matches a *different* captured bank → the card is on that bank
+  (or the two are identical, which the digest cannot separate); the capture
+  files under the evidence bank and the status says to switch the HCard back
+  to the bank the user meant.
+- No evidence at all — a first capture of that bank — files under the
+  asserted row number **unverified**, on the user's say-so, with a prompt to
+  select the bank on the HCard and capture again.
+
+The last confirmed bank is remembered as the **active** bank and shown in the
+detail line ("active; last confirmed capture …"). Selecting a slot from a
+card row that is **not** the known-active bank is refused with a "select Card
+NN on the HCard first" prompt — the card cannot be switched remotely. The
+sweep (`X`) walks the same path: it confirms each expected bank in turn and
+stops between banks when what answered is not the bank it was asked for, so
+the user can switch the HCard to the next bank.
+
+Limits, stated in the UI rather than worked around: two banks captured with
+identical content are indistinguishable — `resolve_by_digest` refuses to
+guess when more than one digest matches — a bank never captured cannot be
+identified, and a bank edited on the unit no longer matches its stored
+digest.
 
 ## 7. Hardware confirmation (read-only)
 
