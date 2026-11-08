@@ -791,9 +791,15 @@ class KwsedApp(App[None]):
         live_path: Optional[str] = None,
         cards_path: Optional[str] = None,
         allow_write: bool = False,
+        auto_capture: bool = False,
     ) -> None:
         super().__init__()
         self.device = device
+        #: Probe the active HCard bank once when the browser starts. Off by
+        #: default so tests and embedders never touch the unit on launch;
+        #: main() turns it on for a real session. The card is switched
+        #: physically, so this read is the only way to know the bank.
+        self._auto_capture = auto_capture
         #: Injected, never opened here, so a test cannot write into the
         #: user's real database.
         self.favorites = favorites
@@ -1117,9 +1123,17 @@ class KwsedApp(App[None]):
         captured = self._archive.get(number)
         entry = _cards.card(number)
         pcm = f" · needs {entry.needs_pcm}" if entry.needs_pcm else ""
-        prefix = "• " if self._active_card == number else ""
+        active = self._active_card == number
+        # Only once a bank is known can the others be marked as *not* it;
+        # with nothing confirmed every row stays neutral rather than all
+        # being greyed.
+        inactive = self._active_card is not None and not active
+        prefix = "• " if active else ""
         if captured is None:
-            return f"{prefix}[dim]not captured{pcm}[/dim]"
+            body = f"not captured{pcm}"
+            if inactive:
+                return f"[dim][i]{body}[/i][/dim]"
+            return f"{prefix}[dim]{body}[/dim]"
         title = _clip(_cards.bank_title(captured, entry))
         # A `*` marks a real read name that disagrees with the printed
         # table -- only for non-user banks, and never for a user label.
@@ -1131,14 +1145,24 @@ class KwsedApp(App[None]):
             and captured.name.strip().casefold() != entry.name.strip().casefold()
         ):
             marker = " [dim]*[/dim]"
-        return f"{prefix}{title}{marker}"
+        body = f"{prefix}{title}{marker}"
+        if inactive:
+            return f"[dim][i]{body}[/i][/dim]"
+        return body
 
     def _bank_row(self, pair: Tuple[int, str], card: Optional[int]) -> List[str]:
         number, kind = pair
         entry = banks.bank(number)
         marked = len(self._favorite_keys(entry.id, kind)) if card is None else 0
+        label = entry.label if card is None else f"Card {card:02d}"
+        if (
+            card is not None
+            and self._active_card is not None
+            and card != self._active_card
+        ):
+            label = f"[dim][i]{label}[/i][/dim]"
         return [
-            entry.label if card is None else f"Card {card:02d}",
+            label,
             kind[:4],
             str(banks.count_for(kind)),
             "" if entry.writable else "ro",
@@ -1185,6 +1209,11 @@ class KwsedApp(App[None]):
         )
         # Offer to scan for names if there is no catalog at all.
         self.set_timer(0.6, self._maybe_offer_scan)
+        # Confirm which HCard bank is in front of the synth. The card is
+        # switched physically, so a read is the only way to know; it is
+        # silent and changes nothing on the unit.
+        if self._auto_capture and self._cards_path is not None:
+            self.set_timer(1.4, self._auto_capture_card)
 
     # --- filling ------------------------------------------------------------
 
@@ -1528,6 +1557,10 @@ class KwsedApp(App[None]):
                 status += " · active"
             if captured.verified is False:
                 status += " · unverified"
+            if not (captured.label or "").strip() and not (captured.name or "").strip():
+                # The card name is unreadable, so an unlabelled bank would
+                # otherwise stay "(unnamed)" with no way to fix it.
+                status += " · L to label"
             shown = name or "[dim](unnamed)[/dim]"
         with contextlib.suppress(NoMatches):
             self.query_one("#detail", Static).update(
@@ -1654,13 +1687,28 @@ class KwsedApp(App[None]):
             return
         self._read_worker(*self._current_pair)
 
-    def action_capture_card(self) -> None:
+    def _auto_capture_card(self) -> None:
+        """Startup probe: file or confirm the active card bank.
+
+        The card is switched physically and the synth cannot report the
+        bank, so a read at launch is the only way to know which one is in
+        front of it. Silent and read-only; skipped while the scan offer is
+        up or the browser is busy, and the user can always press C.
+        """
+        if self._cards_path is None or self._busy or self._scanning:
+            return
+        if isinstance(self.screen, _scan.ScanOfferScreen):
+            return
+        self.action_capture_card(startup=True)
+
+    def action_capture_card(self, startup: bool = False) -> None:
         """Read the active HCard bank and file it in the archive.
 
         Reads the card name and both name lists, resolves which of the
         forty banks is in front of the synth, and writes one archive
         record. **Read-only** on the unit: nothing is selected, written or
-        changed.
+        changed. ``startup`` is the automatic launch probe: an unresolved
+        bank is then reported as information rather than as a refusal.
         """
         if self._card_sweeping:
             self.notify_status("a card sweep is running", refused=True)
@@ -1675,7 +1723,7 @@ class KwsedApp(App[None]):
             "capturing the Card bank — reading performances and patches "
             "(a few seconds)…"
         )
-        self._capture_card_worker(self._current_card)
+        self._capture_card_worker(self._current_card, startup=startup)
 
     def action_label_card(self) -> None:
         """Set a local label on the captured bank under the cursor.
@@ -1784,6 +1832,7 @@ class KwsedApp(App[None]):
         next_index: Optional[int] = None,
         filed: int = 0,
         sweep: bool = False,
+        startup: bool = False,
     ) -> None:
         """**MIDI only** -- the archive is updated on the main thread."""
         failure: BaseException | None = None
@@ -1812,7 +1861,9 @@ class KwsedApp(App[None]):
             if next_index is not None:
                 self.call_from_thread(self._card_sweep_next, next_index, filed)
             return
-        self.call_from_thread(self._file_capture, payload, expected, next_index, filed)
+        self.call_from_thread(
+            self._file_capture, payload, expected, next_index, filed, startup
+        )
 
     def _file_capture(  # noqa: C901
         self,
@@ -1820,6 +1871,7 @@ class KwsedApp(App[None]):
         expected: Optional[int],
         next_index: Optional[int] = None,
         filed: int = 0,
+        startup: bool = False,
     ) -> bool:
         name, performances, patches, digest = payload
         by_digest = _cards.resolve_by_digest(digest, self._archive)
@@ -1867,15 +1919,23 @@ class KwsedApp(App[None]):
         elif evidence_bank is not None:
             number = evidence_bank
             verified = by_digest is not None
+            if verified:
+                message_suffix = " — confirmed"
         else:
             number = None
 
         if number is None:
-            self.notify_status(
-                "capture: could not tell which Card bank this is. Select "
-                "its row and capture again to file it there.",
-                refused=True,
-            )
+            if startup:
+                self.notify_status(
+                    "the active card bank is not in the archive yet; select "
+                    "it on the HCard and press C to file it"
+                )
+            else:
+                self.notify_status(
+                    "capture: could not tell which Card bank this is. Select "
+                    "its row and capture again to file it there.",
+                    refused=True,
+                )
             if next_index is not None:
                 self._card_sweep_next(next_index, filed)
             return False
@@ -1890,12 +1950,18 @@ class KwsedApp(App[None]):
             digest=digest,
             verified=verified,
         )
+        previous_active = self._active_card
         self._archive[number] = captured
         self._active_card = number
         if self._cards_path is not None:
             _cards.save(captured, self._cards_path)
             _cards.set_active(number, self._cards_path)
+        # Only two rows change: the captured bank gains the "•" marker, and
+        # the bank that was active becomes inactive. Everyone else's grey
+        # state is untouched.
         self._refresh_card_row(number)
+        if previous_active is not None and previous_active != number:
+            self._refresh_card_row(previous_active)
         if self._current_card == number:
             self._fill(self._current_pair, number)
         message = (
@@ -1914,10 +1980,19 @@ class KwsedApp(App[None]):
         return True
 
     def _refresh_card_row(self, number: int) -> None:
+        """Rewrite the bank and name cells of one card row.
+
+        Both depend on which bank is active (the label is greyed when it is
+        not), so a capture that changes the active bank refreshes every
+        card row, not just its own.
+        """
         table = self.query_one("#bank-table", DataTable)
+        card_number = banks.bank("CARD").number
         for kind in (banks.Kind.PERFORMANCE, banks.Kind.PATCH):
-            key = self._row_key((banks.bank("CARD").number, kind), number)
+            key = self._row_key((card_number, kind), number)
             try:
+                cells = self._bank_row((card_number, kind), number)
+                table.update_cell(key, "bank", cells[0])
                 table.update_cell(key, "name", self._card_row_name(number))
             except Exception:  # noqa: S110 - the row may be filtered away
                 pass
@@ -2275,40 +2350,70 @@ class KwsedApp(App[None]):
 
 
 _HELP = """\
-Two panes. Left: the twelve banks, each listed twice -- once for its 50
+Two panes. Left: the banks, each listed once per kind -- once for its 50
 performances, once for its 35 patches. Right: that bank-and-kind's slots.
 
   RAM 1-3   writable; somebody's own work lives here.
   ROM 4-11  read-only.
-  Card      writable; the card in the slot.
-
-A `*` marks a name the unit and the catalog disagree about. In a
-writable bank (RAM 1-3, Card) that means somebody saved their own work
-over the factory preset; in a ROM bank it cannot mean that -- ROM does
-not change -- so the printed list is wrong, and the unit is right.
+  Card      the HCard's forty banks, not one bank -- see below.
 
 A performance combines up to eight parts, each pointing at a patch. A
 patch is a sound: four oscillators playing waves or wave sequences. They
 are different objects; performance 7 is not patch 7.
 
-  ⏎   select the Performance on the unit -- it will sound. A patch
-      is never selected: the SR has no patch mode, so Enter refuses
-      a patch row -- a patch is heard through a Performance that
-      uses it. Patches are read, written and favourited like any
-      other slot. On a Card sub-bank row, Enter selects that slot
-      from whichever HCard bank is currently active on the card.
+**The Card is an HCard.**  One card slot holds forty banks, switched
+physically on the card itself. kwsed cannot switch them and the synth
+cannot report which one is in front of it. Every bank is listed; the one
+marked `•` is the last confirmed active bank, and the others are greyed.
+
+  C   capture the bank currently on the card: read it, work out which of
+      the forty it is from its content, and file its names (SILENT)
+  X   card sweep: walk 00-39, asking you to select each bank on the
+      card between reads (SILENT)
+  L   label a captured bank. This is kwsed's own label, not the card's
+      name: the card name is unreadable over MIDI, and writing it is not
+      implemented yet (TODO 23)
+  ⏎   on a card row, selects the slot from whichever bank is active on
+      the card. kwsed refuses when that is not the row you are on, or
+      when no bank has been confirmed yet -- select the bank on the
+      HCard and press C once.
+
+A first capture of a bank is filed on your say-so (unverified); later
+captures are confirmed by a content digest, and a capture that is a
+different bank than the row says so and asks you to switch the HCard.
+
+  ⏎   select the Performance on the unit -- it will sound. A patch is
+      never selected: the SR has no patch mode, so Enter refuses a patch
+      row -- a patch is heard through a Performance that uses it.
+      Patches are read, written and favourited like any other slot.
   r   read this bank's names from the unit -- SILENT, nothing is selected
+  S   scan the ten internal banks (RAM 1-3, ROM 4-11) -- SILENT; card
+      banks are captured with C or X
   /   search names
-  m   channels: the 32 Multisets, and which performance answers on each
+  m   the 32 Multisets (Multi mode): which performance answers on each of
+      the 16 MIDI channels. They live in the SR's internal memory, not on
+      the card; a Multiset refers to performances, including card ones.
+  e   edit the selected Multiset
   f   favourite this slot; F steps all -> this bank's -> every favourite
   t   tags; n   note (both hang off a favourite, so press f first)
+  V   filter the list by favourite rating
   [ ] step the send channel; c set it by number
+  z   undo the last write (the write gate must be armed)
+  w   arm or lock the write gate (or start with --allow-write)
   i   device identity and the unit's global channel
+  ?   this help; q quit
 
-**A program change is not a bank change.** Which of the twelve banks a
-Bank Select actually reaches is not established (see TODO 1), so kwsed
-sends the bank's wire byte with the program change and says which bank
-it assumed, rather than claiming a selection it cannot verify.
+A `*` marks a name the unit and the catalog disagree about. In a
+writable bank (RAM 1-3) that means somebody saved their own work over the
+factory preset; in a ROM bank it cannot mean that -- ROM does not change
+-- so the printed list is wrong, and the unit is right.
+
+**Bank Select is established.**  The SR has six MIDI banks (CC32 0-5),
+each holding two 50-performance banks: RAM1/RAM2 = 0, ROM11/CARD = 1,
+RAM3/ROM4 = 2, ROM5/ROM6 = 3, ROM7/ROM8 = 4, ROM9/ROM10 = 5. CC0 is 0 and
+the Program Change is 0-49 for the first bank, 50-99 for the second.
+Enter sends exactly that and says what it sent. The unit's "Bank Select"
+MIDI-receive parameter must be ON.
 
 Moving the cursor sends nothing at all.
 """
@@ -2443,6 +2548,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         live_path=live_path,
         cards_path=cards_path,
         allow_write=getattr(args, "allow_write", False),
+        # The HCard is switched physically; one read at launch is the only
+        # way to know which bank is in front of the synth (read-only).
+        auto_capture=cards_path is not None,
     )
     try:
         app.run()

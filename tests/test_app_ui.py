@@ -403,6 +403,25 @@ class TestSearchAndHelp:
             await settle(pilot)
             assert len(app.screen_stack) == 1
 
+    def test_help_covers_the_hcard_and_the_current_keys(self):
+        """The help is the full reference: the legend is capped, and the
+        stale 'Bank Select not established' note is gone."""
+        from kwsed.app import _HELP
+
+        for needle in (
+            "HCard",
+            "capture the bank",
+            "label a captured bank",
+            "card sweep",
+            "Multiset",
+            "Bank Select is established",
+            "undo",
+            "write gate",
+            "scan the ten internal banks",
+        ):
+            assert needle in _HELP, needle
+        assert "not established" not in _HELP
+
 
 class TestWithoutAFavouritesStore:
     async def test_the_keys_that_need_one_say_so(self, app):
@@ -676,6 +695,16 @@ class TestTheCardSubList:
             assert app.device.selected_log == []
             assert "was on Card 28" in panel_text(app, "#status")
 
+    async def test_an_unlabelled_captured_bank_says_press_l(self, tmp_path):
+        app = self._app(tmp_path, card_name=None, seeded=False)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._fill((banks.bank("CARD").number, banks.Kind.PERFORMANCE), 33)
+            app.action_capture_card()
+            await settle(pilot, 30)
+            app._detail(0)
+            assert "L to label" in panel_text(app, "#detail")
+
     async def test_a_capture_persists_the_active_bank(self, tmp_path):
         from kws import cards
 
@@ -686,6 +715,73 @@ class TestTheCardSubList:
             app.action_capture_card()
             await settle(pilot, 30)
             assert cards.load_active(app._cards_path) == 33
+
+    async def test_inactive_card_rows_are_greyed_and_italic(self, tmp_path):
+        app = self._app(tmp_path)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._active_card = 7
+            app._refresh_card_row(7)
+            app._refresh_card_row(8)
+            table = app.query_one("#bank-table", DataTable)
+            active = " ".join(
+                str(cell) for cell in table.get_row("card:07:performance")
+            )
+            other = " ".join(str(cell) for cell in table.get_row("card:08:performance"))
+            assert "• " in active
+            assert "[dim][i]" not in active
+            assert "[dim][i]" in other
+
+    async def test_a_capture_moves_the_active_marker(self, tmp_path):
+        app = self._app(tmp_path, card_name=None, seeded=False)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._active_card = 7
+            app._fill((banks.bank("CARD").number, banks.Kind.PERFORMANCE), 8)
+            app.action_capture_card()
+            await settle(pilot, 30)
+            assert app._active_card == 8
+            table = app.query_one("#bank-table", DataTable)
+            new = " ".join(str(cell) for cell in table.get_row("card:08:performance"))
+            old = " ".join(str(cell) for cell in table.get_row("card:07:performance"))
+            assert "• " in new
+            assert "[dim][i]" in old
+
+    async def test_the_startup_probe_confirms_the_active_bank(self, tmp_path):
+        app = self._seeded_with_digest(tmp_path, self._demo_digest())
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._auto_capture_card()
+            await settle(pilot, 30)
+            assert app._active_card == 7
+            assert app._archive[7].verified is True
+            assert "confirmed" in panel_text(app, "#status")
+
+    async def test_the_startup_probe_reports_an_unknown_bank_as_information(
+        self, tmp_path
+    ):
+        app = self._app(tmp_path, card_name=None, seeded=True)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._auto_capture_card()
+            await settle(pilot, 30)
+            assert app._active_card is None
+            status = panel_text(app, "#status")
+            assert "not in the archive yet" in status
+            assert "refused" not in status
+
+    async def test_the_startup_probe_skips_without_a_cards_path(self):
+        app = KwsedApp(DemoDevice(), catalog=cat.Catalog())
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._auto_capture_card()
+            await settle(pilot)
+            assert app._active_card is None
+            assert app._archive == {}
+
+    def test_the_startup_probe_is_off_by_default(self, tmp_path):
+        app = self._app(tmp_path)
+        assert app._auto_capture is False
 
     async def test_no_selected_card_still_resolves_from_contents(self, tmp_path):
         """With no Card row selected, a captured fingerprint still files."""
