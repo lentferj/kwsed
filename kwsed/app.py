@@ -64,7 +64,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.css.query import NoMatches
 from textual.screen import ModalScreen
-from textual.widgets import DataTable, Header, Input, Label, Select, Static
+from textual.widgets import DataTable, Header, Input, Label, Static
 
 from kws import banks
 from kws.multi import MULTISETS
@@ -183,15 +183,16 @@ def _clip(text: str, limit: int = 26) -> str:
 
 
 class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
-    """Edit the Multi Mode Setup (0x06). **Destructive.**"""
+    """Edit one Multiset inside the 32-record Multi Mode Setup. **Destructive.**"""
 
     DEFAULT_CSS = """
     MultiEditScreen { align: center middle; }
     MultiEditScreen > Vertical {
-        width: 80; height: auto; border: thick $error;
+        width: 84; height: auto; border: thick $error;
         background: $surface; padding: 1 2;
     }
     MultiEditScreen .armed { color: $error; text-style: bold; }
+    MultiEditScreen DataTable { height: 16; }
     """
 
     BINDINGS = [
@@ -199,205 +200,377 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
         Binding("q", "close", "Cancel"),
         Binding("a", "arm", "Arm", show=False),
         Binding("w", "fire", "Write", show=False),
+        Binding("space", "toggle", "On/off", show=False),
+        Binding("plus", "nudge(1)", "Nudge +", show=False),
+        Binding("minus", "nudge(-1)", "Nudge -", show=False),
+        Binding("b", "bank", "Bank", show=False),
+        Binding("n", "rename", "Rename", show=False),
     ]
 
     def __init__(
         self,
         *,
         multisets: Sequence[Any],
+        selected: int = 0,
         device: Any = None,
         on_write: Optional[Callable[[bytes], Any]] = None,
         backup_dir: Optional[str] = None,
+        catalog: Any = None,
+        name_for: Optional[Callable[[Any], str]] = None,
     ) -> None:
         super().__init__()
-        self._multisets = list(multisets)
+        # A copy: the original list and its entries are not mutated.
+        self._multisets_copy: List[Any] = list(multisets)
+        if not (0 <= selected < len(self._multisets_copy)):
+            selected = 0
+        self._selected = selected
         self._device = device
         self._on_write = on_write
         self._backup_dir = backup_dir
+        self._catalog = catalog
+        self._name_for = name_for
         self._armed = False
+        self._table: Optional[DataTable[Any]] = None
+
+    # --- helpers ----------------------------------------------------------
+
+    def _ms(self) -> Any:
+        return self._multisets_copy[self._selected]
+
+    def _title(self) -> str:
+        ms = self._ms()
+        name = getattr(ms, "name", "") or ""
+        return f"Edit Multiset {getattr(ms, 'number', self._selected):02d} — {name}"
+
+    def _name_for_part(self, part: Any) -> str:
+        if not getattr(part, "used", False):
+            return ""
+        if self._name_for is not None:
+            try:
+                return str(self._name_for(part)) or ""
+            except Exception:
+                return ""
+        if self._catalog is not None:
+            try:
+                from kws import banks as _banks
+
+                bank_entry = _banks.by_sysex(part.bank)
+                return str(
+                    self._catalog.display_name(
+                        bank_entry.id, part.performance, _banks.Kind.PERFORMANCE
+                    )
+                )
+            except Exception:
+                return ""
+        return ""
 
     def compose(self) -> ComposeResult:
         with Vertical():
-            yield Label("[b]Edit Multi Mode Setup[/b]")
-            yield Static(f"{len(self._multisets)} multisets", classes="what")
-            options = [
-                (f"{entry.number:02d} {entry.name}".strip(), index)
-                for index, entry in enumerate(self._multisets)
-            ]
-            if not options:
-                options = [("0", 0)]
-            yield Select(options, value=0, id="multi-edit-ms")
-            yield Input(placeholder="name", id="multi-edit-name")
-            yield Select(
-                [(str(channel), channel - 1) for channel in range(1, 17)],
-                value=0,
-                id="multi-edit-channel",
+            yield Label(self._title(), id="multi-edit-title")
+            yield Static(
+                "⏎ edits the cell · + / - nudge · space on/off · "
+                "n rename · a arm, w write · esc cancels",
+                classes="hint",
             )
-            yield Input(placeholder="bank 0-127", id="multi-edit-bank")
-            yield Input(placeholder="performance 0-49", id="multi-edit-performance")
-            yield Input(placeholder="level 0-127", id="multi-edit-level")
-            yield Input(placeholder="flag 0-1", id="multi-edit-flag")
+            table: DataTable[Any] = DataTable(id="multi-edit-table", cursor_type="cell")
+            table.add_column("ch", key="ch")
+            table.add_column("perf", key="perf")
+            table.add_column("name", key="name")
+            table.add_column("level", key="level")
+            table.add_column("on", key="on")
+            self._table = table
+            yield table
             yield Static("", id="multi-edit-state")
             yield Static("[dim]a to arm, then w to write. esc cancels.[/dim]")
 
     def on_mount(self) -> None:
-        self._refresh_inputs()
-
-    def _selected_ms_index(self) -> int:
+        self._populate()
         try:
-            value = self.query_one("#multi-edit-ms", Select).value
-        except Exception:
-            return 0
-        return int(value) if value is not None and value is not Select.BLANK else 0  # type: ignore[arg-type]
-
-    def _selected_channel_index(self) -> int:
-        try:
-            value = self.query_one("#multi-edit-channel", Select).value
-        except Exception:
-            return 0
-        return int(value) if value is not None and value is not Select.BLANK else 0  # type: ignore[arg-type]
-
-    def _refresh_inputs(self) -> None:
-        try:
-            entry = self._multisets[self._selected_ms_index()]
-        except Exception:
-            return
-        channel_index = self._selected_channel_index()
-        part = entry.parts[channel_index] if channel_index < len(entry.parts) else None
-        try:
-            self.query_one("#multi-edit-name", Input).value = entry.name
+            self._table.focus()  # type: ignore[union-attr]
         except Exception:  # noqa: S110
             pass
-        if part is not None:
-            for widget_id, value in (
-                ("#multi-edit-bank", str(part.bank)),
-                ("#multi-edit-performance", str(part.performance)),
-                ("#multi-edit-level", str(part.level)),
-                ("#multi-edit-flag", str(part.flag)),
-            ):
-                try:
-                    self.query_one(widget_id, Input).value = value
-                except Exception:  # noqa: S110
-                    pass
 
-    def on_select_changed(self, event: Any) -> None:
-        self._refresh_inputs()
+    def _populate(self) -> None:
+        table = self._table
+        if table is None:
+            try:
+                table = self.query_one("#multi-edit-table", DataTable)
+            except Exception:
+                return
+        self._table = table
+        try:
+            coord = table.cursor_coordinate
+            row = int(coord.row)
+            column = int(coord.column)
+        except Exception:
+            row = 0
+            column = 0
+        table.clear()
+        ms = self._ms()
+        for i in range(16):
+            part = ms.parts[i] if i < len(ms.parts) else None
+            table.add_row(*self._row_cells(i, part), key=f"r{i}")
+        if table.row_count and len(table.columns):
+            row = max(0, min(row, table.row_count - 1))
+            column = max(0, min(column, len(table.columns) - 1))
+            table.move_cursor(row=row, column=column)
 
-    def on_input_changed(self, event: Any) -> None:
-        self._collect()
+    def _row_cells(self, i: int, part: Any) -> tuple[Any, ...]:
+        if part is None:
+            return (f"{i + 1:02d}", "--", "", "--", "--")
+        if getattr(part, "used", False):
+            perf = f"{_bank_label(part.bank)} {part.performance:02d}"
+            name = self._name_for_part(part)
+            on = "on"
+        else:
+            perf = "--"
+            name = ""
+            on = "--"
+        return (f"{i + 1:02d}", perf, name, str(part.level), on)
 
-    def _collect(self) -> None:  # noqa: C901
+    def _channel_index(self) -> int:
+        table = self._table
+        if table is None:
+            return 0
+        try:
+            row_key, _ = table.coordinate_to_cell_key(table.cursor_coordinate)
+            key = row_key.value
+            if isinstance(key, str) and key.startswith("r"):
+                return int(key[1:])
+        except Exception:  # noqa: S110
+            pass
+        try:
+            return int(table.cursor_coordinate.row)
+        except Exception:
+            return 0
+
+    def _column_key(self) -> str:
+        table = self._table
+        if table is None:
+            return ""
+        try:
+            _, column_key = table.coordinate_to_cell_key(table.cursor_coordinate)
+            return str(column_key.value)
+        except Exception:
+            return ""
+
+    def _rebuild_row(self, index: int) -> None:
+        table = self._table
+        if table is None:
+            return
+        ms = self._ms()
+        part = ms.parts[index] if index < len(ms.parts) else None
+        cells = self._row_cells(index, part)
+        try:
+            for col_idx, col_key in enumerate(("ch", "perf", "name", "level", "on")):
+                table.update_cell(f"r{index}", col_key, cells[col_idx])
+        except Exception:
+            self._populate()
+
+    def _set_part(self, index: int, new_part: Any) -> None:
         from dataclasses import replace as _replace
 
-        try:
-            ms_index = self._selected_ms_index()
-            entry = self._multisets[ms_index]
-        except Exception:
+        ms = self._ms()
+        parts = list(ms.parts)
+        if index >= len(parts):
             return
+        parts[index] = new_part
+        new_ms = _replace(ms, parts=tuple(parts))
+        self._multisets_copy[self._selected] = new_ms
+        self._rebuild_row(index)
+        self._rebuild_title()
+
+    def _rebuild_title(self) -> None:
         try:
-            name = self.query_one("#multi-edit-name", Input).value
-        except Exception:
-            name = entry.name
-        if not isinstance(name, str):
-            name = entry.name
-        if len(name) > 16:
-            name = name[:16]
-        channel_index = self._selected_channel_index()
-        parts = list(entry.parts)
-        error: Optional[str] = None
-        if channel_index < len(parts):
-            part = parts[channel_index]
-
-            def _int(
-                widget_id: str, field_name: str, lo: int, hi: int, fallback: int
-            ) -> int:
-                nonlocal error
-                try:
-                    raw = self.query_one(widget_id, Input).value
-                except Exception:
-                    return fallback
-                try:
-                    value = int(raw)
-                except (TypeError, ValueError):
-                    error = f"{field_name} must be {lo}-{hi}"
-                    return fallback
-                if value < lo or value > hi:
-                    error = f"{field_name} must be {lo}-{hi}"
-                    return fallback
-                return value
-
-            parts[channel_index] = _replace(
-                part,
-                bank=_int("#multi-edit-bank", "bank", 0, 127, part.bank),
-                performance=_int(
-                    "#multi-edit-performance", "performance", 0, 49, part.performance
-                ),
-                level=_int("#multi-edit-level", "level", 0, 127, part.level),
-                flag=_int("#multi-edit-flag", "flag", 0, 1, part.flag),
-            )
-        new_entry = _replace(entry, name=name, parts=tuple(parts))
-        self._multisets[ms_index] = new_entry
-        if error is not None:
-            try:
-                self.query_one("#multi-edit-state", Static).update(error)
-            except Exception:  # noqa: S110
-                pass
-
-    def _validation_error(self) -> Optional[str]:
-        checks = (
-            ("#multi-edit-bank", "bank", 0, 127),
-            ("#multi-edit-performance", "performance", 0, 49),
-            ("#multi-edit-level", "level", 0, 127),
-            ("#multi-edit-flag", "flag", 0, 1),
-        )
-        for widget_id, name, lo, hi in checks:
-            try:
-                raw = self.query_one(widget_id, Input).value
-            except Exception:  # noqa: S112
-                continue
-            try:
-                value = int(raw)
-            except (TypeError, ValueError):
-                return f"{name} must be {lo}-{hi}"
-            if value < lo or value > hi:
-                return f"{name} must be {lo}-{hi}"
-        return None
-
-    def action_arm(self) -> None:
-        self._collect()
-        error = self._validation_error()
-        if error is not None:
-            try:
-                self.query_one("#multi-edit-state", Static).update(error)
-            except Exception:  # noqa: S110
-                pass
-            return
-        self._armed = True
-        try:
-            self.query_one("#multi-edit-state", Static).update(
-                "[b]ARMED[/b] - w writes the Multi Mode Setup. Nothing sent yet."
-            )
+            self.query_one("#multi-edit-title", Label).update(self._title())
         except Exception:  # noqa: S110
             pass
+
+    # --- editing ---------------------------------------------------------
+
+    def on_data_table_cell_selected(self, event: Any) -> None:
+        try:
+            if event.data_table.id != "multi-edit-table":
+                return
+        except Exception:  # noqa: S110
+            pass
+        col = self._column_key()
+        idx = self._channel_index()
+        if col == "perf":
+            self._edit_perf(idx)
+        elif col == "level":
+            self._edit_level(idx)
+        elif col == "on":
+            self.action_toggle()
+
+    def _edit_perf(self, index: int) -> None:
+        ms = self._ms()
+        part = ms.parts[index]
+        current = str(part.performance) if part.used else "off"
+
+        def done(text: Optional[str]) -> None:
+            if text is None:
+                return
+            raw = text.strip().lower()
+            if raw in ("", "off", "unused", "no"):
+                from dataclasses import replace as _replace
+
+                new_part = _replace(part, performance=50)
+                self._set_part(index, new_part)
+                return
+            try:
+                value = int(raw)
+            except ValueError:
+                self._status(f"performance must be 0-49 or off, not {text!r}")
+                return
+            if value < 0 or value > 49:
+                self._status("performance must be 0-49 or off")
+                return
+            from dataclasses import replace as _replace
+
+            new_part = _replace(part, performance=value)
+            self._set_part(index, new_part)
+
+        self.app.push_screen(
+            PromptScreen("performance (0-49, off/empty unused):", current),
+            done,
+        )
+
+    def _edit_level(self, index: int) -> None:
+        ms = self._ms()
+        part = ms.parts[index]
+
+        def done(text: Optional[str]) -> None:
+            if text is None or not text.strip():
+                return
+            try:
+                value = int(text.strip())
+            except ValueError:
+                self._status(f"level must be 0-127, not {text!r}")
+                return
+            if value < 0 or value > 127:
+                self._status("level must be 0-127")
+                return
+            from dataclasses import replace as _replace
+
+            new_part = _replace(part, level=value)
+            self._set_part(index, new_part)
+
+        self.app.push_screen(PromptScreen("level (0-127):", str(part.level)), done)
+
+    def action_toggle(self) -> None:  # type: ignore[override]
+        idx = self._channel_index()
+        ms = self._ms()
+        part = ms.parts[idx]
+        from dataclasses import replace as _replace
+
+        if part.used:
+            new_part = _replace(part, performance=50)
+        else:
+            new_part = _replace(part, performance=0)
+        self._set_part(idx, new_part)
+
+    def action_nudge(self, by: int) -> None:
+        idx = self._channel_index()
+        ms = self._ms()
+        part = ms.parts[idx]
+        new_level = part.level + int(by)
+        if new_level < 0 or new_level > 127:
+            self._status(f"level must be 0-127, not {new_level}")
+            return
+        from dataclasses import replace as _replace
+
+        new_part = _replace(part, level=new_level)
+        self._set_part(idx, new_part)
+
+    def action_bank(self) -> None:
+        idx = self._channel_index()
+        ms = self._ms()
+        part = ms.parts[idx]
+
+        def done(text: Optional[str]) -> None:
+            if text is None:
+                return
+            raw = text.strip()
+            if not raw:
+                return
+            bank_sysex = self._parse_bank(raw)
+            if bank_sysex is None:
+                self._status(f"bank must be 0-11 or CARD/C, not {text!r}")
+                return
+            from dataclasses import replace as _replace
+
+            new_part = _replace(part, bank=bank_sysex)
+            self._set_part(idx, new_part)
+
+        self.app.push_screen(
+            PromptScreen(
+                f"bank (0-11, CARD/C), now {_bank_label(part.bank)}:",
+                _bank_label(part.bank),
+            ),
+            done,
+        )
+
+    def _parse_bank(self, text: str) -> Optional[int]:
+        upper = text.strip().upper()
+        if upper in ("CARD", "C"):
+            try:
+                from kws import banks as _banks
+
+                return _banks.bank("CARD").sysex
+            except Exception:
+                return None
+        # label / id match
+        try:
+            from kws import banks as _banks
+
+            for b in _banks.BANKS:
+                if upper == b.label.upper() or upper == b.id.upper():
+                    return b.sysex
+        except Exception:  # noqa: S110
+            pass
+        try:
+            n = int(text.strip())
+        except ValueError:
+            return None
+        try:
+            from kws import banks as _banks
+
+            if 0 <= n < len(_banks.BANKS):
+                return _banks.BANKS[n].sysex
+        except Exception:
+            return None
+        return None
+
+    def action_rename(self) -> None:
+        ms = self._ms()
+        current = getattr(ms, "name", "") or ""
+
+        def done(text: Optional[str]) -> None:
+            if text is None:
+                return
+            new_name = text.strip()[:15]
+            if not new_name:
+                return
+            from dataclasses import replace as _replace
+
+            new_ms = _replace(ms, name=new_name)
+            self._multisets_copy[self._selected] = new_ms
+            self._rebuild_title()
+
+        self.app.push_screen(PromptScreen("name (max 15):", current), done)
+
+    # --- arm / write ------------------------------------------------------
+
+    def action_arm(self) -> None:
+        self._armed = True
+        self._status("[b]ARMED[/b] - w writes the Multi Mode Setup. Nothing sent yet.")
 
     def action_fire(self) -> None:  # noqa: C901
         if not self._armed:
-            try:
-                self.query_one("#multi-edit-state", Static).update(
-                    "[dim]not armed - press a first[/dim]"
-                )
-            except Exception:  # noqa: S110
-                pass
+            self._status("not armed - press a first", refused=True)
             return
         self._armed = False
-        self._collect()
-        error = self._validation_error()
-        if error is not None:
-            try:
-                self.query_one("#multi-edit-state", Static).update(error)
-            except Exception:  # noqa: S110
-                pass
-            return
         app = None
         try:
             app = self.app
@@ -405,30 +578,24 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
             app = None
         if app is not None and hasattr(app, "_multi_edit_write_worker"):
             if getattr(app, "_busy", False):
-                try:
-                    self.query_one("#multi-edit-state", Static).update(
-                        "[dim]busy[/dim]"
-                    )
-                except Exception:  # noqa: S110
-                    pass
+                self._status("busy", refused=True)
                 return
             exchange = getattr(app, "_exchange", None)
-            if exchange is None or not exchange.acquire(blocking=False):
+            if exchange is not None:
                 try:
-                    self.query_one("#multi-edit-state", Static).update(
-                        "[dim]busy[/dim]"
-                    )
+                    if not exchange.acquire(blocking=False):
+                        self._status("busy", refused=True)
+                        return
                 except Exception:  # noqa: S110
                     pass
-                return
             app._multi_edit_write_worker(
-                list(self._multisets), self._device, self._backup_dir, self
+                list(self._multisets_copy), self._device, self._backup_dir, self
             )
             return
         # Fallback (no app): direct, for unit contexts.
         from kws import multi as multi_mod
 
-        encoded = multi_mod.encode(self._multisets)
+        encoded = multi_mod.encode(self._multisets_copy)
         try:
             if self._on_write is not None:
                 result = self._on_write(encoded)
@@ -447,30 +614,28 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
                 kwargs["verify"] = True
                 result = device.write_multi(encoded, **kwargs)
         except Exception as exc:
-            try:
-                self.query_one("#multi-edit-state", Static).update(
-                    f"[b]write failed[/b] {exc}"
-                )
-            except Exception:  # noqa: S110
-                pass
+            self._status(f"write failed {exc}", refused=True)
             return
         try:
             if app is not None and hasattr(app, "_record_write"):
                 payload = result if isinstance(result, dict) else {"backup": None}
                 app._record_write(payload)
             if app is not None and hasattr(app, "_multi_sets"):
-                app._multi_sets = list(self._multisets)
+                app._multi_sets = list(self._multisets_copy)
+                app._multisets = list(self._multisets_copy)  # type: ignore[attr-defined]
         except Exception:  # noqa: S110
             pass
         self.dismiss(result if isinstance(result, dict) else {"result": result})
 
-    def _write_failed(self, message: str) -> None:
+    def _status(self, message: str, *, refused: bool = False) -> None:
         try:
-            self.query_one("#multi-edit-state", Static).update(
-                f"[b]write failed[/b] {message}"
-            )
+            status = self.query_one("#multi-edit-state", Static)
+            status.update(message)
         except Exception:  # noqa: S110
             pass
+
+    def _write_failed(self, message: str) -> None:
+        self._status(f"write failed {message}", refused=True)
 
     def _write_succeeded(self, result: Any) -> None:
         try:
@@ -479,7 +644,9 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
                 payload = result if isinstance(result, dict) else {"backup": None}
                 app._record_write(payload)
             if hasattr(app, "_multi_sets"):
-                app._multi_sets = list(self._multisets)
+                app._multi_sets = list(self._multisets_copy)
+            if hasattr(app, "_multisets"):
+                app._multisets = list(self._multisets_copy)
         except Exception:  # noqa: S110
             pass
         self.dismiss(result if isinstance(result, dict) else {"result": result})
@@ -2334,8 +2501,17 @@ class KwsedApp(App[None]):
         if self._busy:
             self.notify_status("busy", refused=True)
             return
+        index = getattr(self, "_current_multi", None)
+        if index is None or not (0 <= index < len(sets)):
+            index = 0
         self.push_screen(
-            MultiEditScreen(multisets=sets, device=self.device, backup_dir=None)
+            MultiEditScreen(
+                multisets=sets,
+                selected=index,
+                device=self.device,
+                backup_dir=None,
+                catalog=getattr(self, "catalog", None),
+            )
         )
 
     @work(thread=True)
