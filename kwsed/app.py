@@ -2686,10 +2686,11 @@ different bank than the row says so and asks you to switch the HCard.
   S   scan the ten internal banks (RAM 1-3, ROM 4-11) -- SILENT; card
       banks are captured with C or X
   /   search names
-  m   the 32 Multisets (Multi mode): which performance answers on each of
+  m   read the 32 Multisets and jump to them: each assigns a performance to
       the 16 MIDI channels. They live in the SR's internal memory, not on
       the card; a Multiset refers to performances, including card ones.
-  e   edit the selected Multiset
+      ⏎ on a Multiset row makes it current on the unit (switch the unit to
+      MULTI mode to hear it). e edits it as a 16-channel table.
   f   favourite this slot; F steps all -> this bank's -> every favourite
   t   tags; n   note (both hang off a favourite, so press f first)
   V   filter the list by favourite rating

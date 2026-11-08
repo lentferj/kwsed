@@ -697,3 +697,22 @@ in the UI, not open work.
 
 **Blocked on:** nothing. It is read-only and covered by the existing
 doubles in `tests/`.
+
+## 26. Multiset selection and the browser view — hardware check pending
+
+**Status:** implemented; one message not yet confirmed on a unit.
+
+The 32 Multisets are now browser rows (keys `m` / `e`): `m` reads the SR
+Expanded Multi Mode Setup (`0x06` → `0x55`, `0x5E`, `0x62`) and jumps to
+them, `⏎` makes one current, and `e` edits it as a 16-channel table whose
+write goes through the existing fenced `write_multi` (backup + read-back).
+
+The **select** message is documented (Reference Appendix 4 §2.1.20/§2.1.21:
+`0x5B` for 0-15, `0x63` for 16-31) but has not been exercised against the
+unit. Confirm on hardware: select a Multiset from the browser with the unit
+in MULTI mode and see it become current; if the unit ignores it, check the
+message number and the mode first. No memory is written by the select.
+
+Also confirm the editor's write round trip on hardware when the separate
+write session happens: the `0x62` dump is sent by `write_multi`, which
+already backs up and verifies.
