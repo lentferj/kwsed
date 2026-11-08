@@ -1573,9 +1573,8 @@ class KwsedApp(App[None]):
             return
         self.call_from_thread(
             self.notify_status,
-            f"bank select LSB {entry.bank.sysex} + program change "
-            f"{entry.number} sent for {entry} — which bank a Bank Select "
-            f"actually reaches is not established",
+            f"bank select LSB {entry.bank.midi_bank} + program change "
+            f"{entry.bank.program_base + entry.number} sent for {entry}",
         )
 
     def action_read_names(self) -> None:

@@ -272,6 +272,36 @@ class TestTheCursorContract:
             assert len(app.device.selected_log) == 1
             assert "heard through a Performance" not in panel_text(app, "#status")
 
+    async def test_select_on_a_card_row_sends_the_card_bank(self, app):
+        """The HCard's active bank is the SR's CARD bank: Enter on a card
+        sub-bank auditions the slot from it. The exact bytes (CC32=1,
+        PC 50+N) are pinned in test_bridge; this pins the wiring."""
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._fill((banks.bank("CARD").number, banks.Kind.PERFORMANCE), 17)
+            table = app.query_one("#slot-table")
+            table.focus()
+            table.move_cursor(row=2)
+            await pilot.press("enter")
+            await settle(pilot, 10)
+            assert len(app.device.selected_log) == 1
+            chosen = app.device.selected_log[-1]
+            assert chosen.bank.id == "CARD"
+            assert chosen.number == 2
+            assert "HCard bank active" in panel_text(app, "#status")
+
+    async def test_select_refuses_a_card_patch_row(self, app):
+        """A card PATCH row is still refused as a patch: the SR has no
+        patch mode, whatever bank the row belongs to."""
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._fill((banks.bank("CARD").number, banks.Kind.PATCH), 17)
+            app.query_one("#slot-table").focus()
+            await pilot.press("enter")
+            await settle(pilot)
+            assert app.device.selected_log == []
+            assert "select a Performance instead" in panel_text(app, "#status")
+
     async def test_nothing_is_selected_when_the_pane_is_empty(self, app):
         async with app.run_test() as pilot:
             await pilot.pause()
