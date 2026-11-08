@@ -82,6 +82,7 @@ __all__ = [
     "single_patch_request",
     "single_patch_dump",
     "patch_write_command",
+    "multi_select",
     "REQUEST_FOR_DUMP",
     "DATA_OFFSET",
 ]
@@ -148,6 +149,8 @@ class Function:
     MULTI_SETUP_DUMP = 0x55  #: the three multi messages always travel
     MULTI_SETUP_EXPANDED = 0x5E  #: together, in this order
     MULTISET_DUMP = 0x62  #: ...and this one carries all 32 Multisets
+    MULTI_SELECT = 0x5B  #: make a Multiset current (0-15)
+    MULTI_SELECT_SR = 0x63  #: make a Multiset current (16-31, SR expanded)
 
     # Status replies, as Korg's Reference Guide appendix 4 lists them.
     WRITE_COMPLETED = 0x21
@@ -173,6 +176,8 @@ class Function:
         0x55: "multi mode setup dump",
         0x5E: "multi mode setup expanded dump",
         0x62: "multi mode setup SR expanded dump",
+        0x5B: "multi mode setup select",
+        0x63: "multi mode setup select SR expanded",
         0x06: "multi mode setup dump request",
         0x40: "single patch dump",
         0x11: "patch write command",
@@ -520,3 +525,18 @@ def patch_write_command(bank: int, number: int, channel: int = 0) -> bytes:
     The documented form is bank then number.
     """
     return frame(Function.PATCH_WRITE, [bank, number], channel=channel)
+
+
+def multi_select(number: int, *, channel: int = 0) -> bytes:
+    """Make a Multiset the current one. **Changes the sound in Multi mode.**
+
+    Documented in Reference Guide Appendix 4, sections 2.1.20 and 2.1.21:
+    ``0x5B`` for Multisets 0-15, ``0x63`` for 16-31 (SR Expanded), the
+    number sent as the byte the manual shows (16 -> ``0x10``). No memory
+    write: the unit changes its current multi setup on reception.
+    """
+    value = int(number)
+    if not 0 <= value <= 31:
+        raise ProtocolError(f"Multiset {value} is outside 0-31")
+    function = Function.MULTI_SELECT if value <= 15 else Function.MULTI_SELECT_SR
+    return frame(function, [value], channel=channel)

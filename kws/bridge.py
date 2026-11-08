@@ -885,6 +885,25 @@ class WavestationBridge:
         self._out.send_message([0xC0 | target, program])
         time.sleep(SEND_GAP)
 
+    def select_multi(self, number: int, *, channel: Optional[int] = None) -> None:
+        """Make a Multiset the current one. **Changes the sound in Multi mode.**
+
+        Reference Guide Appendix 4, sections 2.1.20 and 2.1.21: ``0x5B``
+        for Multisets 0-15, ``0x63`` for 16-31 (SR Expanded), the number
+        sent as the byte the manual shows (16 -> ``0x10``). The unit
+        changes its current multi setup on reception; there is no memory
+        write and no read-back, so nothing is verified.
+
+        The unit must be in Multi mode for the Multiset to be the active
+        one -- kwsed cannot switch the PERF/MULTI mode, so a Multiset
+        selected while the unit is in Performance mode is selected but not
+        heard.
+        """
+        target = self.channel if channel is None else channel
+        if not 0 <= target <= 15:
+            raise ValueError(f"channel {target} is outside 0-15")
+        self._send(m.multi_select(number, channel=target))
+
     # --- writing, which is fenced ------------------------------------------
 
     #: Only these banks accept a write. Confirmed twice: kwsed's own bank

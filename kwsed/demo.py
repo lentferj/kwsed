@@ -92,6 +92,8 @@ class DemoDevice:
         self.latency = latency
         self.selected: Optional[banks.Slot] = None
         self.selected_log: List[banks.Slot] = []
+        self.selected_multi: Optional[int] = None
+        self.selected_multi_log: List[int] = []
         self.received: List[bytes] = []
         self.identify_calls: int = 0
         self._closed = False
@@ -193,3 +195,8 @@ class DemoDevice:
         self._tick()
         self.selected = slot
         self.selected_log.append(slot)
+
+    def select_multi(self, number: int, *, channel: Optional[int] = None) -> None:
+        self._tick()
+        self.selected_multi = number
+        self.selected_multi_log.append(number)
