@@ -413,8 +413,11 @@ class TestSearchAndHelp:
 
         for needle in (
             "HCard",
-            "capture the bank",
-            "label a captured bank",
+            "Card modes",
+            "card_mode",
+            "show_card_defaults",
+            "capture what is in the slot",
+            "label the captured bank or card",
             "card sweep",
             "Multiset",
             "Bank Select is established",
@@ -1707,3 +1710,90 @@ class TestPhysicalCardCapture:
             await settle(pilot)
             app.action_read_names()
             assert "press C" in panel_text(app, "#status")
+
+
+class TestCardModesFollowUps:
+    def _app(self, tmp_path, *, mode, cards=None, favourites=False):
+        from kws import physical
+
+        pp = str(tmp_path / "physical-cards.json")
+        for card in cards or []:
+            physical.save(card, pp)
+        if cards:
+            physical.set_active(cards[0].id, pp)
+        store = Favorites(str(tmp_path / "fav.db")) if favourites else None
+        app = KwsedApp(
+            DemoDevice(),
+            catalog=cat.Catalog(),
+            favorites=store,
+            card_mode=mode,
+            physical_path=pp,
+        )
+        return app, pp
+
+    def _card(self, cid, label, digest):
+        from kws import physical
+
+        return physical.PhysicalCard(
+            id=cid,
+            label=label,
+            digest=digest,
+            captured_at="2026-11-09T00:00:00+00:00",
+            performances={0: "Opening", 1: "Second"},
+            patches={0: "Bell"},
+            verified=True,
+        )
+
+    async def test_show_card_defaults_fits_the_pane(self):
+        app = KwsedApp(
+            DemoDevice(),
+            catalog=cat.Catalog(),
+            card_mode="hcard",
+            show_card_defaults=True,
+        )
+        async with app.run_test(size=(110, 30)) as pilot:
+            await pilot.pause()
+            table = app.query_one("#bank-table", DataTable)
+            row = " ".join(str(cell) for cell in table.get_row("card:01:performance"))
+            assert "Korg WPC-00PI RAM1" in row
+            assert "not captured" not in row
+            assert table.virtual_size.width <= table.size.width
+
+    async def test_the_startup_probe_only_runs_in_hcard_mode(self, tmp_path):
+        app, _ = self._app(
+            tmp_path, mode="cards", cards=[self._card("c1", "One", "d1")]
+        )
+        calls = []
+        app.device.read_bank = lambda *a, **k: calls.append(a)
+        app._auto_capture_card()
+        assert calls == []
+
+    async def test_the_favourites_view_filters_a_physical_cards_slots(self, tmp_path):
+        from kws import physical
+
+        app, _ = self._app(
+            tmp_path,
+            mode="cards",
+            cards=[self._card("c1", "Orchestra", "d1")],
+            favourites=True,
+        )
+        assert app.favorites is not None
+        app.favorites.toggle(
+            favorite_bank_id(physical.scope_id("c1"), "performance"),
+            0,
+            name="Opening",
+        )
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            table = app.query_one("#slot-table")
+            app._fill_physical("c1", banks.Kind.PERFORMANCE)
+            app.view_mode = VIEW_BANK_FAVOURITES
+            app._refill_keeping_place()
+            await settle(pilot)
+            assert table.row_count == 1
+            assert "Opening" in " ".join(str(cell) for cell in table.get_row_at(0))
+            app.view_mode = VIEW_ALL_FAVOURITES
+            app._refill_keeping_place()
+            await settle(pilot)
+            assert table.row_count >= 1
+            assert "Opening" in " ".join(str(cell) for cell in table.get_row_at(0))

@@ -1311,11 +1311,13 @@ class KwsedApp(App[None]):
         inactive = self._active_card is not None and not active
         prefix = "• " if active else ""
         if captured is None:
-            # The manual's names run to 39 characters, and the bank column
-            # is 64 wide, so clip well above the title limit: "Performance
-            # 2" and "Performance 3" must not both collapse to one string.
+            # The manual's names run to 40 characters, but the bank column
+            # is 64 wide; the normal title clip keeps the row inside the
+            # pane. "Performance 2" and "Performance 3" still separate
+            # (their digits differ before the cut), and the detail pane
+            # shows the full name.
             body = (
-                f"{_clip(entry.name, 40)}{pcm}"
+                _clip(f"{entry.name}{pcm}", 27)
                 if self._show_card_defaults
                 else f"not captured{pcm}"
             )
@@ -1885,31 +1887,39 @@ class KwsedApp(App[None]):
                 self._current = []
             else:
                 card = self._physical[card_id]
-                if kind == banks.Kind.PERFORMANCE:
-                    names = card.performances
-                else:
-                    names = card.patches
-                # Actually kind may be "performance"/"patch" strings? Check Kind values.
-                if kind not in (banks.Kind.PERFORMANCE, banks.Kind.PATCH):
-                    # normalize
-                    pass
                 scoped = _physical.scope_id(card_id)
-                marked = self._favorite_keys(scoped, kind)
-                count = banks.count_for(kind)
-                self._current = banks.slots("CARD", kind) if card_id else []
-                # banks.slots needs bank number; CARD bank
-                try:
-                    self._current = banks.slots(banks.bank("CARD").number, kind)
-                except Exception:
-                    self._current = []
-                for n in range(count):
-                    name = names.get(n, "")
+                card_number = banks.bank("CARD").number
+                # The two favourites views and the rating filter apply here
+                # as they do to a bank row; the keys are the card's scoped
+                # ones, never the shared CARD key.
+                if self.view_mode == VIEW_ALL_FAVOURITES:
+                    slots = self._all_favourites()
+                else:
+                    slots = banks.slots(card_number, kind)
+                    if self.view_mode == VIEW_BANK_FAVOURITES:
+                        marked = self._favorite_keys(scoped, kind)
+                        slots = [slot for slot in slots if slot.number in marked]
+                    slots = self._by_rating(slots)
+                self._current = slots
+                for item in slots:
+                    names = (
+                        card.performances
+                        if item.kind == banks.Kind.PERFORMANCE
+                        else card.patches
+                    )
+                    name = names.get(item.number, "")
                     shown = f"[b]{name}[/b]" if name else "[dim](unnamed)[/dim]"
+                    marked = self._favorite_keys(scoped, item.kind)
+                    label = (
+                        f"{item.kind[:4]} {item.number:02d}"
+                        if self.view_mode == VIEW_ALL_FAVOURITES
+                        else f"{item.number:02d}"
+                    )
                     table.add_row(
-                        "[b]♥[/b]" if n in marked else "",
-                        f"{n:02d}",
+                        "[b]♥[/b]" if item.number in marked else "",
+                        label,
                         shown,
-                        key=f"physical:{card_id}:{kind}:{n:03d}",
+                        key=f"physical:{card_id}:{item.kind}:{item.number:03d}",
                     )
         finally:
             self._filling = False
@@ -1951,11 +1961,12 @@ class KwsedApp(App[None]):
                     )
                 return
             item = self._current[row]
-            name = ""
-            if self._current_physical_kind == banks.Kind.PERFORMANCE:
-                name = card.performances.get(item.number, "")
-            else:
-                name = card.patches.get(item.number, "")
+            names = (
+                card.performances
+                if item.kind == banks.Kind.PERFORMANCE
+                else card.patches
+            )
+            name = names.get(item.number, "")
             shown = f"[b]{name}[/b]" if name else "[dim](unnamed)[/dim]"
             with contextlib.suppress(NoMatches):
                 self.query_one("#detail", Static).update(
@@ -2229,6 +2240,11 @@ class KwsedApp(App[None]):
         front of it. Silent and read-only; skipped while the scan offer is
         up or the browser is busy, and the user can always press C.
         """
+        if self._card_mode != "hcard":
+            # The launch probe confirms the active HCard bank. In cards mode
+            # identifying a card is an explicit C: the content may need a
+            # label or a picker, which must not appear at launch.
+            return
         if self._cards_path is None or self._busy or self._scanning:
             return
         if not self._archive:
@@ -3243,32 +3259,41 @@ performances, once for its 35 patches. Right: that bank-and-kind's slots.
 
   RAM 1-3   writable; somebody's own work lives here.
   ROM 4-11  read-only.
-  Card      the HCard's forty banks, not one bank -- see below.
+  Card      the card slot -- what it shows depends on `card_mode`.
 
 A performance combines up to eight parts, each pointing at a patch. A
 patch is a sound: four oscillators playing waves or wave sequences. They
 are different objects; performance 7 is not patch 7.
 
-**The Card is an HCard.**  One card slot holds forty banks, switched
-physically on the card itself. kwsed cannot switch them and the synth
-cannot report which one is in front of it. Every bank is listed; the one
-marked `•` is the last confirmed active bank, and the others are greyed.
+**Card modes.**  `card_mode` in config.toml (default `cards`):
 
-  C   capture the bank currently on the card: read it, work out which of
-      the forty it is from its content, and file its names (SILENT)
-  X   card sweep: walk 00-39, asking you to select each bank on the
-      card between reads (SILENT)
-  L   label a captured bank. This is kwsed's own label, not the card's
-      name: the card name is unreadable over MIDI, and writing it is not
-      implemented yet (TODO 23)
-  ⏎   on a card row, selects the slot from whichever bank is active on
-      the card. kwsed refuses when that is not the row you are on, or
-      when no bank has been confirmed yet -- select the bank on the
-      HCard and press C once.
+  `none`    no Card rows; the card actions are off.
+  `cards`   one or several ordinary Program Cards. `C` reads the inserted
+            card, identifies it by its content, and files it in the
+            physical archive; new content opens a picker (an existing
+            card, or "New card"). `L` labels the selected card. Each card
+            keeps its own names and favourites. Enter auditions only the
+            card that is in the slot; other archive rows are read-only
+            until that card is inserted.
+  `hcard`   the HCard's forty banks, switched physically on the card.
+            Every bank is listed; the one marked `•` is the last active
+            bank. `C` captures the bank on the card, `X` sweeps 00-39,
+            `L` labels. `show_card_defaults = true` shows the manual's
+            pre-set names for banks not captured yet.
 
-A first capture of a bank is filed on your say-so (unverified); later
-captures are confirmed by a content digest, and a capture that is a
-different bank than the row says so and asks you to switch the HCard.
+  C   capture what is in the slot: the HCard bank (`hcard`) or the
+      inserted card (`cards`). SILENT; files its names.
+  X   card sweep (`hcard` only): walk 00-39, asking you to select each
+      bank on the card between reads.
+  L   label the captured bank or card. This is kwsed's own label, not the
+      card's name: the card name is unreadable over MIDI (TODO 23).
+  ⏎   on a Card row, auditions only the bank/card that is in the slot;
+      kwsed refuses a row that is not the active one.
+
+A card's own name is not readable over MIDI. A first capture is filed
+unverified; later captures are confirmed by a content digest, and an
+HCard capture that is not the row you selected says so and asks you to
+switch the HCard.
 
   ⏎   select the Performance on the unit -- it will sound. A patch is
       never selected: the SR has no patch mode, so Enter refuses a patch
