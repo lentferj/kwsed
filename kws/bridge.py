@@ -741,19 +741,12 @@ class WavestationBridge:
         are not a bank.
         """
         raw = bytes(data)
-        if (
+        looks_like_frame = (
             len(raw) > 5
             and raw[0] == 0xF0
             and raw[-1] == 0xF7
             and raw[4] == m.Function.MULTISET_DUMP
-        ):
-            sent = raw
-        else:
-            sent = m.frame(
-                m.Function.MULTISET_DUMP,
-                [0, 1] + list(m.to_nibbles(raw)),
-                channel=self.channel,
-            )
+        )
 
         try:
             before = self.read_multi(timeout=timeout)
@@ -772,6 +765,37 @@ class WavestationBridge:
             source="kwsed",
             blocks={"dump": before},
         )
+
+        # The 0x62 structure is longer than the part kwsed models: the
+        # unit's own dump decodes to 3777 bytes, of which the first 3264
+        # are the Multisets and their names. The rest is preserved from the
+        # pre-write read rather than zeroed.
+        edited = raw
+        merged = raw
+        if looks_like_frame:
+            sent = raw
+        else:
+            packet = m.parse(before)
+            if packet is None or len(packet.payload) < 2:
+                raise DeviceError(
+                    "the Multi Mode Setup read back before writing was not a "
+                    "Wavestation message, so nothing was sent. kwsed does not "
+                    "overwrite a dump it could not read."
+                )
+            header = list(packet.payload[:2])
+            full = packet.data()
+            if len(full) > len(edited):
+                merged = edited + full[len(edited) :]
+            nibbles = list(m.to_nibbles(merged))
+            # Korg's checksum covers the two header bytes and the nibble
+            # data: the unit's own dump confirms it (header 00 01 makes the
+            # header-inclusive sum differ from the nibbles-only one by one).
+            check = m.checksum([*header, *nibbles])
+            sent = m.frame(
+                m.Function.MULTISET_DUMP,
+                [*header, *nibbles, check],
+                channel=self.channel,
+            )
 
         self._drain()
         self._send(sent)
@@ -793,9 +817,29 @@ class WavestationBridge:
                 f"read back to check it ({exc}). Whether it took is unknown."
             )
             return result
-        result["verified"] = bytes(after) == bytes(sent)
+        if looks_like_frame:
+            result["verified"] = bytes(after) == bytes(sent)
+            if not result["verified"]:
+                result["mismatch"] = _first_difference(bytes(sent), bytes(after))
+            return result
+        after_packet = m.parse(after)
+        if after_packet is None:
+            result["verified"] = False
+            result["mismatch"] = "the read-back was not a Wavestation message"
+            return result
+        got = after_packet.data()
+        # Compare the part kwsed models (the Multisets and names). The
+        # unmodelled tail is preserved from the pre-write read; if the unit
+        # returns a different one, say so without failing the write for a
+        # part this program does not claim to know.
+        result["verified"] = got[: len(edited)] == edited
         if not result["verified"]:
-            result["mismatch"] = _first_difference(bytes(sent), bytes(after))
+            result["mismatch"] = _first_difference(edited, got[: len(edited)])
+        elif got != merged:
+            result["mismatch"] = (
+                "the multisets were written; the unmodelled tail of the "
+                "Multi Mode Setup differs"
+            )
         return result
 
     def read_bank_names(

@@ -90,8 +90,16 @@ def _multiset_dump():
         name = f"Invented{number}".encode()[: multi_mod.NAME_SIZE]
         at = multi_mod.NAME_BASE + number * multi_mod.NAME_SIZE
         data[at : at + len(name)] = name
+    # Like the real dump: a 513-byte unmodelled tail and the checksum over
+    # the header and the nibbles.
+    body = bytes(data) + b"\x69" * 512 + b"\x00"
+    header = [0, 1]
+    nibbles = list(m.to_nibbles(body))
     return bytes(
-        m.frame(m.Function.MULTISET_DUMP, [0, 1] + list(m.to_nibbles(bytes(data))))
+        m.frame(
+            m.Function.MULTISET_DUMP,
+            [*header, *nibbles, m.checksum([*header, *nibbles])],
+        )
     )
 
 
@@ -125,6 +133,9 @@ class Unit:
         #: The decoded System Setup payload the double answers with. Long
         #: enough for the card-name field at the constants' current offset.
         self.system_setup = bytearray(64)
+        #: The 0x62 message the double answers a multi request with, and
+        #: replaces when a multi write is sent (so the read-back sees it).
+        self.multi_message = _multiset_dump()
         self.bridge = WavestationBridge(self.midi_in, self.midi_out, channel=0)
         # Replacing a method on the instance is the point of this double.
         self.midi_out.send_message = self._sent  # type: ignore[method-assign]
@@ -213,7 +224,11 @@ class Unit:
     def _multi_request(self, data):
         if self.mode == "read_error":
             return m.frame(m.Function.WRITE_ERROR, channel=0)
-        return _multiset_dump()
+        return self.multi_message
+
+    def _multi_dump_write(self, data):
+        """A multi write is stored, so the read-back sees the new setup."""
+        self.multi_message = bytes(data)
 
     def _system_setup_request(self, data):
         if self.mode == "read_error":
@@ -232,6 +247,7 @@ class Unit:
         m.Function.SINGLE_PATCH_DUMP: _patch_dump,
         m.Function.PATCH_WRITE: _patch_write,
         m.Function.MULTI_REQUEST: _multi_request,
+        m.Function.MULTISET_DUMP: _multi_dump_write,
         m.Function.SYSTEM_SETUP_REQUEST: _system_setup_request,
     }
 
@@ -572,3 +588,45 @@ class TestReadBankTimeout:
         with pytest.raises(TimeoutError) as caught:
             unit.bridge.read_bank("RAM1", banks.Kind.PATCH, timeout=0.05)
         assert "Program Card" not in str(caught.value)
+
+
+class TestWriteMulti:
+    def test_the_frame_carries_the_checksum_over_header_and_nibbles(self, tmp_path):
+        unit = Unit()
+        before = m.parse(unit.multi_message)
+        assert before is not None
+        data = before.data()
+        sets = multi_mod.parse(data)
+        encoded = multi_mod.encode(sets)
+        result = unit.bridge.write_multi(encoded, backup_dir=str(tmp_path))
+        assert result["verified"] is True
+        sent = [
+            message
+            for message in unit.midi_out.sent
+            if len(message) > 5 and message[4] == m.Function.MULTISET_DUMP
+        ][-1]
+        payload = sent[5:-1]
+        header = list(payload[:2])
+        nibbles = list(payload[2:-1])
+        assert payload[-1] == m.checksum(header + nibbles)
+        # The unit's header is 00 01, so the header-inclusive sum differs
+        # from the nibbles-only one: a checksum that omitted the header
+        # would be rejected by the unit with CHECKSUM ERROR.
+        assert payload[-1] != m.checksum(nibbles)
+        after = m.parse(sent)
+        assert after is not None
+        decoded = after.data()
+        assert decoded[: len(encoded)] == encoded
+        assert decoded[len(encoded) :] == data[len(encoded) :]
+
+    def test_a_failed_pre_write_read_sends_no_dump(self, tmp_path):
+        unit = Unit(answer=False)
+        with pytest.raises(DeviceError):
+            unit.bridge.write_multi(
+                b"\x00" * 3264, backup_dir=str(tmp_path), timeout=0.05
+            )
+        assert not [
+            message
+            for message in unit.midi_out.sent
+            if len(message) > 5 and message[4] == m.Function.MULTISET_DUMP
+        ]

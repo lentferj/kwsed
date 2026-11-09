@@ -223,10 +223,17 @@ class DemoDevice:
             name = f"Demo Set {number:02d}".encode()
             at = multi_mod.NAME_BASE + number * multi_mod.NAME_SIZE
             data[at : at + len(name)] = name
+        # The real 0x62 structure is 3777 bytes: the 3264 modelled above,
+        # then a 513-byte unmodelled block. The checksum covers the two
+        # header bytes and the nibbles (the unit's own dump proves it).
+        body = bytes(data) + b"\x69" * 512 + b"\x00"
+        header = [0, 1]
+        nibbles = list(m.to_nibbles(body))
+        check = m.checksum([*header, *nibbles])
         return bytes(
             m.frame(
                 m.Function.MULTISET_DUMP,
-                [0, 1] + list(m.to_nibbles(bytes(data))),
+                [*header, *nibbles, check],
                 channel=self.channel,
             )
         )
