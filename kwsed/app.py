@@ -200,7 +200,7 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
         Binding("q", "close", "Cancel"),
         Binding("a", "arm", "Arm", show=False),
         Binding("w", "fire", "Write", show=False),
-        Binding("space", "toggle", "On/off", show=False),
+        Binding("space", "toggle", "Used/unused", show=False),
         Binding("plus", "nudge(1)", "Nudge +", show=False),
         Binding("minus", "nudge(-1)", "Nudge -", show=False),
         Binding("b", "bank", "Bank", show=False),
@@ -277,7 +277,7 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
             table.add_column("perf", key="perf")
             table.add_column("name", key="name")
             table.add_column("level", key="level")
-            table.add_column("on", key="on")
+            table.add_column("used", key="on")
             self._table = table
             yield table
             yield Static("", id="multi-edit-state")
@@ -321,12 +321,12 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
         if getattr(part, "used", False):
             perf = f"{_bank_label(part.bank)} {part.performance:02d}"
             name = self._name_for_part(part)
-            on = "on"
+            used = "used"
         else:
             perf = "--"
             name = ""
-            on = "--"
-        return (f"{i + 1:02d}", perf, name, str(part.level), on)
+            used = "--"
+        return (f"{i + 1:02d}", perf, name, str(part.level), used)
 
     def _channel_index(self) -> int:
         table = self._table
@@ -1609,7 +1609,7 @@ class KwsedApp(App[None]):
                 ("perf", "perf"),
                 ("name", "name"),
                 ("level", "level"),
-                ("on", "on"),
+                ("used", "on"),
             ):
                 table.add_column(label, key=key)
         self._slot_mode = mode
@@ -1665,17 +1665,17 @@ class KwsedApp(App[None]):
                         )
                     except Exception:
                         name = ""
-                    on = "on" if part.flag else "--"
+                    used = "used"
                 else:
                     perf = "--"
                     name = ""
-                    on = "--"
+                    used = "--"
                 table.add_row(
                     f"{part.channel:02d}",
                     perf,
                     name,
                     str(part.level),
-                    on,
+                    used,
                     key=f"multi:{number:02d}:{part.channel:02d}",
                 )
         else:
@@ -1727,7 +1727,7 @@ class KwsedApp(App[None]):
                     f"[b]Multi {number:02d} {getattr(ms, 'name', '') or ''}[/b]  "
                     f"ch {part.channel}  {perf}  {name}\n"
                     f"[dim]level {part.level} · "
-                    f"{'on' if part.flag else 'off'}[/dim]"
+                    f"{'used' if part.used else 'unused'}[/dim]"
                 )
             return
         if not self._current or row >= len(self._current):

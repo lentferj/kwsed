@@ -1039,6 +1039,58 @@ class TestTheMultisetBrowser:
             row = " ".join(str(cell) for cell in table.get_row("multi:03"))
             assert "Demo Set 03" in row
 
+    async def test_a_used_channel_says_used_not_the_flag_wording(self, app):
+        """The demo dump leaves every flag byte 0 while every part is
+        used: the channel must read from Part.used, not from the
+        unidentified flag (a flag-based on/off showed every demo
+        channel as -- or off).
+        """
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.action_multi()
+            await settle(pilot, 30)
+            assert app._current_multi is not None
+            ms = app._multisets[3]
+            assert all(part.used for part in ms.parts)
+            assert all(part.flag == 0 for part in ms.parts)
+            app._fill_multiset(3)
+            await settle(pilot)
+            table = app.query_one("#slot-table", DataTable)
+            cells = [str(cell) for cell in table.get_row("multi:03:01")]
+            assert cells[-1] == "used"
+            app._detail(0)
+            detail = panel_text(app, "#detail")
+            assert "· used" in detail
+            assert "off" not in detail
+            assert "· on" not in detail
+
+    async def test_an_unused_channel_says_unused_and_a_dash(self, app):
+        """A part with no assignment (performance 50 is out of range)
+        renders as -- in the column and unused in the detail.
+        """
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.action_multi()
+            await settle(pilot, 30)
+            assert app._current_multi is not None
+            from dataclasses import replace as _replace
+
+            ms = app._multisets[3]
+            parts = list(ms.parts)
+            parts[0] = _replace(parts[0], performance=50)
+            app._multisets[3] = _replace(ms, parts=tuple(parts))
+            app._fill_multiset(3)
+            await settle(pilot)
+            table = app.query_one("#slot-table", DataTable)
+            cells = [str(cell) for cell in table.get_row("multi:03:01")]
+            assert cells[1] == "--"
+            assert cells[-1] == "--"
+            app._detail(0)
+            detail = panel_text(app, "#detail")
+            assert "· unused" in detail
+            assert "· used" not in detail
+            assert "off" not in detail
+
     async def test_enter_on_a_multiset_row_selects_it(self, app):
         async with app.run_test() as pilot:
             await pilot.pause()
