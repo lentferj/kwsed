@@ -47,24 +47,33 @@ from vinsynlib.config import (
 
 DEFAULT_PATH = default_config_path("kwsed")
 
+CARD_MODES = ("none", "cards", "hcard")
+DEFAULT_CARD_MODE = "cards"
+
 __all__ = [
+    "CARD_MODES",
+    "DEFAULT_CARD_MODE",
     "DEFAULT_PATH",
     "bind",
     "config_dir",
     "config_help",
+    "load_card_mode",
     "load_channel",
     "load_device_id",
     "load_last_port",
     "load_last_recv_port",
     "load_port_pair",
     "load_scan_offer_dismissed",
+    "load_show_card_defaults",
     "migrate_legacy_config",
+    "save_card_mode",
     "save_channel",
     "save_device_id",
     "save_last_port",
     "save_last_recv_port",
     "save_ports",
     "save_scan_offer_dismissed",
+    "save_show_card_defaults",
 ]
 
 _settings = bind("kwsed", DEFAULT_PATH)
@@ -114,3 +123,31 @@ def load_scan_offer_dismissed(path: str | None = None) -> bool:
 def save_scan_offer_dismissed(value: bool, path: str | None = None) -> None:
     """Remember the scan offer's "don't ask again" answer."""
     _settings.save_ui_state("scan.offer_dismissed", value, path)
+
+
+def load_card_mode(path: str | None = None) -> str:
+    """The configured card mode, or the default when missing/invalid."""
+    data = _settings.read(path or DEFAULT_PATH)[0]
+    value = data.get("card_mode")
+    if isinstance(value, str) and value in CARD_MODES:
+        return value
+    return DEFAULT_CARD_MODE
+
+
+def save_card_mode(mode: str, path: str | None = None) -> None:
+    """Validate and store the card mode."""
+    if mode not in CARD_MODES:
+        raise ValueError(f"invalid card mode {mode!r}; expected one of {CARD_MODES!r}")
+    _settings.update(path or DEFAULT_PATH, card_mode=mode)
+
+
+def load_show_card_defaults(path: str | None = None) -> bool:
+    """Whether hcard mode shows the manual's pre-set bank names."""
+    data = _settings.read(path or DEFAULT_PATH)[0]
+    value = data.get("show_card_defaults")
+    return value is True
+
+
+def save_show_card_defaults(value: object, path: str | None = None) -> None:
+    """Coerce and store the show_card_defaults flag."""
+    _settings.update(path or DEFAULT_PATH, show_card_defaults=bool(value))
