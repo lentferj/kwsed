@@ -1277,3 +1277,107 @@ class TestTheStartupCardProbeWithoutACard:
             status = panel_text(app, "#status")
             assert "refused" in status
             assert "no dump came back" in status
+
+
+class TestCardModes:
+    """The Card UI is gated by card_mode (docs/CARDS.md)."""
+
+    def _app(self, tmp_path, mode, cards=None, with_favourites=False):
+        from kws import physical
+
+        pp = str(tmp_path / "physical-cards.json")
+        for card in cards or []:
+            physical.save(card, pp)
+        store = None
+        if with_favourites:
+            store = Favorites(str(tmp_path / "fav.db"))
+        app = KwsedApp(
+            DemoDevice(),
+            catalog=cat.Catalog(),
+            favorites=store,
+            card_mode=mode,
+            physical_path=pp,
+        )
+        return app, pp
+
+    def _card(self, cid, label, names):
+        from kws import physical
+
+        return physical.PhysicalCard(
+            id=cid,
+            label=label,
+            digest=f"digest-{cid}",
+            captured_at="2026-11-09T00:00:00+00:00",
+            performances=names,
+            patches={0: "Bell"},
+            verified=True,
+        )
+
+    async def test_none_mode_has_no_card_rows(self, tmp_path):
+        app, _ = self._app(tmp_path, "none")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert len(app._pairs) == 22 + 32
+            assert all(item is None for item in app._row_physical)
+            app.action_capture_card()
+            assert "card support is off" in panel_text(app, "#status")
+
+    async def test_cards_mode_placeholder_when_empty(self, tmp_path):
+        app, _ = self._app(tmp_path, "cards")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert len(app._pairs) == 22 + 2 + 32
+            table = app.query_one("#bank-table", DataTable)
+            row = " ".join(
+                str(cell) for cell in table.get_row("physical:none:performance")
+            )
+            assert "insert a card" in row
+            table.move_cursor(row=app._row_physical.index(""))
+            await settle(pilot)
+            slots = [str(cell) for cell in app.query_one("#slot-table").get_row_at(0)]
+            assert "insert a card and press C" in " ".join(slots)
+
+    async def test_cards_mode_lists_archived_cards_and_scopes_favourites(
+        self, tmp_path
+    ):
+        from kws import physical
+
+        app, _ = self._app(
+            tmp_path,
+            "cards",
+            cards=[
+                self._card("c1", "Orchestra", {0: "Opening"}),
+                self._card("c2", "Pads", {0: "Air"}),
+            ],
+            with_favourites=True,
+        )
+        assert len(app._pairs) == 22 + 4 + 32
+        assert app.favorites is not None
+        app.favorites.toggle(
+            favorite_bank_id(physical.scope_id("c1"), "performance"),
+            0,
+            name="Opening",
+        )
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            table = app.query_one("#bank-table", DataTable)
+            c1 = [str(cell) for cell in table.get_row("physical:c1:performance")]
+            c2 = [str(cell) for cell in table.get_row("physical:c2:performance")]
+            assert "Orchestra" in " ".join(c1) and c1[-1] == "1"
+            assert "Pads" in " ".join(c2) and c2[-1] == ""
+            # Selecting c1 shows its names and its favourite.
+            table.move_cursor(row=app._row_physical.index("c1"))
+            await settle(pilot)
+            first = " ".join(
+                str(cell) for cell in app.query_one("#slot-table").get_row_at(0)
+            )
+            assert "Opening" in first and "♥" in first
+            assert "c1" in app._current_physical
+
+    async def test_hcard_mode_still_expands_to_forty(self, tmp_path):
+        app, _ = self._app(tmp_path, "hcard")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert len(app._pairs) == 22 + 80 + 32
+            table = app.query_one("#bank-table", DataTable)
+            assert table.get_row("card:07:performance")
