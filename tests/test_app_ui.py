@@ -1227,3 +1227,53 @@ class TestTheMultisetEditor:
             await pilot.press("escape")
             await settle(pilot)
             assert app._multisets[3].parts[0].level == part.level
+
+
+class TestTheStartupCardProbeWithoutACard:
+    """A launch probe that finds no card is normal, not a cable fault."""
+
+    async def test_it_skips_when_nothing_was_captured(self, tmp_path):
+        app = TestTheCardSubList()._app(tmp_path, seeded=False)
+        calls = []
+
+        def read(*args, **kwargs):
+            calls.append(args)
+            raise TimeoutError("no dump came back for Card.")
+
+        app.device.read_bank = read
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._auto_capture_card()
+            await settle(pilot, 5)
+            assert calls == []
+            assert app._active_card is None
+
+    async def test_it_says_the_slot_may_be_empty(self, tmp_path):
+        app = TestTheCardSubList()._app(tmp_path)  # archive has bank 7
+
+        def read(*args, **kwargs):
+            raise TimeoutError("no dump came back for Card. Program Card ...")
+
+        app.device.read_bank = read
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._auto_capture_card()
+            await settle(pilot, 30)
+            status = panel_text(app, "#status")
+            assert "card slot may be empty" in status
+            assert "refused" not in status
+
+    async def test_a_manual_capture_still_refuses(self, tmp_path):
+        app = TestTheCardSubList()._app(tmp_path)
+
+        def read(*args, **kwargs):
+            raise TimeoutError("no dump came back for Card. Program Card ...")
+
+        app.device.read_bank = read
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.action_capture_card()
+            await settle(pilot, 30)
+            status = panel_text(app, "#status")
+            assert "refused" in status
+            assert "no dump came back" in status

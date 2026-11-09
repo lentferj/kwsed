@@ -1937,6 +1937,11 @@ class KwsedApp(App[None]):
         """
         if self._cards_path is None or self._busy or self._scanning:
             return
+        if not self._archive:
+            # Nothing captured yet, so there is no active bank to confirm.
+            # Probing anyway would make a missing card cost the full dump
+            # timeout at every launch; C is the explicit first capture.
+            return
         if isinstance(self.screen, _scan.ScanOfferScreen):
             return
         self.action_capture_card(startup=True)
@@ -2095,9 +2100,19 @@ class KwsedApp(App[None]):
             if not sweep:
                 self._exchange.release()
         if failure is not None:
-            self.call_from_thread(
-                self.notify_status, f"capture: {failure}", refused=True
-            )
+            if startup and isinstance(failure, TimeoutError):
+                # A launch probe that finds no card is normal, not a fault:
+                # the Card bank only answers when a card is in the slot.
+                self.call_from_thread(
+                    self.notify_status,
+                    "no card answered at startup — the card slot may be "
+                    "empty, or the HCard is not seated. Insert it and press "
+                    "C to capture the active bank.",
+                )
+            else:
+                self.call_from_thread(
+                    self.notify_status, f"capture: {failure}", refused=True
+                )
             if next_index is not None:
                 self.call_from_thread(self._card_sweep_next, next_index, filed)
             return

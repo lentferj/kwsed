@@ -554,3 +554,21 @@ class TestReadCardName:
         data = unit.bridge.read_system_setup(timeout=0.1)
         assert data is not None
         assert data[:4] == b"ABCD"
+
+
+class TestReadBankTimeout:
+    """The Card is the one bank that only answers when the card is fitted."""
+
+    def test_the_card_bank_names_the_empty_slot_first(self):
+        unit = Unit(answer=False)
+        with pytest.raises(TimeoutError) as caught:
+            unit.bridge.read_bank("CARD", banks.Kind.PATCH, timeout=0.05)
+        message = str(caught.value)
+        assert "Program Card" in message
+        assert "empty slot" in message
+
+    def test_another_bank_keeps_the_generic_message(self):
+        unit = Unit(answer=False)
+        with pytest.raises(TimeoutError) as caught:
+            unit.bridge.read_bank("RAM1", banks.Kind.PATCH, timeout=0.05)
+        assert "Program Card" not in str(caught.value)

@@ -543,13 +543,24 @@ class WavestationBridge:
             if packet.bank is not None and packet.bank != entry.sysex:
                 continue
             return dumps.parse_bulk(packet)
+        # The Card is the one bank the instrument only answers when the
+        # hardware is there: with no Program Card in the slot the request is
+        # simply not served, which looks identical to every other silence.
+        # Lead with that cause rather than a list of cable faults.
+        card_hint = ""
+        if entry.id == "CARD":
+            card_hint = (
+                " The Card bank only answers when a Program Card is in the "
+                "slot, so an empty slot (or an HCard that is not seated) is "
+                "the first thing to check."
+            )
         raise TimeoutError(
-            f"no dump came back for {entry.label}. The unit did not refuse "
-            f"it either, so this means one of: powered off, wrong port, "
-            f"wrong global channel (kwsed is using {self.channel + 1}), "
-            f"System Exclusive reception disabled, or an interface that "
-            f"cannot carry a message this long -- a patch bank is nearly "
-            f"30 kB."
+            f"no dump came back for {entry.label}.{card_hint} The unit did "
+            f"not refuse it either, so this otherwise means one of: powered "
+            f"off, wrong port, wrong global channel (kwsed is using "
+            f"{self.channel + 1}), System Exclusive reception disabled, or an "
+            f"interface that cannot carry a message this long -- a patch bank "
+            f"is nearly 30 kB."
         )
 
     def read_patch(
