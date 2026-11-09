@@ -2,6 +2,9 @@
 
 Status: design, accepted 2026-11-07 · hardware policy for this work: **read-only**
 
+> Card modes (`none` / `cards` / `hcard`), the physical-card archive and
+> per-card favourites are covered in [CARDS.md](CARDS.md).
+
 ## 1. Goal and differentiator
 
 The Wavestation SR has one card slot. The Hypersynth **HCard-101** multiplexes

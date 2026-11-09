@@ -135,6 +135,30 @@ unit or emulator **before** connecting irreplaceable equipment.
   met with silence.
 - **A CLI** (`kwscli`), most of which needs no unit at all.
 
+### Cards: `card_mode`
+
+The one card slot can be empty, hold one ordinary Program Card, a series of
+them (swapped by hand), or an HCard-101 with forty banks. Choose the model in
+`~/.config/kwsed/config.toml`:
+
+```toml
+card_mode = "cards"          # "none" | "cards" | "hcard"
+show_card_defaults = false   # hcard: show the manual's bank names before capture
+```
+
+- `none` — no Card rows; the card actions are off.
+- `cards` (default) — ordinary Program Cards. `C` reads the inserted card,
+  identifies it by a content digest (the card name is unreadable over MIDI),
+  and keeps its names and favourites per card in `physical-cards.json`. New
+  content opens a picker: an archived card (e.g. after editing it on the unit)
+  or "New card". `L` labels a card; `⏎` auditions only the card in the slot.
+- `hcard` — the HCard-101's forty banks, switched on the card itself. `C`
+  captures the active bank, `X` sweeps 00-39, `L` labels. Favourites are kept
+  per bank, and `show_card_defaults` shows the manual's bank names for banks
+  not captured yet.
+
+See [docs/CARDS.md](docs/CARDS.md).
+
 ### Multi mode, and the word's two meanings
 
 "Multi" names two different objects here, and mixing them up is easy:
