@@ -69,6 +69,7 @@ from textual.widgets import DataTable, Header, Input, Label, Static
 from kws import banks
 from kws.multi import MULTISETS
 from kws import cards as _cards
+from kws import physical as _physical
 from kws import messages as m
 from kws import catalog as cat
 from kws import livenames as _livenames
@@ -880,6 +881,9 @@ class KwsedApp(App[None]):
         cards_path: Optional[str] = None,
         allow_write: bool = False,
         auto_capture: bool = False,
+        card_mode: str = "hcard",
+        show_card_defaults: bool = False,
+        physical_path: Optional[str] = None,
     ) -> None:
         super().__init__()
         self.device = device
@@ -907,6 +911,20 @@ class KwsedApp(App[None]):
         self._archive: Dict[int, _cards.CapturedBank] = (
             _cards.load(cards_path) if cards_path is not None else {}
         )
+        # Card mode handling.
+        from kws import config as _cfg
+
+        if card_mode not in _cfg.CARD_MODES:
+            card_mode = _cfg.DEFAULT_CARD_MODE
+        self._card_mode = card_mode
+        self._show_card_defaults = show_card_defaults
+        self._physical_path = physical_path
+        self._physical = _physical.load(physical_path) if physical_path else {}
+        self._active_physical = (
+            _physical.active(physical_path) if physical_path else None
+        )
+        self._current_physical: Optional[str] = None
+        self._current_physical_kind: Optional[str] = None
         self._lock = threading.RLock()
         #: The left pane lists bank-and-kind pairs, because a Wavestation
         #: bank holds 50 performances *and* 35 patches and they are
@@ -922,24 +940,45 @@ class KwsedApp(App[None]):
             if entry.id != "CARD"
             for kind in (banks.Kind.PERFORMANCE, banks.Kind.PATCH)
         ]
-        _card_pairs = [
-            (banks.bank("CARD").number, kind)
-            for _number in _cards.bank_numbers()
-            for kind in (banks.Kind.PERFORMANCE, banks.Kind.PATCH)
-        ]
+        # Extra (Card) rows depend on the mode.
+        _card_pairs: List[Tuple[int, str]] = []
+        _extra_cards: List[Optional[int]] = []
+        _extra_physical: List[Optional[str]] = []
+        if self._card_mode == "hcard":
+            _card_pairs = [
+                (banks.bank("CARD").number, kind)
+                for _number in _cards.bank_numbers()
+                for kind in (banks.Kind.PERFORMANCE, banks.Kind.PATCH)
+            ]
+            _extra_cards = [
+                number for number in _cards.bank_numbers() for _kind in range(2)
+            ]
+            _extra_physical = [None] * len(_card_pairs)
+        elif self._card_mode == "cards":
+            ids = sorted(self._physical.keys())
+            if not ids:
+                ids = [""]
+            _card_pairs = [
+                (banks.bank("CARD").number, kind)
+                for _id in ids
+                for kind in (banks.Kind.PERFORMANCE, banks.Kind.PATCH)
+            ]
+            _extra_cards = [None] * len(_card_pairs)
+            _extra_physical = [_id for _id in ids for _ in (0, 1)]
+        # mode "none": no extra pairs.
+
         self._pairs: List[Tuple[int, str]] = (
             self._real_pairs + _card_pairs + [(MULTI_BANK, MULTI_KIND)] * MULTISETS
         )
-        #: Which HCard sub-bank each row of ``_pairs`` is, or None for the
-        #: ten physical banks that are not the Card.
         self._row_cards: List[Optional[int]] = (
-            [None] * len(self._real_pairs)
-            + [number for number in _cards.bank_numbers() for _kind in range(2)]
-            + [None] * MULTISETS
+            [None] * len(self._real_pairs) + _extra_cards + [None] * MULTISETS
+        )
+        self._row_physical: List[Optional[str]] = (
+            [None] * len(self._real_pairs) + _extra_physical + [None] * MULTISETS
         )
         #: Which Multiset (0..31) each row of ``_pairs`` is, or None.
         self._row_multis: List[Optional[int]] = [None] * (
-            len(self._real_pairs) + 2 * len(_cards.CARDS)
+            len(self._real_pairs) + len(_card_pairs)
         ) + list(range(MULTISETS))
         self._current_pair = self._pairs[0]
         self._current_card: Optional[int] = None
@@ -1204,9 +1243,15 @@ class KwsedApp(App[None]):
         yield KeyHints(KEY_HINTS)
 
     def _row_key(
-        self, pair: Tuple[int, str], card: Optional[int], multi: Optional[int] = None
+        self,
+        pair: Tuple[int, str],
+        card: Optional[int],
+        multi: Optional[int] = None,
+        physical: Optional[str] = None,
     ) -> str:
         """The stable key of one left-pane row."""
+        if physical is not None:
+            return f"physical:{physical or 'none'}:{pair[1]}"
         if multi is not None:
             return f"multi:{multi:02d}"
         number, kind = pair
@@ -1256,8 +1301,32 @@ class KwsedApp(App[None]):
         return body
 
     def _bank_row(
-        self, pair: Tuple[int, str], card: Optional[int], multi: Optional[int] = None
+        self,
+        pair: Tuple[int, str],
+        card: Optional[int],
+        multi: Optional[int] = None,
+        physical: Optional[str] = None,
     ) -> List[str]:
+        if physical is not None:
+            number, kind = pair
+            if physical in ("", None):
+                label = "[dim]insert a card and press C[/dim]"
+            else:
+                card_obj = self._physical.get(physical)
+                raw_label = card_obj.label if card_obj is not None else ""
+                label = self._clip(raw_label) if raw_label else f"Card {physical}"
+            heart = ""
+            if physical not in ("", None):
+                marked = len(self._favorite_keys(_physical.scope_id(physical), kind))
+                heart = str(marked) if marked else ""
+            return [
+                f"Card {physical or '—'}",
+                kind[:4],
+                str(banks.count_for(kind)),
+                "",
+                label,
+                heart,
+            ]
         if multi is not None:
             multisets = getattr(self, "_multisets", None)
             if multisets is None:
@@ -1303,10 +1372,12 @@ class KwsedApp(App[None]):
             ("♥", "fav"),
         ):
             table.add_column(label, key=key)
-        for pair, card, multi in zip(self._pairs, self._row_cards, self._row_multis):
+        for pair, card, multi, physical in zip(
+            self._pairs, self._row_cards, self._row_multis, self._row_physical
+        ):
             table.add_row(
-                *self._bank_row(pair, card, multi),
-                key=self._row_key(pair, card, multi),
+                *self._bank_row(pair, card, multi, physical),
+                key=self._row_key(pair, card, multi, physical),
             )
 
         self._ensure_slot_columns("slots")
@@ -1565,6 +1636,12 @@ class KwsedApp(App[None]):
         self.push_screen(RatingFilterScreen(current), apply)
 
     def _refill_keeping_place(self) -> None:
+        if self._current_physical is not None:
+            kind = self._current_physical_kind
+            if kind is None:
+                kind = self._current_pair[1]
+            self._fill_physical(self._current_physical, kind)
+            return
         if self._current_multi is not None:
             self._fill_multiset(self._current_multi)
             return
@@ -1616,6 +1693,8 @@ class KwsedApp(App[None]):
 
     def _fill(self, pair: Tuple[int, str], card: Optional[int] = None) -> None:
         self._current_multi = None
+        self._current_physical = None
+        self._current_physical_kind = None
         self._ensure_slot_columns("slots")
         table = self.query_one("#slot-table", DataTable)
         self._current_pair = pair
@@ -1646,6 +1725,8 @@ class KwsedApp(App[None]):
     def _fill_multiset(self, number: int) -> None:
         self._current_multi = number
         self._current_card = None
+        self._current_physical = None
+        self._current_physical_kind = None
         self._current = []
         self._ensure_slot_columns("multi")
         table = self.query_one("#slot-table", DataTable)
@@ -1697,7 +1778,105 @@ class KwsedApp(App[None]):
                 "[dim]m reads the setup and e edits it[/dim]"
             )
 
-    def _detail(self, row: int) -> None:
+    def _fill_physical(self, card_id: str, kind: str) -> None:
+        self._current_physical = card_id
+        self._current_physical_kind = kind
+        self._current_card = None
+        self._current_multi = None
+        self._ensure_slot_columns("slots")
+        table = self.query_one("#slot-table", DataTable)
+        self._filling = True
+        try:
+            table.clear()
+            if card_id in ("", None) or card_id not in self._physical:
+                table.add_row(
+                    "",
+                    "00",
+                    "[dim]insert a card and press C[/dim]",
+                    key="physical:none:000",
+                )
+                self._current = []
+            else:
+                card = self._physical[card_id]
+                if kind == banks.Kind.PERFORMANCE:
+                    names = card.performances
+                else:
+                    names = card.patches
+                # Actually kind may be "performance"/"patch" strings? Check Kind values.
+                if kind not in (banks.Kind.PERFORMANCE, banks.Kind.PATCH):
+                    # normalize
+                    pass
+                scoped = _physical.scope_id(card_id)
+                marked = self._favorite_keys(scoped, kind)
+                count = banks.count_for(kind)
+                self._current = banks.slots("CARD", kind) if card_id else []
+                # banks.slots needs bank number; CARD bank
+                try:
+                    self._current = banks.slots(banks.bank("CARD").number, kind)
+                except Exception:
+                    self._current = []
+                for n in range(count):
+                    name = names.get(n, "")
+                    shown = f"[b]{name}[/b]" if name else "[dim](unnamed)[/dim]"
+                    table.add_row(
+                        "[b]♥[/b]" if n in marked else "",
+                        f"{n:02d}",
+                        shown,
+                        key=f"physical:{card_id}:{kind}:{n:03d}",
+                    )
+        finally:
+            self._filling = False
+        # Detail
+        if card_id in ("", None) or card_id not in self._physical:
+            with contextlib.suppress(NoMatches):
+                self.query_one("#detail", Static).update(
+                    "[dim]insert a card and press C[/dim]"
+                )
+            return
+        card = self._physical[card_id]
+        active_marker = " • active" if self._active_physical == card_id else ""
+        verified = "verified" if card.verified else "unverified"
+        digest_prefix = card.digest[:12]
+        with contextlib.suppress(NoMatches):
+            self.query_one("#detail", Static).update(
+                f"[b]{card.label or card.id}[/b]{active_marker}\n"
+                f"[dim]{verified} · {digest_prefix} · "
+                f"C captures the inserted card; L labels this one[/dim]"
+            )
+
+    def _detail(self, row: int) -> None:  # noqa: C901
+        if self._current_physical is not None:
+            if (
+                self._current_physical in ("", None)
+                or self._current_physical not in self._physical
+            ):
+                with contextlib.suppress(NoMatches):
+                    self.query_one("#detail", Static).update(
+                        "[dim]insert a card and press C[/dim]"
+                    )
+                return
+            card = self._physical[self._current_physical]
+            if row is None or row >= len(self._current):
+                with contextlib.suppress(NoMatches):
+                    self.query_one("#detail", Static).update(
+                        f"[b]{card.label or card.id}[/b]\n"
+                        f"[dim]C captures the inserted card; L labels this one[/dim]"
+                    )
+                return
+            item = self._current[row]
+            name = ""
+            if self._current_physical_kind == banks.Kind.PERFORMANCE:
+                name = card.performances.get(item.number, "")
+            else:
+                name = card.patches.get(item.number, "")
+            shown = f"[b]{name}[/b]" if name else "[dim](unnamed)[/dim]"
+            with contextlib.suppress(NoMatches):
+                self.query_one("#detail", Static).update(
+                    f"[b]{card.label or card.id} {item.kind} {item.number:02d}[/b]  "
+                    f"{shown}\n"
+                    f"[dim]C captures the inserted card; L labels this one[/dim]"
+                )
+            return
         if self._current_multi is not None:
             multisets = getattr(self, "_multisets", None)
             if multisets is None:
@@ -1804,8 +1983,13 @@ class KwsedApp(App[None]):
         if event.data_table.id == "bank-table":
             row = event.cursor_row
             if 0 <= row < len(self._row_multis):
+                physical = (
+                    self._row_physical[row] if row < len(self._row_physical) else None
+                )
                 multi = self._row_multis[row]
-                if multi is not None:
+                if physical is not None:
+                    self._fill_physical(physical, self._pairs[row][1])
+                elif multi is not None:
                     self._fill_multiset(multi)
                 else:
                     self._fill(self._pairs[row], self._row_cards[row])
@@ -1832,6 +2016,11 @@ class KwsedApp(App[None]):
     # --- operations ---------------------------------------------------------
 
     def action_select(self) -> None:
+        if self._current_physical is not None:
+            self.notify_status(
+                "the card must be active; capture it first", refused=True
+            )
+            return
         table = self.query_one("#slot-table", DataTable)
         row = table.cursor_row
         if not 0 <= row < len(self._current):
@@ -1906,6 +2095,12 @@ class KwsedApp(App[None]):
         )
 
     def action_read_names(self) -> None:
+        if self._current_physical is not None:
+            self.notify_status(
+                "press C to capture the card",
+                refused=True,
+            )
+            return
         if self._current_card is not None:
             self.notify_status(
                 "this is one of the Card's forty banks -- select it on the "
@@ -1947,6 +2142,12 @@ class KwsedApp(App[None]):
         self.action_capture_card(startup=True)
 
     def action_capture_card(self, startup: bool = False) -> None:
+        if self._card_mode == "none":
+            self.notify_status("card support is off (card_mode = none)", refused=True)
+            return
+        if self._card_mode == "cards":
+            self.notify_status("cards-mode capture is not wired yet", refused=True)
+            return
         """Read the active HCard bank and file it in the archive.
 
         Reads the card name and both name lists, resolves which of the
@@ -1971,6 +2172,12 @@ class KwsedApp(App[None]):
         self._capture_card_worker(self._current_card, startup=startup)
 
     def action_label_card(self) -> None:
+        if self._card_mode == "none":
+            self.notify_status("card support is off (card_mode = none)", refused=True)
+            return
+        if self._card_mode == "cards":
+            self.notify_status("cards-mode labelling is not wired yet", refused=True)
+            return
         """Set a local label on the captured bank under the cursor.
 
         Labels are archive metadata only -- nothing is written to the card
@@ -2009,6 +2216,11 @@ class KwsedApp(App[None]):
         self.push_screen(PromptScreen("Card bank name:", captured.label), apply)
 
     def action_card_sweep(self) -> None:
+        if self._card_mode != "hcard":
+            self.notify_status(
+                "card sweep is only available in hcard mode", refused=True
+            )
+            return
         """Walk the HCard's forty banks, prompting for each selection.
 
         The card cannot be switched remotely, so between banks this stops
@@ -2874,6 +3086,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         else (getattr(args, "live_names", None) or _livenames.default_path())
     )
     cards_path = None if getattr(args, "demo", False) else _cards.default_path()
+    card_mode = cfg.load_card_mode(config_path)
+    show_card_defaults = cfg.load_show_card_defaults(config_path)
+    physical_path = None if getattr(args, "demo", False) else _physical.default_path()
     app = KwsedApp(
         device,
         catalog=cat.load(args.catalog),
@@ -2885,6 +3100,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         # The HCard is switched physically; one read at launch is the only
         # way to know which bank is in front of the synth (read-only).
         auto_capture=cards_path is not None,
+        card_mode=card_mode,
+        show_card_defaults=show_card_defaults,
+        physical_path=physical_path,
     )
     try:
         app.run()
