@@ -1381,3 +1381,214 @@ class TestCardModes:
             assert len(app._pairs) == 22 + 80 + 32
             table = app.query_one("#bank-table", DataTable)
             assert table.get_row("card:07:performance")
+
+
+class TestPhysicalCardCapture:
+    """cards mode identifies a physical card by content (docs/CARDS.md)."""
+
+    def _app(self, tmp_path, *, seed=None, active=None, favourites=False):
+        from kws import physical
+
+        pp = str(tmp_path / "physical-cards.json")
+        for card in seed or []:
+            physical.save(card, pp)
+        if active:
+            physical.set_active(active, pp)
+        store = Favorites(str(tmp_path / "fav.db")) if favourites else None
+        app = KwsedApp(
+            DemoDevice(),
+            catalog=cat.Catalog(),
+            favorites=store,
+            card_mode="cards",
+            physical_path=pp,
+        )
+        return app, pp
+
+    def _card(self, cid, label, digest):
+        from kws import physical
+
+        return physical.PhysicalCard(
+            id=cid,
+            label=label,
+            digest=digest,
+            captured_at="2026-11-09T00:00:00+00:00",
+            performances={0: "Opening"},
+            patches={0: "Bell"},
+            verified=True,
+        )
+
+    def _demo_digest(self):
+        from kws import cards as kws_cards
+
+        device = DemoDevice()
+        perf = device.read_bank("CARD", banks.Kind.PERFORMANCE)
+        patch = device.read_bank("CARD", banks.Kind.PATCH)
+        return kws_cards.content_digest(perf.records, patch.records)
+
+    async def test_an_empty_archive_prompts_for_a_name(self, tmp_path):
+        from textual.widgets import Input
+
+        from kws import physical
+        from kwsed.app import PromptScreen
+
+        app, pp = self._app(tmp_path)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.action_capture_card()
+            await settle(pilot, 30)
+            assert isinstance(app.screen, PromptScreen)
+            app.screen.query_one("#value", Input).value = "Orchestra"
+            await pilot.press("enter")
+            await settle(pilot, 10)
+            cards = physical.load(pp)
+            assert len(cards) == 1
+            cid = next(iter(cards))
+            assert cards[cid].label == "Orchestra"
+            assert app._active_physical == cid
+            row = " ".join(
+                str(cell)
+                for cell in app.query_one("#bank-table", DataTable).get_row(
+                    f"physical:{cid}:performance"
+                )
+            )
+            assert "Orchestra" in row
+
+    async def test_a_matching_digest_confirms_without_a_prompt(self, tmp_path):
+        from kws import physical
+
+        app, pp = self._app(
+            tmp_path,
+            seed=[self._card("c1", "Orchestra", self._demo_digest())],
+            active="c1",
+        )
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.action_capture_card()
+            await settle(pilot, 30)
+            assert len(app.screen_stack) == 1
+            cards = physical.load(pp)
+            assert list(cards) == ["c1"]
+            assert cards["c1"].verified is True
+            assert "confirmed" in panel_text(app, "#status")
+
+    async def test_an_unknown_digest_opens_the_picker(self, tmp_path):
+        from kws import physical
+        from vinsynlib.ui.modals import ChoiceScreen
+
+        app, pp = self._app(
+            tmp_path, seed=[self._card("c1", "Old", "not-the-demo")], active="c1"
+        )
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.action_capture_card()
+            await settle(pilot, 30)
+            assert isinstance(app.screen, ChoiceScreen)
+            await pilot.press("enter")  # the archived card is row 0
+            await settle(pilot, 10)
+            cards = physical.load(pp)
+            assert list(cards) == ["c1"]
+            assert cards["c1"].digest == self._demo_digest()
+            assert cards["c1"].verified is False
+            assert app._active_physical == "c1"
+
+    async def test_the_picker_can_create_a_new_card(self, tmp_path):
+        from textual.widgets import Input
+
+        from kws import physical
+        from kwsed.app import PromptScreen
+
+        app, pp = self._app(
+            tmp_path, seed=[self._card("c1", "Old", "not-the-demo")], active="c1"
+        )
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.action_capture_card()
+            await settle(pilot, 30)
+            await pilot.press("down")
+            await pilot.press("enter")  # "New card"
+            await settle(pilot, 5)
+            assert isinstance(app.screen, PromptScreen)
+            app.screen.query_one("#value", Input).value = "Second"
+            await pilot.press("enter")
+            await settle(pilot, 10)
+            cards = physical.load(pp)
+            assert len(cards) == 2
+            assert "Second" in [card.label for card in cards.values()]
+
+    async def test_favouriting_a_physical_slot_is_scoped_to_the_card(self, tmp_path):
+        from kws import physical
+
+        app, _pp = self._app(
+            tmp_path,
+            seed=[self._card("c1", "Orchestra", "d1")],
+            active="c1",
+            favourites=True,
+        )
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            table = app.query_one("#bank-table", DataTable)
+            table.move_cursor(row=app._row_physical.index("c1"))
+            await settle(pilot)
+            app.query_one("#slot-table").move_cursor(row=0)
+            app.action_toggle_favorite()
+            scoped = favorite_bank_id(physical.scope_id("c1"), "performance")
+            assert app.favorites.get(scoped, 0) is not None
+            assert app.favorites.get(favorite_bank_id("CARD", "performance"), 0) is None
+
+    async def test_l_labels_the_selected_card(self, tmp_path):
+        from textual.widgets import Input
+
+        from kws import physical
+        from kwsed.app import PromptScreen
+
+        app, pp = self._app(
+            tmp_path, seed=[self._card("c1", "Orchestra", "d1")], active="c1"
+        )
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            table = app.query_one("#bank-table", DataTable)
+            table.move_cursor(row=app._row_physical.index("c1"))
+            await settle(pilot)
+            app.action_label_card()
+            await settle(pilot, 5)
+            assert isinstance(app.screen, PromptScreen)
+            app.screen.query_one("#value", Input).value = "Renamed"
+            await pilot.press("enter")
+            await settle(pilot, 5)
+            assert physical.load(pp)["c1"].label == "Renamed"
+
+    async def test_select_is_only_allowed_for_the_active_card(self, tmp_path):
+        app, _pp = self._app(
+            tmp_path,
+            seed=[
+                self._card("c1", "One", "d1"),
+                self._card("c2", "Two", "d2"),
+            ],
+            active="c1",
+        )
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            table = app.query_one("#bank-table", DataTable)
+            table.move_cursor(row=app._row_physical.index("c2"))
+            await settle(pilot)
+            app.action_select()
+            assert app.device.selected_log == []
+            assert "not the one in the slot" in panel_text(app, "#status")
+            table.move_cursor(row=app._row_physical.index("c1"))
+            await settle(pilot)
+            app.query_one("#slot-table").move_cursor(row=0)
+            app.action_select()
+            await settle(pilot, 10)
+            assert len(app.device.selected_log) == 1
+
+    async def test_r_on_a_physical_row_refuses(self, tmp_path):
+        app, _pp = self._app(
+            tmp_path, seed=[self._card("c1", "Orchestra", "d1")], active="c1"
+        )
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            table = app.query_one("#bank-table", DataTable)
+            table.move_cursor(row=app._row_physical.index("c1"))
+            await settle(pilot)
+            app.action_read_names()
+            assert "press C" in panel_text(app, "#status")
