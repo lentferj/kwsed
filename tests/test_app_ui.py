@@ -180,10 +180,13 @@ class TestTheFavouritesViews:
             assert slot_row(app) == 2
 
     async def test_the_every_favourites_view_crosses_banks(self, app, store):
+        from kws import cards as kws_cards
+
         async with app.run_test() as pilot:
             await pilot.pause()
             store.add(favorite_bank_id("RAM1", banks.Kind.PERFORMANCE), 1)
-            store.add(favorite_bank_id("CARD", banks.Kind.PATCH), 7)
+            store.add(favorite_bank_id(kws_cards.scope_id(7), banks.Kind.PATCH), 7)
+            app._active_card = 7
             app.view_mode = VIEW_ALL_FAVOURITES
             app._fill(app._current_pair)
             # two, and from two different bank-and-kind pairs
@@ -1282,7 +1285,14 @@ class TestTheStartupCardProbeWithoutACard:
 class TestCardModes:
     """The Card UI is gated by card_mode (docs/CARDS.md)."""
 
-    def _app(self, tmp_path, mode, cards=None, with_favourites=False):
+    def _app(
+        self,
+        tmp_path,
+        mode,
+        cards=None,
+        with_favourites=False,
+        show_card_defaults=False,
+    ):
         from kws import physical
 
         pp = str(tmp_path / "physical-cards.json")
@@ -1296,6 +1306,7 @@ class TestCardModes:
             catalog=cat.Catalog(),
             favorites=store,
             card_mode=mode,
+            show_card_defaults=show_card_defaults,
             physical_path=pp,
         )
         return app, pp
@@ -1381,6 +1392,110 @@ class TestCardModes:
             assert len(app._pairs) == 22 + 80 + 32
             table = app.query_one("#bank-table", DataTable)
             assert table.get_row("card:07:performance")
+
+    async def test_show_card_defaults_names_unread_banks(self, tmp_path):
+        app, _ = self._app(tmp_path, "hcard", show_card_defaults=True)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            table = app.query_one("#bank-table", DataTable)
+            joined = " ".join(
+                str(cell) for cell in table.get_row("card:07:performance")
+            )
+            assert 'Korg WPC-13 "Performance 3"' in joined
+            assert "not captured" not in joined
+
+    async def test_without_show_card_defaults_unread_banks_stay_plain(self, tmp_path):
+        app, _ = self._app(tmp_path, "hcard", show_card_defaults=False)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            table = app.query_one("#bank-table", DataTable)
+            joined = " ".join(
+                str(cell) for cell in table.get_row("card:07:performance")
+            )
+            assert "not captured" in joined
+            assert 'Korg WPC-13 "Performance 3"' not in joined
+
+    async def test_hcard_banks_scope_favourites_per_bank(self, tmp_path):
+        from kws import cards as kws_cards
+
+        app, _ = self._app(tmp_path, "hcard", with_favourites=True)
+        assert app.favorites is not None
+        app.favorites.toggle(
+            favorite_bank_id(kws_cards.scope_id(7), "performance"),
+            0,
+            name="Opening",
+        )
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            table = app.query_one("#bank-table", DataTable)
+            seven = [str(cell) for cell in table.get_row("card:07:performance")]
+            eight = [str(cell) for cell in table.get_row("card:08:performance")]
+            assert seven[-1] == "1"
+            assert eight[-1] == ""
+            # Selecting Card 07 shows its own favourite on slot 0.
+            table.move_cursor(row=app._row_cards.index(7))
+            await settle(pilot)
+            first = " ".join(
+                str(cell) for cell in app.query_one("#slot-table").get_row_at(0)
+            )
+            assert "♥" in first
+
+    async def test_toggling_on_an_hcard_slot_writes_the_bank_scope(self, tmp_path):
+        from kws import cards as kws_cards
+
+        app, _ = self._app(tmp_path, "hcard", with_favourites=True)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            table = app.query_one("#bank-table", DataTable)
+            table.move_cursor(row=app._row_cards.index(7))
+            await settle(pilot)
+            app.query_one("#slot-table").move_cursor(row=0)
+            app.action_toggle_favorite()
+            scoped = favorite_bank_id(kws_cards.scope_id(7), "performance")
+            assert scoped.startswith("CARD/07:")
+            assert app.favorites.get(scoped, 0) is not None
+            assert app.favorites.get(favorite_bank_id("CARD", "performance"), 0) is None
+
+    async def test_the_old_shared_card_favourite_is_discarded(self, tmp_path):
+        from kws import cards as kws_cards
+
+        app, _ = self._app(tmp_path, "hcard", with_favourites=True)
+        assert app.favorites is not None
+        app.favorites.toggle(
+            favorite_bank_id("CARD", "performance"), 0, name="Old shared"
+        )
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            table = app.query_one("#bank-table", DataTable)
+            for number in kws_cards.bank_numbers():
+                for kind in (banks.Kind.PERFORMANCE, banks.Kind.PATCH):
+                    cells = [
+                        str(cell) for cell in table.get_row(f"card:{number:02d}:{kind}")
+                    ]
+                    assert cells[-1] == ""
+
+    async def test_all_favourites_uses_the_active_hcard_bank(self, tmp_path):
+        from kws import cards as kws_cards
+
+        app, _ = self._app(tmp_path, "hcard", with_favourites=True)
+        assert app.favorites is not None
+        app.favorites.toggle(
+            favorite_bank_id(kws_cards.scope_id(7), "performance"),
+            0,
+            name="Opening",
+        )
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._active_card = 7
+            shown = app._all_favourites()
+            assert any(
+                item.number == 0 and item.kind == banks.Kind.PERFORMANCE
+                for item in shown
+            )
+            # No confirmed bank: there is nothing to list for the Card slot,
+            # and asking must not raise.
+            app._active_card = None
+            assert app._all_favourites() == []
 
 
 class TestPhysicalCardCapture:
