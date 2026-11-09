@@ -1121,6 +1121,31 @@ class TestTheMultisetEditor:
             # The browser keeps what the write put there.
             assert app._multisets[3].parts[0].level == 42
 
+    async def test_unverified_write_keeps_editor_open(self, app):
+        from dataclasses import replace
+
+        async with app.run_test() as pilot:
+            screen = await self._open(app, pilot)
+            original_level = screen._ms().parts[0].level
+            part = screen._ms().parts[0]
+            screen._set_part(0, replace(part, level=42))
+            app.device.write_multi = lambda encoded, **kw: {
+                "verified": False,
+                "mismatch": "byte 3 differs",
+            }
+            before_undo = len(app._undo_log)
+            screen.action_arm()
+            screen.action_fire()
+            await settle(pilot, 30)
+            from kwsed.app import MultiEditScreen
+
+            assert isinstance(app.screen, MultiEditScreen)
+            state_text = panel_text(app.screen, "#multi-edit-state")
+            status_text = panel_text(app, "#status")
+            assert "byte 3 differs" in state_text or "byte 3 differs" in status_text
+            assert app._multisets[3].parts[0].level == original_level
+            assert len(app._undo_log) == before_undo
+
     async def test_cancel_leaves_the_original_unchanged(self, app):
         from dataclasses import replace
 

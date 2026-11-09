@@ -2569,6 +2569,22 @@ class KwsedApp(App[None]):
             except Exception:  # noqa: S110
                 pass
             return
+        verified = result.get("verified") if isinstance(result, dict) else None
+        if verified is not True:
+            mismatch = (
+                result.get("mismatch")
+                if isinstance(result, dict) and result.get("mismatch") is not None
+                else "the read-back did not confirm the write"
+            )
+            mismatch_text = str(mismatch)
+            self.call_from_thread(
+                self.notify_status, f"multi write: {mismatch_text}", refused=True
+            )
+            try:
+                self.call_from_thread(screen._write_failed, mismatch_text)
+            except Exception:  # noqa: S110
+                pass
+            return
         try:
             if hasattr(self, "_record_write"):
                 payload = result if isinstance(result, dict) else {"backup": None}
