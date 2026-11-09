@@ -1060,6 +1060,25 @@ class TestTheMultisetBrowser:
             app.action_edit_multi()
             assert "read multi first" in panel_text(app, "#status")
 
+    async def test_r_on_a_multiset_row_refuses_the_name_read(self, app):
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.action_multi()
+            await settle(pilot, 30)
+            assert app._current_multi is not None
+            current = app._current_multi
+            calls = []
+
+            def recorder(*args, **kwargs):
+                calls.append((args, kwargs))
+
+            app.device.read_bank_names = recorder
+            app.action_read_names()
+            await settle(pilot)
+            assert calls == []
+            assert "no name list" in panel_text(app, "#status")
+            assert app._current_multi == current
+
     def test_the_demo_answers_a_multi_dump(self):
         from kws import messages as msgs
         from kws import multi as multi_mod

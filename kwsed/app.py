@@ -1913,6 +1913,12 @@ class KwsedApp(App[None]):
                 refused=True,
             )
             return
+        if self._current_multi is not None:
+            self.notify_status(
+                "a Multiset has no name list to read -- press m to read the setup",
+                refused=True,
+            )
+            return
         if self._busy:
             self.notify_status("busy", refused=True)
             return
