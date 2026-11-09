@@ -86,7 +86,7 @@ from kwsed.gate import EditGate
 # name, so the stylesheet rule still matches.
 from vinsynlib.keys import wrap_blocks  # re-exported: it is in __all__
 from vinsynlib.ui.hints import KeyHints
-from vinsynlib.ui.modals import RatingFilter, RatingFilterScreen
+from vinsynlib.ui.modals import ChoiceScreen, RatingFilter, RatingFilterScreen
 
 #: Family quiet set plus this tool's own bridge errors.
 _BRIDGE_ERRORS: tuple[type[BaseException], ...] = (
@@ -934,52 +934,7 @@ class KwsedApp(App[None]):
         #: The physical Card is not one row pair: an HCard multiplexes
         #: forty banks behind it (docs/HCARD.md, decision 4-A1), so it
         #: expands into forty sub-banks, each listed once per kind.
-        self._real_pairs: List[Tuple[int, str]] = [
-            (entry.number, kind)
-            for entry in banks.BANKS
-            if entry.id != "CARD"
-            for kind in (banks.Kind.PERFORMANCE, banks.Kind.PATCH)
-        ]
-        # Extra (Card) rows depend on the mode.
-        _card_pairs: List[Tuple[int, str]] = []
-        _extra_cards: List[Optional[int]] = []
-        _extra_physical: List[Optional[str]] = []
-        if self._card_mode == "hcard":
-            _card_pairs = [
-                (banks.bank("CARD").number, kind)
-                for _number in _cards.bank_numbers()
-                for kind in (banks.Kind.PERFORMANCE, banks.Kind.PATCH)
-            ]
-            _extra_cards = [
-                number for number in _cards.bank_numbers() for _kind in range(2)
-            ]
-            _extra_physical = [None] * len(_card_pairs)
-        elif self._card_mode == "cards":
-            ids = sorted(self._physical.keys())
-            if not ids:
-                ids = [""]
-            _card_pairs = [
-                (banks.bank("CARD").number, kind)
-                for _id in ids
-                for kind in (banks.Kind.PERFORMANCE, banks.Kind.PATCH)
-            ]
-            _extra_cards = [None] * len(_card_pairs)
-            _extra_physical = [_id for _id in ids for _ in (0, 1)]
-        # mode "none": no extra pairs.
-
-        self._pairs: List[Tuple[int, str]] = (
-            self._real_pairs + _card_pairs + [(MULTI_BANK, MULTI_KIND)] * MULTISETS
-        )
-        self._row_cards: List[Optional[int]] = (
-            [None] * len(self._real_pairs) + _extra_cards + [None] * MULTISETS
-        )
-        self._row_physical: List[Optional[str]] = (
-            [None] * len(self._real_pairs) + _extra_physical + [None] * MULTISETS
-        )
-        #: Which Multiset (0..31) each row of ``_pairs`` is, or None.
-        self._row_multis: List[Optional[int]] = [None] * (
-            len(self._real_pairs) + len(_card_pairs)
-        ) + list(range(MULTISETS))
+        self._build_row_model()
         self._current_pair = self._pairs[0]
         self._current_card: Optional[int] = None
         self._current_multi: Optional[int] = None
@@ -1259,6 +1214,80 @@ class KwsedApp(App[None]):
             return f"{number}:{kind}"
         return f"card:{card:02d}:{kind}"
 
+    def _build_row_model(self) -> None:
+        """Rebuild ``_pairs`` and the row-parallel lists for the current mode.
+
+        Pure data: no widget mutation. Called from ``__init__`` and after a
+        card archive change (capture, label) so the left pane reflects the
+        new set of physical cards.
+        """
+        self._real_pairs: List[Tuple[int, str]] = [
+            (entry.number, kind)
+            for entry in banks.BANKS
+            if entry.id != "CARD"
+            for kind in (banks.Kind.PERFORMANCE, banks.Kind.PATCH)
+        ]
+        _card_pairs: List[Tuple[int, str]] = []
+        _extra_cards: List[Optional[int]] = []
+        _extra_physical: List[Optional[str]] = []
+        if self._card_mode == "hcard":
+            _card_pairs = [
+                (banks.bank("CARD").number, kind)
+                for _number in _cards.bank_numbers()
+                for kind in (banks.Kind.PERFORMANCE, banks.Kind.PATCH)
+            ]
+            _extra_cards = [
+                number for number in _cards.bank_numbers() for _kind in range(2)
+            ]
+            _extra_physical = [None] * len(_card_pairs)
+        elif self._card_mode == "cards":
+            ids = sorted(self._physical.keys())
+            if not ids:
+                ids = [""]
+            _card_pairs = [
+                (banks.bank("CARD").number, kind)
+                for _id in ids
+                for kind in (banks.Kind.PERFORMANCE, banks.Kind.PATCH)
+            ]
+            _extra_cards = [None] * len(_card_pairs)
+            _extra_physical = [_id for _id in ids for _ in (0, 1)]
+        # mode "none": no extra pairs.
+
+        self._pairs: List[Tuple[int, str]] = (
+            self._real_pairs + _card_pairs + [(MULTI_BANK, MULTI_KIND)] * MULTISETS
+        )
+        self._row_cards: List[Optional[int]] = (
+            [None] * len(self._real_pairs) + _extra_cards + [None] * MULTISETS
+        )
+        self._row_physical: List[Optional[str]] = (
+            [None] * len(self._real_pairs) + _extra_physical + [None] * MULTISETS
+        )
+        #: Which Multiset (0..31) each row of ``_pairs`` is, or None.
+        self._row_multis: List[Optional[int]] = [None] * (
+            len(self._real_pairs) + len(_card_pairs)
+        ) + list(range(MULTISETS))
+
+    def _apply_row_model(self) -> None:
+        """Clear the bank table and re-add rows for the current model.
+
+        Columns are left in place; the cursor is preserved where possible.
+        """
+        table = self.query_one("#bank-table", DataTable)
+        cursor_row = table.cursor_row
+        table.clear()
+        for pair, card, multi, physical in zip(
+            self._pairs, self._row_cards, self._row_multis, self._row_physical
+        ):
+            table.add_row(
+                *self._bank_row(pair, card, multi, physical),
+                key=self._row_key(pair, card, multi, physical),
+            )
+        if self._pairs:
+            try:
+                table.move_cursor(row=min(cursor_row or 0, len(self._pairs) - 1))
+            except Exception:  # noqa: S110
+                pass
+
     def _clip(self, text: str, limit: int = 26) -> str:
         """Instance wrapper around the module-level :func:`_clip`."""
         return _clip(text, limit)
@@ -1315,6 +1344,8 @@ class KwsedApp(App[None]):
                 card_obj = self._physical.get(physical)
                 raw_label = card_obj.label if card_obj is not None else ""
                 label = self._clip(raw_label) if raw_label else f"Card {physical}"
+                if physical == self._active_physical:
+                    label = f"• {label}"
             heart = ""
             if physical not in ("", None):
                 marked = len(self._favorite_keys(_physical.scope_id(physical), kind))
@@ -1401,13 +1432,34 @@ class KwsedApp(App[None]):
 
     # --- filling ------------------------------------------------------------
 
+    def _scoped_bank_id(self, item: banks.Slot) -> str:
+        """Bank id used for favourites on the row currently under the cursor.
+
+        In ``cards`` mode a real archived card owns its own key space
+        (``CARD/c1``); otherwise the item's own bank id is used. HCard
+        card-row scoping is part 3c and intentionally left as a seam here.
+        """
+        if (
+            self._current_physical not in (None, "")
+            and self._current_physical in self._physical
+        ):
+            return _physical.scope_id(self._current_physical)
+        return item.bank.id
+
     def _favorite_keys(self, bank_id: str, kind: str) -> Set[int]:
         if self.favorites is None:
             return set()
         return self.favorites.keys_for_bank(favorite_bank_id(bank_id, kind))
 
     def _all_favourites(self) -> List[banks.Slot]:
-        """Every favourite in every bank and kind, in listing order."""
+        """Every favourite in every bank and kind, in listing order.
+
+        In ``cards`` mode only the active physical card's favourites are
+        included (under its scoped id); other cards' favourites are
+        visible on their archive row when selected, not in this view. Other
+        modes keep the previous shared-``CARD`` behaviour as a footprint
+        for part 3c.
+        """
         if self.favorites is None:
             return []
         wanted: Dict[str, Set[int]] = {}
@@ -1426,6 +1478,21 @@ class KwsedApp(App[None]):
             if not numbers:
                 continue
             out.extend(s for s in banks.slots(number, kind) if s.number in numbers)
+        # Per-card favourites for the active card (cards mode only).
+        if (
+            self._card_mode == "cards"
+            and self._active_physical not in (None, "")
+            and self._physical
+        ):
+            card_number = banks.bank("CARD").number
+            scoped = _physical.scope_id(self._active_physical)
+            for kind in (banks.Kind.PERFORMANCE, banks.Kind.PATCH):
+                numbers = wanted.get(favorite_bank_id(scoped, kind))
+                if not numbers:
+                    continue
+                out.extend(
+                    s for s in banks.slots(card_number, kind) if s.number in numbers
+                )
         return self._by_rating(out)
 
     def _visible(self, pair: Tuple[int, str]) -> List[banks.Slot]:
@@ -1447,7 +1514,8 @@ class KwsedApp(App[None]):
                 rating = 0
             else:
                 fav = self.favorites.get(
-                    favorite_bank_id(entry.bank.id, entry.kind), entry.number
+                    favorite_bank_id(self._scoped_bank_id(entry), entry.kind),
+                    entry.number,
                 )
                 rating = fav.rating if fav is not None else 0
             if self.rating_filter.at_least:
@@ -1529,7 +1597,7 @@ class KwsedApp(App[None]):
         if not self._current or row is None or row >= len(self._current):
             return
         item = self._current[row]
-        key = favorite_bank_id(item.bank.id, item.kind)
+        key = favorite_bank_id(self._scoped_bank_id(item), item.kind)
         name = self.catalog.display_name(item.bank.id, item.number, item.kind)
         # Favorites.toggle, not remove-then-add: un-favouriting keeps
         # the row so a rating, tags, a note and the original date
@@ -1551,7 +1619,7 @@ class KwsedApp(App[None]):
         entry = self._cursor_entry()
         if entry is None or self.favorites is None:
             return None, None
-        bank_id = favorite_bank_id(entry.bank.id, entry.kind)
+        bank_id = favorite_bank_id(self._scoped_bank_id(entry), entry.kind)
         number = entry.number
         return (bank_id, number), self.favorites.get(bank_id, number)
 
@@ -2015,12 +2083,7 @@ class KwsedApp(App[None]):
 
     # --- operations ---------------------------------------------------------
 
-    def action_select(self) -> None:
-        if self._current_physical is not None:
-            self.notify_status(
-                "the card must be active; capture it first", refused=True
-            )
-            return
+    def action_select(self) -> None:  # noqa: C901
         table = self.query_one("#slot-table", DataTable)
         row = table.cursor_row
         if not 0 <= row < len(self._current):
@@ -2040,6 +2103,23 @@ class KwsedApp(App[None]):
                 refused=True,
             )
             return
+        if self._current_physical is not None:
+            if (
+                self._current_physical in ("", None)
+                or self._current_physical not in self._physical
+            ):
+                self.notify_status(
+                    "select a captured card first; C captures the inserted one",
+                    refused=True,
+                )
+                return
+            if self._current_physical != self._active_physical:
+                self.notify_status(
+                    "that card is not the one in the slot; insert it and "
+                    "press C to activate",
+                    refused=True,
+                )
+                return
         if self._current_card is not None:
             if self._active_card is None:
                 self.notify_status(
@@ -2142,20 +2222,27 @@ class KwsedApp(App[None]):
         self.action_capture_card(startup=True)
 
     def action_capture_card(self, startup: bool = False) -> None:
+        """Capture the inserted card.
+
+        In ``cards`` mode the inserted card is read, identified by content
+        digest, and filed in the physical archive. In ``hcard`` mode the
+        active HCard bank is captured as before. ``none`` refuses.
+
+        ``startup`` is the automatic launch probe.
+        """
         if self._card_mode == "none":
             self.notify_status("card support is off (card_mode = none)", refused=True)
             return
         if self._card_mode == "cards":
-            self.notify_status("cards-mode capture is not wired yet", refused=True)
+            if self._busy:
+                self.notify_status("busy", refused=True)
+                return
+            if not self._exchange.acquire(blocking=False):
+                self.notify_status("busy", refused=True)
+                return
+            self.notify_status("reading the inserted card…")
+            self._physical_capture_worker(startup=startup)
             return
-        """Read the active HCard bank and file it in the archive.
-
-        Reads the card name and both name lists, resolves which of the
-        forty banks is in front of the synth, and writes one archive
-        record. **Read-only** on the unit: nothing is selected, written or
-        changed. ``startup`` is the automatic launch probe: an unresolved
-        bank is then reported as information rather than as a refusal.
-        """
         if self._card_sweeping:
             self.notify_status("a card sweep is running", refused=True)
             return
@@ -2171,18 +2258,52 @@ class KwsedApp(App[None]):
         )
         self._capture_card_worker(self._current_card, startup=startup)
 
-    def action_label_card(self) -> None:
-        if self._card_mode == "none":
-            self.notify_status("card support is off (card_mode = none)", refused=True)
-            return
-        if self._card_mode == "cards":
-            self.notify_status("cards-mode labelling is not wired yet", refused=True)
-            return
-        """Set a local label on the captured bank under the cursor.
+    def action_label_card(self) -> None:  # noqa: C901
+        """Set a local label on the captured card under the cursor.
 
         Labels are archive metadata only -- nothing is written to the card
         or to any slot. **No MIDI.**
         """
+        if self._card_mode == "none":
+            self.notify_status("card support is off (card_mode = none)", refused=True)
+            return
+        if self._card_mode == "cards":
+            if (
+                self._current_physical in (None, "")
+                or self._current_physical not in self._physical
+            ):
+                self.notify_status(
+                    "select a captured card first; C captures the inserted one",
+                    refused=True,
+                )
+                return
+            card_id = self._current_physical
+            card = self._physical[card_id]
+            current_label = card.label
+
+            def apply_label(value: Optional[str]) -> None:
+                if value is None:
+                    return
+                try:
+                    updated = _physical.set_label(card_id, value, self._physical_path)
+                except LookupError as exc:
+                    self.notify_status(str(exc), refused=True)
+                    return
+                self._physical = (
+                    _physical.load(self._physical_path)
+                    if self._physical_path
+                    else self._physical
+                )
+                self._build_row_model()
+                self._apply_row_model()
+                kind = self._current_physical_kind or banks.Kind.PERFORMANCE
+                self._fill_physical(card_id, kind)
+                self.notify_status(
+                    f"labelled Card {card_id}: {updated.label or card_id}"
+                )
+
+            self.push_screen(PromptScreen("Card label:", current_label), apply_label)
+            return
         if self._current_card is None:
             self.notify_status(
                 "no card row selected; capture a bank first with C",
@@ -2445,6 +2566,209 @@ class KwsedApp(App[None]):
         if next_index is not None:
             self._card_sweep_next(next_index, filed + 1)
         return True
+
+    @work(thread=True)
+    def _physical_capture_worker(self, startup: bool = False) -> None:
+        """**MIDI only** -- the archive is updated on the main thread."""
+        failure: BaseException | None = None
+        payload: Any = None
+        try:
+            with self._busy_gate, self._lock:
+                perf_dump = self.device.read_bank("CARD", banks.Kind.PERFORMANCE)
+                patch_dump = self.device.read_bank("CARD", banks.Kind.PATCH)
+                perf_names = perf_dump.names()
+                patch_names = patch_dump.names()
+                digest = _cards.content_digest(perf_dump.records, patch_dump.records)
+            payload = (perf_names, patch_names, digest)
+        except _BRIDGE_ERRORS as exc:
+            failure = exc
+        finally:
+            if self._exchange.locked():
+                try:
+                    self._exchange.release()
+                except RuntimeError:
+                    pass
+        if failure is not None:
+            self.call_from_thread(
+                self.notify_status, f"capture: {failure}", refused=True
+            )
+            return
+        self.call_from_thread(self._file_physical_capture, payload, startup)
+
+    def _file_physical_capture(self, payload: Any, startup: bool = False) -> None:
+        perf_names, patch_names, digest = payload
+        from datetime import UTC, datetime
+
+        now = datetime.now(UTC).isoformat()
+        self._physical = (
+            _physical.load(self._physical_path)
+            if self._physical_path
+            else self._physical
+        )
+        match = _physical.find_by_digest(digest, self._physical)
+        if match is not None:
+            card = self._physical[match]
+            updated = _physical.PhysicalCard(
+                id=card.id,
+                label=card.label,
+                digest=digest,
+                captured_at=now,
+                performances=dict(perf_names),
+                patches=dict(patch_names),
+                verified=True,
+            )
+            # save
+            _physical.save(updated, self._physical_path)
+            self._physical = (
+                _physical.load(self._physical_path)
+                if self._physical_path
+                else self._physical
+            )
+            # set active
+            _physical.set_active(updated.id, self._physical_path)
+            self._active_physical = updated.id
+            self._physical = (
+                _physical.load(self._physical_path)
+                if self._physical_path
+                else self._physical
+            )
+            self._build_row_model()
+            self._apply_row_model()
+            self._fill_physical(updated.id, banks.Kind.PERFORMANCE)
+            self.notify_status(
+                f"captured Card {updated.label or updated.id} (confirmed)"
+            )
+            return
+
+        # no match
+        if not self._physical:
+            # empty archive -> prompt label
+            def on_label(value: Optional[str]) -> None:
+                if not value:
+                    self.notify_status("capture aborted", refused=True)
+                    return
+                cid = _physical.next_id(self._physical)
+                card = _physical.PhysicalCard(
+                    id=cid,
+                    label=value.strip(),
+                    digest=digest,
+                    captured_at=now,
+                    performances=dict(perf_names),
+                    patches=dict(patch_names),
+                    verified=False,
+                )
+                _physical.save(card, self._physical_path)
+                self._physical = (
+                    _physical.load(self._physical_path)
+                    if self._physical_path
+                    else self._physical
+                )
+                _physical.set_active(card.id, self._physical_path)
+                self._active_physical = card.id
+                self._physical = (
+                    _physical.load(self._physical_path)
+                    if self._physical_path
+                    else self._physical
+                )
+                self._build_row_model()
+                self._apply_row_model()
+                self._fill_physical(card.id, banks.Kind.PERFORMANCE)
+                self.notify_status(f"new card {card.label or card.id}")
+
+            self.push_screen(
+                PromptScreen(
+                    "Name this card:",
+                    f"Card {_physical.next_id(self._physical)}",
+                ),
+                on_label,
+            )
+            return
+
+        # archive has cards -> ChoiceScreen
+        labels = [c.label or c.id for c in self._physical.values()]
+        choices = labels + ["New card"]
+
+        def on_choice(index: Optional[int]) -> None:
+            if index is None:
+                self.notify_status("capture aborted", refused=True)
+                return
+            if index == len(choices) - 1:
+                # New card -> label prompt
+                def on_label(value: Optional[str]) -> None:
+                    if not value:
+                        self.notify_status("capture aborted", refused=True)
+                        return
+                    cid = _physical.next_id(self._physical)
+                    card = _physical.PhysicalCard(
+                        id=cid,
+                        label=value.strip(),
+                        digest=digest,
+                        captured_at=now,
+                        performances=dict(perf_names),
+                        patches=dict(patch_names),
+                        verified=False,
+                    )
+                    _physical.save(card, self._physical_path)
+                    self._physical = (
+                        _physical.load(self._physical_path)
+                        if self._physical_path
+                        else self._physical
+                    )
+                    _physical.set_active(card.id, self._physical_path)
+                    self._active_physical = card.id
+                    self._physical = (
+                        _physical.load(self._physical_path)
+                        if self._physical_path
+                        else self._physical
+                    )
+                    self._build_row_model()
+                    self._apply_row_model()
+                    self._fill_physical(card.id, banks.Kind.PERFORMANCE)
+                    self.notify_status(f"new card {card.label or card.id}")
+
+                self.push_screen(
+                    PromptScreen(
+                        "Name this card:",
+                        f"Card {_physical.next_id(self._physical)}",
+                    ),
+                    on_label,
+                )
+                return
+            # adopted existing card
+            target_id = list(self._physical.keys())[index]
+            card = self._physical[target_id]
+            updated = _physical.PhysicalCard(
+                id=card.id,
+                label=card.label,
+                digest=digest,
+                captured_at=now,
+                performances=dict(perf_names),
+                patches=dict(patch_names),
+                verified=False,
+            )
+            _physical.save(updated, self._physical_path)
+            self._physical = (
+                _physical.load(self._physical_path)
+                if self._physical_path
+                else self._physical
+            )
+            _physical.set_active(updated.id, self._physical_path)
+            self._active_physical = updated.id
+            self._physical = (
+                _physical.load(self._physical_path)
+                if self._physical_path
+                else self._physical
+            )
+            self._build_row_model()
+            self._apply_row_model()
+            self._fill_physical(updated.id, banks.Kind.PERFORMANCE)
+            self.notify_status(
+                f"captured Card {updated.label or updated.id} (unverified — adopted)"
+            )
+
+        self.push_screen(
+            ChoiceScreen("This card is not in the archive", choices), on_choice
+        )
 
     def _refresh_card_row(self, number: int) -> None:
         """Rewrite the bank and name cells of one card row.
