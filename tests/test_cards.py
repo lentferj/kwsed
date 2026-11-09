@@ -86,6 +86,10 @@ class TestAccessors:
         assert cards.count_for(banks.Kind.PERFORMANCE) == 50
         assert cards.count_for(banks.Kind.PATCH) == 35
 
+    def test_scope_id_is_the_per_bank_key_space(self):
+        assert cards.scope_id(7) == "CARD/07"
+        assert cards.scope_id(39) == "CARD/39"
+
 
 class TestTheArchive:
     def _captured(self, number=7, name='Korg WPC-13 "Performance 3"'):

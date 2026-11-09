@@ -75,6 +75,7 @@ __all__ = [
     "resolve",
     "resolve_by_digest",
     "save",
+    "scope_id",
     "set_active",
 ]
 
@@ -302,6 +303,18 @@ def capture(
 def default_path() -> str:
     """Where the archive lives, beside the favourites database."""
     return os.path.join(favorites.data_dir(), FILE_NAME)
+
+
+def scope_id(number: int) -> str:
+    """The per-bank key space for favourites and live names.
+
+    The synth has one ``CARD`` slot, so every HCard bank writes, favourites
+    and is named under the same physical slot. Filing them under the shared
+    ``CARD`` layer would let bank 07's favourites appear under bank 08, so
+    each bank gets its own two-digit space: bank 07 owns ``CARD/07``. An
+    ordinary card uses ``CARD/c1`` (see :func:`kws.physical.scope_id`).
+    """
+    return f"CARD/{number:02d}"
 
 
 def _as_slot_names(raw: object) -> Dict[int, str]:
