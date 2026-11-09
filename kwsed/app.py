@@ -1297,7 +1297,9 @@ class KwsedApp(App[None]):
 
         Not captured is greyed rather than hidden: the forty banks are the
         reason the Card row exists, and a bank that has not been read is
-        still a place a capture can land.
+        still a place a capture can land. With ``show_card_defaults`` the
+        manual's expected name takes the place of ``not captured`` so an
+        unread bank can still be recognised.
         """
         captured = self._archive.get(number)
         entry = _cards.card(number)
@@ -1309,7 +1311,14 @@ class KwsedApp(App[None]):
         inactive = self._active_card is not None and not active
         prefix = "• " if active else ""
         if captured is None:
-            body = f"not captured{pcm}"
+            # The manual's names run to 39 characters, and the bank column
+            # is 64 wide, so clip well above the title limit: "Performance
+            # 2" and "Performance 3" must not both collapse to one string.
+            body = (
+                f"{_clip(entry.name, 40)}{pcm}"
+                if self._show_card_defaults
+                else f"not captured{pcm}"
+            )
             if inactive:
                 return f"[dim][i]{body}[/i][/dim]"
             return f"{prefix}[dim]{body}[/dim]"
@@ -1370,7 +1379,8 @@ class KwsedApp(App[None]):
             return [f"Multi {multi:02d}", "set", "16", "", name, ""]
         number, kind = pair
         entry = banks.bank(number)
-        marked = len(self._favorite_keys(entry.id, kind)) if card is None else 0
+        scoped = entry.id if card is None else _cards.scope_id(card)
+        marked = len(self._favorite_keys(scoped, kind))
         label = entry.label if card is None else f"Card {card:02d}"
         if (
             card is not None
@@ -1386,9 +1396,7 @@ class KwsedApp(App[None]):
             "" if card is None else self._card_row_name(card),
             # blank rather than "0": a column of zeroes is
             # noise, and the eye wants the few that differ.
-            # Card rows all share the one CARD favourite count, so
-            # repeating it on forty rows is noise too.
-            "" if card is not None else (str(marked) if marked else ""),
+            str(marked) if marked else "",
         ]
 
     def on_mount(self) -> None:
@@ -1435,10 +1443,14 @@ class KwsedApp(App[None]):
     def _scoped_bank_id(self, item: banks.Slot) -> str:
         """Bank id used for favourites on the row currently under the cursor.
 
-        In ``cards`` mode a real archived card owns its own key space
-        (``CARD/c1``); otherwise the item's own bank id is used. HCard
-        card-row scoping is part 3c and intentionally left as a seam here.
+        The order matters: a selected HCard sub-bank (``CARD/07``) wins,
+        then an archived physical card (``CARD/c1``), then the item's own
+        bank. The HCard rows are browse overlays over the one ``CARD``
+        slot, so without the first case every bank would share the old
+        ``CARD`` favourites.
         """
+        if self._current_card is not None:
+            return _cards.scope_id(self._current_card)
         if (
             self._current_physical not in (None, "")
             and self._current_physical in self._physical
@@ -1455,10 +1467,10 @@ class KwsedApp(App[None]):
         """Every favourite in every bank and kind, in listing order.
 
         In ``cards`` mode only the active physical card's favourites are
-        included (under its scoped id); other cards' favourites are
-        visible on their archive row when selected, not in this view. Other
-        modes keep the previous shared-``CARD`` behaviour as a footprint
-        for part 3c.
+        included (under its scoped id); in ``hcard`` mode only the active
+        HCard bank's are (``CARD/07``). Favourites on other cards/banks are
+        visible on their own row's ♥ mark, not in this view. The shared
+        ``CARD`` favourites are never read; per-card keys replaced them.
         """
         if self.favorites is None:
             return []
@@ -1466,26 +1478,27 @@ class KwsedApp(App[None]):
         for favourite in self.favorites.all(order="bank"):
             wanted.setdefault(favourite.bank_id, set()).add(favourite.number)
         out: List[banks.Slot] = []
-        # The Card's forty sub-banks share the one CARD key (decision 8-B1),
-        # so a favourite there is listed once, not forty times.
-        pairs = self._real_pairs + [
-            (banks.bank("CARD").number, kind)
-            for kind in (banks.Kind.PERFORMANCE, banks.Kind.PATCH)
-        ]
+        pairs = self._real_pairs
         for number, kind in pairs:
             entry = banks.bank(number)
             numbers = wanted.get(favorite_bank_id(entry.id, kind))
             if not numbers:
                 continue
             out.extend(s for s in banks.slots(number, kind) if s.number in numbers)
-        # Per-card favourites for the active card (cards mode only).
+        # The Card slot's favourites belong to whichever card/bank is
+        # active; the archive rows of the others stay read-only until the
+        # card is inserted, so they are not listed here.
+        scoped = ""
         if (
             self._card_mode == "cards"
             and self._active_physical not in (None, "")
             and self._physical
         ):
-            card_number = banks.bank("CARD").number
             scoped = _physical.scope_id(self._active_physical)
+        elif self._card_mode == "hcard" and self._active_card is not None:
+            scoped = _cards.scope_id(self._active_card)
+        if scoped:
+            card_number = banks.bank("CARD").number
             for kind in (banks.Kind.PERFORMANCE, banks.Kind.PATCH):
                 numbers = wanted.get(favorite_bank_id(scoped, kind))
                 if not numbers:
@@ -1501,7 +1514,12 @@ class KwsedApp(App[None]):
             return self._all_favourites()
         entries = banks.slots(number, kind)
         if self.view_mode == VIEW_BANK_FAVOURITES:
-            marked = self._favorite_keys(banks.bank(number).id, kind)
+            scoped = (
+                _cards.scope_id(self._current_card)
+                if self._current_card is not None
+                else banks.bank(number).id
+            )
+            marked = self._favorite_keys(scoped, kind)
             entries = [e for e in entries if e.number in marked]
         return self._by_rating(entries)
 
@@ -1773,7 +1791,8 @@ class KwsedApp(App[None]):
             table.clear()
             for item in self._current:
                 shown = self._slot_shown_name(item, card)
-                marked = self._favorite_keys(item.bank.id, item.kind)
+                scoped = item.bank.id if card is None else _cards.scope_id(card)
+                marked = self._favorite_keys(scoped, item.kind)
                 where = f"Card {card:02d}" if card is not None else item.bank.label
                 label = (
                     f"{where} {item.kind[:4]} {item.number:02d}"
