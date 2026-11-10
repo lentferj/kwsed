@@ -2234,6 +2234,21 @@ class TestTheDependencyInspector:
             await pilot.press("escape")
             await settle(pilot)
 
+    async def test_d_on_a_card_row_when_another_bank_is_active_refuses(self, app):
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._active_physical = None
+            app._active_card = 13
+            app._fill((banks.bank("CARD").number, banks.Kind.PERFORMANCE), 7)
+            app.query_one("#slot-table").focus()
+            await pilot.press("d")
+            await settle(pilot)
+            assert not isinstance(app.screen, ReportScreen)
+            text = panel_text(app, "#status")
+            assert "CARD/07" in text
+            assert "CARD/13" in text, "the status names the bank actually in the slot"
+            assert "refused" in text
+
 
 class TestCopyPerformance:
     """`y` copies a Performance and its private patches, arm then fire."""
@@ -2290,3 +2305,27 @@ class TestCopyPerformance:
             assert {part.patch for part in used} == {0}, (
                 "two parts sharing one source patch keep one private slot"
             )
+
+    async def test_y_on_a_card_row_when_another_bank_is_active_writes_nothing(
+        self, app
+    ):
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._active_physical = None
+            app._active_card = 13
+            app._fill((banks.bank("CARD").number, banks.Kind.PERFORMANCE), 7)
+            app.query_one("#slot-table").focus()
+            await pilot.press("y")
+            await settle(pilot)
+            assert isinstance(app.screen, CopyPerformanceScreen)
+
+            await pilot.press("a")
+            await settle(pilot)
+            await pilot.press("w")
+            await settle(pilot, 40)
+
+            assert app.device.bundle_write_count == 0
+            text = panel_text(app, "#status")
+            assert "CARD/07" in text
+            assert "CARD/13" in text, "the refusal names the bank in the slot"
+            assert "refused" in text

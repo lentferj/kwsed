@@ -1950,6 +1950,7 @@ class KwsedApp(App[None]):
         self.call_from_thread(self._undo_settle, results, failed)
 
     def _read_source_offline(self, scope: str) -> deps.Source:
+        self._guard_card_slot(scope)
         bank = self._bank_for_scope(scope)
         perf_raw = self.device.read_raw(bank.sysex, m.Function.ALL_PERFORMANCE_DUMP)
         patch_raw = self.device.read_raw(bank.sysex, m.Function.ALL_PATCH_DUMP)
@@ -2788,6 +2789,30 @@ class KwsedApp(App[None]):
         """``"CARD"`` is the slot; the loaded records are under the active scope."""
         return self._active_card_scope() if scope == "CARD" else scope
 
+    def _guard_card_slot(self, scope: str) -> None:
+        """Refuse to read a card sub-bank the slot may not hold.
+
+        The synth has one physical card slot, so a read of ``CARD/07`` is
+        really a read of whatever bank is in that slot. Without this check
+        the records would be filed under the requested scope even when the
+        slot holds another bank -- and a write built from them would carry
+        the wrong performance under the requested label.
+        """
+        if not scope.startswith("CARD/"):
+            return
+        active = self._active_card_scope()
+        if active == scope:
+            return
+        if active == "CARD":
+            raise ValueError(
+                "the app has not confirmed which card bank is in the slot; "
+                f"select {scope[5:]} on the HCard and press C once, then try again"
+            )
+        raise ValueError(
+            f"{scope} is not the card bank in the slot; the slot holds {active}; "
+            "select that bank on the HCard and press C to re-check"
+        )
+
     def action_show_deps(self) -> None:
         multiset, entry = self._deps_target()
         if multiset is not None:
@@ -2797,6 +2822,11 @@ class KwsedApp(App[None]):
             self.notify_status("nothing under the cursor", refused=True)
             return
         scope = self._resolve_card_scope(self._scoped_bank_id(entry))
+        try:
+            self._guard_card_slot(scope)
+        except ValueError as exc:
+            self.notify_status(str(exc), refused=True)
+            return
         sources = self._sources_with_store()
         if scope not in sources:
             if not self._exchange.acquire(blocking=False):

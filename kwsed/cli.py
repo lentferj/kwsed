@@ -28,6 +28,7 @@ from kws import banks
 from kws import cards as _cards
 from kws import catalog as cat
 from kws import livenames as _livenames
+from kws import physical as _physical
 from .buildinfo import build_epilog
 
 __all__ = ["main", "build_parser"]
@@ -82,6 +83,23 @@ def _card_number(text: str) -> int:
         raise ValueError(
             f"{text!r} is not a bank number; the HCard has banks 00-39"
         ) from None
+
+
+def _card_slot_active_scope(args: argparse.Namespace) -> Optional[str]:
+    """The archived scope the one physical card slot currently holds.
+
+    A hint, in the same order the app uses: an identified physical card
+    wins, then the HCard bank last confirmed by a capture. ``None`` means
+    nothing has said which bank is in the slot, so a card sub-scope cannot
+    be read without mislabelling whatever is there.
+    """
+    card_id = _physical.active()
+    if card_id is not None:
+        return _physical.scope_id(card_id)
+    number = _cards.load_active(getattr(args, "cards", None))
+    if number is not None:
+        return _cards.scope_id(number)
+    return None
 
 
 def _cards_status(bank: _cards.CapturedBank | None, entry: _cards.Card) -> str:
@@ -572,11 +590,21 @@ def _read_records(
     return [data[index * size : (index + 1) * size] for index in range(count)]
 
 
-def _read_scope(device: Any, scope: str) -> Any:
+def _read_scope(
+    device: Any,
+    scope: str,
+    *,
+    allow_card_slots: Optional[set[str]] = None,
+) -> Any:
     """Read a whole scope off the unit as performances, patches and waveseq."""
     from kws import banks as bk, deps as deps_mod, messages as m
     from kws import records as rec
 
+    if scope.startswith("CARD/") and scope not in (allow_card_slots or set()):
+        raise ValueError(
+            f"{scope} is not cached and kwscli cannot tell which card bank is "
+            f"in the slot; pass --source {scope}=GLOB, or capture it first"
+        )
     if scope.startswith("CARD/") or scope == "CARD":
         entry = bk.bank("CARD")
     else:
@@ -627,7 +655,13 @@ def _source_specs(specs: Optional[Sequence[str]]) -> Dict[str, Any]:
     return out
 
 
-def _scope_source(device: Any, scope: str, directory: Optional[str]) -> Optional[Any]:
+def _scope_source(
+    device: Any,
+    scope: str,
+    directory: Optional[str],
+    *,
+    allow_card_slots: Optional[set[str]] = None,
+) -> Optional[Any]:
     """A scope from the bank cache, or off the unit when one is attached."""
     from kws import bankstore
 
@@ -637,7 +671,7 @@ def _scope_source(device: Any, scope: str, directory: Optional[str]) -> Optional
         return cached
     if device is None:
         return None
-    return _read_scope(device, scope)
+    return _read_scope(device, scope, allow_card_slots=allow_card_slots)
 
 
 def _cli_sources(
@@ -646,13 +680,19 @@ def _cli_sources(
     specs: Optional[Sequence[str]],
     bankstore_dir: Optional[str],
     need: Sequence[str],
+    allow_card_slots: Optional[set[str]] = None,
 ) -> Dict[str, Any]:
     """The source banks a handler needs, from files, the cache or the unit."""
     sources = _source_specs(specs)
     for scope in need:
         if scope in sources:
             continue
-        loaded = _scope_source(device, scope, bankstore_dir)
+        loaded = _scope_source(
+            device,
+            scope,
+            bankstore_dir,
+            allow_card_slots=allow_card_slots,
+        )
         if loaded is None:
             raise ValueError(
                 f"{scope} is not loaded: pass --source {scope}=GLOB, or fill "
@@ -667,13 +707,17 @@ def _extend_sources(
     device: Any,
     scopes: Sequence[str],
     directory: Optional[str],
+    *,
+    allow_card_slots: Optional[set[str]] = None,
 ) -> None:
     """Fill in dependency scopes when they can be found; leave the rest out."""
     for scope in scopes:
         if scope in sources:
             continue
         try:
-            loaded = _scope_source(device, scope, directory)
+            loaded = _scope_source(
+                device, scope, directory, allow_card_slots=allow_card_slots
+            )
         except Exception:
             loaded = None
         if loaded is not None:
@@ -905,12 +949,15 @@ def _cmd_deps(device: Any, args: argparse.Namespace) -> int:
         print("error: a kind and a number go together", file=sys.stderr)
         return spec.EXIT_USAGE
     scope = args.bank
+    active = _card_slot_active_scope(args)
+    allowed = {active} if active is not None else None
     try:
         sources = _cli_sources(
             device,
             specs=args.source,
             bankstore_dir=args.bankstore,
             need=[scope],
+            allow_card_slots=allowed,
         )
     except (LookupError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -924,14 +971,27 @@ def _cmd_deps(device: Any, args: argparse.Namespace) -> int:
         ]
     elif args.kind == bk.Kind.PERFORMANCE:
         chosen = [relations.PerfId(scope, args.number)]
-    _extend_sources(sources, device, _part_scopes(sources, chosen), args.bankstore)
-    _extend_sources(sources, device, _sequence_scopes(sources, chosen), args.bankstore)
+    _extend_sources(
+        sources,
+        device,
+        _part_scopes(sources, chosen),
+        args.bankstore,
+        allow_card_slots=allowed,
+    )
+    _extend_sources(
+        sources,
+        device,
+        _sequence_scopes(sources, chosen),
+        args.bankstore,
+        allow_card_slots=allowed,
+    )
     if args.kind == bk.Kind.PATCH and args.number is not None:
         _extend_sources(
             sources,
             device,
             _patch_wave_scopes(sources, scope, args.number),
             args.bankstore,
+            allow_card_slots=allowed,
         )
 
     graph = relations.RelationGraph(sources, active_card_scope="CARD")
@@ -1064,12 +1124,15 @@ def _cmd_copy_perf(device: Any, args: argparse.Namespace) -> int:
     for perf in chosen:
         if perf.scope_id not in requested:
             requested.append(perf.scope_id)
+    active = _card_slot_active_scope(args)
+    allowed = {active} if active is not None else None
     try:
         sources = _cli_sources(
             device,
             specs=args.source,
             bankstore_dir=args.bankstore,
             need=requested,
+            allow_card_slots=allowed,
         )
     except (LookupError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -1087,8 +1150,20 @@ def _cmd_copy_perf(device: Any, args: argparse.Namespace) -> int:
                 f"note: {destination.label} could not be loaded, so append "
                 f"starts from an empty bank"
             )
-    _extend_sources(sources, device, _part_scopes(sources, chosen), args.bankstore)
-    _extend_sources(sources, device, _sequence_scopes(sources, chosen), args.bankstore)
+    _extend_sources(
+        sources,
+        device,
+        _part_scopes(sources, chosen),
+        args.bankstore,
+        allow_card_slots=allowed,
+    )
+    _extend_sources(
+        sources,
+        device,
+        _sequence_scopes(sources, chosen),
+        args.bankstore,
+        allow_card_slots=allowed,
+    )
 
     built = perfcopy.copy_into_bank(
         sources,

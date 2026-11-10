@@ -1265,6 +1265,123 @@ class TestDeps:
         assert cli._offline(args)
 
 
+class _CardSlotDevice:
+    """A unit whose one physical card slot answers all three bank dumps.
+
+    The slot is a single resource: reading it for a requested ``CARD/NN``
+    proves nothing about which bank is in it. A read is counted, and -- when
+    the test did not allow one -- refused loudly so a regression cannot pass
+    by quietly mislabelling the records.
+    """
+
+    description = "stand-in"
+    bundle_write_count = 0
+
+    def __init__(self, *, allow_card_slot=False):
+        self.allow_card_slot = allow_card_slot
+        self.card_slot_reads = 0
+        self.reads = []
+
+    def read_raw(self, bank_number, function, **_k):
+        entry = banks.by_sysex(bank_number)
+        if entry.id == "CARD":
+            self.card_slot_reads += 1
+            if not self.allow_card_slot:
+                raise AssertionError(
+                    "read the one physical card slot without knowing its bank"
+                )
+        self.reads.append((bank_number, function))
+        if function == m.Function.ALL_PERFORMANCE_DUMP:
+            payload = bytes(banks.PERFORMANCES_PER_BANK * rec.PERFORMANCE_SIZE)
+        elif function == m.Function.ALL_PATCH_DUMP:
+            payload = bytes(banks.PATCHES_PER_BANK * rec.PATCH_SIZE)
+        elif function == m.Function.ALL_WAVESEQ_DUMP:
+            payload = bytes(rec.WAVESEQ_BANK_SIZE)
+        else:  # pragma: no cover - the CLI asks for a bank, not a slot
+            raise AssertionError(f"unexpected request {function:#04x}")
+        return bytes(m.frame_bulk(function, bank_number, payload))
+
+    def write_bank_bundle(self, *_a, **_k):  # pragma: no cover - must not run
+        raise AssertionError("a card bank was written without knowing which one")
+
+    def close(self):
+        pass
+
+
+class TestCardSlotScopes:
+    """A ``CARD/NN`` read must not label whatever the slot holds as NN."""
+
+    def _no_hints(self, tmp_path, monkeypatch):
+        from kws import bankstore, physical
+
+        monkeypatch.setattr(
+            bankstore, "default_dir", lambda: str(tmp_path / "emptybanks")
+        )
+        monkeypatch.setattr(
+            physical, "default_path", lambda: str(tmp_path / "physical.json")
+        )
+
+    def _args(self, tmp_path, *argv):
+        return cli.build_parser().parse_args(
+            ["--cards", str(tmp_path / "cards.json"), *argv]
+        )
+
+    def test_deps_on_an_uncached_card_bank_refuses_before_the_slot_read(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        self._no_hints(tmp_path, monkeypatch)
+        device = _CardSlotDevice()
+        args = self._args(tmp_path, "deps", "CARD/07")
+        assert cli._cmd_deps(device, args) == 2
+        err = capsys.readouterr().err
+        assert "CARD/07" in err
+        assert "--source" in err
+        assert device.card_slot_reads == 0
+
+    def test_deps_reads_the_slot_when_the_active_bank_is_the_requested_one(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        self._no_hints(tmp_path, monkeypatch)
+        cards.set_active(7, str(tmp_path / "cards.json"))
+        device = _CardSlotDevice(allow_card_slot=True)
+        args = self._args(tmp_path, "deps", "CARD/07")
+        assert cli._cmd_deps(device, args) == 0
+        assert "CARD/07" in capsys.readouterr().out
+        assert device.card_slot_reads == 3, "all three bank dumps came from the slot"
+        assert {bank for bank, _function in device.reads} == {banks.bank("CARD").sysex}
+
+    def test_deps_refuses_a_card_bank_that_is_not_the_active_one(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        self._no_hints(tmp_path, monkeypatch)
+        cards.set_active(13, str(tmp_path / "cards.json"))
+        device = _CardSlotDevice()
+        args = self._args(tmp_path, "deps", "CARD/07")
+        assert cli._cmd_deps(device, args) == 2
+        err = capsys.readouterr().err
+        assert "CARD/07" in err and "--source" in err
+        assert device.card_slot_reads == 0
+
+    def test_copy_perf_from_an_uncached_card_bank_writes_nothing(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        self._no_hints(tmp_path, monkeypatch)
+        device = _CardSlotDevice()
+        args = self._args(
+            tmp_path,
+            "copy-perf",
+            "CARD/07:0",
+            "--to",
+            "RAM3",
+            "--yes",
+            "--backup-dir",
+            str(tmp_path / "backups"),
+        )
+        assert cli._cmd_copy_perf(device, args) != 0
+        assert device.card_slot_reads == 0
+        assert device.bundle_write_count == 0
+
+
 class TestCopyPerf:
     """`copy-perf` gives each performance its own patches and renumbers both.
 
