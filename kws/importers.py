@@ -34,6 +34,7 @@ __all__ = [
     "ImportedBank",
     "UnsupportedFormat",
     "read_file",
+    "describe_file",
 ]
 
 
@@ -371,24 +372,37 @@ def _assemble(packets: List[m.Packet], path: str, fmt: str) -> List[ImportedBank
     return result
 
 
+def _read_sqs_packets(path: str) -> Tuple[List[m.Packet], str]:
+    from kws import soundquest
+
+    try:
+        return soundquest.read_sqs(path), "sqs"
+    except (soundquest.SoundQuestError, ValueError) as exc:
+        raise UnsupportedFormat(str(exc)) from exc
+
+
 def _load_packets(path: str, ext: str) -> Tuple[List[m.Packet], str]:
     if ext in (".syx", ".sysex"):
         return dumps.read_syx_file(path), "sysex"
     if ext in (".mid", ".midi"):
         return read_midi_file(path), "midi"
     if ext == ".lib":
-        raise UnsupportedFormat(".lib files are not decoded yet")
+        from kws import sounddiver
+
+        sounddiver.read_lib(path)
     if ext == ".sqs":
-        raise UnsupportedFormat(".sqs files are not decoded yet")
+        return _read_sqs_packets(path)
     with open(path, "rb") as handle:
         raw = handle.read()
     if not raw:
         raise UnsupportedFormat("empty file")
     sniffed = _sniff_format(raw)
     if sniffed == "lib":
-        raise UnsupportedFormat(".lib files are not decoded yet")
+        from kws import sounddiver
+
+        sounddiver.read_lib(path)
     if sniffed == "sqs":
-        raise UnsupportedFormat(".sqs files are not decoded yet")
+        return _read_sqs_packets(path)
     if sniffed == "midi":
         return read_midi_file(path), "midi"
     if sniffed == "sysex":
@@ -402,3 +416,42 @@ def read_file(path: str) -> List[ImportedBank]:
     if not packets:
         raise UnsupportedFormat("no Wavestation messages found")
     return _assemble(packets, path, fmt)
+
+
+def describe_file(path: str) -> str:
+    """Return a human-readable summary of ``path`` as a string."""
+    ext = os.path.splitext(path)[1].lower()
+    sniffed = None
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read()
+        sniffed = _sniff_format(raw)
+    except OSError:
+        sniffed = None
+
+    if ext == ".lib" or sniffed == "lib":
+        from kws import sounddiver
+
+        entries = sounddiver.read_entries(path)
+        lines: List[str] = []
+        for entry in entries:
+            lines.append(
+                f"{entry.index}\t{entry.name}\t{entry.location}\t"
+                f"{entry.comment}\t{len(entry.data)} bytes"
+            )
+        return "\n".join(lines)
+
+    banks_list = read_file(path)
+    lines = []
+    for ib in banks_list:
+        lines.append(f"{ib.label}  [{ib.scope}]")
+        perfs = ib.source.performances
+        for slot, perf in enumerate(perfs):
+            if not perf:
+                continue
+            if not any(perf):
+                continue
+            name = m.decode_name(perf)
+            if name.strip():
+                lines.append(f"  {slot}: {name}")
+    return "\n".join(lines)

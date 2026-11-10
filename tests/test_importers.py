@@ -216,3 +216,101 @@ def test_card_scope_and_resolve(tmp_path):
     # ensure source map resolves
     srcs = {ib.scope: ib.source}
     assert srcs[ib.scope] is ib.source
+
+
+def _sqs_file(body: bytes, *, even: bool = True) -> bytes:
+    """A minimal SoundQuest LIST/FORM/BANK/BODY container around ``body``."""
+    body_chunk = b"BODY" + struct.pack(">I", len(body)) + body
+    if even and len(body) & 1:
+        body_chunk += b"\x00"
+    form = b"FORM" + struct.pack(">I", 4 + len(body_chunk)) + b"BANK" + body_chunk
+    return b"LIST" + struct.pack(">I", len(form)) + form
+
+
+def _lib_file(chunks: bytes) -> bytes:
+    content = b"BLSS" + chunks
+    return b"MROF" + struct.pack("<I", len(content)) + content
+
+
+def _lib_entry(
+    index: int, name: str, location: str = "1", data: bytes = b"\x00" * 8
+) -> bytes:
+    comment = f"RAM1-{index:02d}".encode()
+    blocks = (
+        b"\x01"
+        + bytes([len(name)])
+        + name.encode("ascii")
+        + b"\x02"
+        + bytes([len(location)])
+        + location.encode("ascii")
+        + b"\x03"
+        + bytes([len(data)])
+        + data
+        + b"\x06"
+        + bytes([len(comment)])
+        + comment
+        + b"\x00\x00"
+    )
+    body = bytes(12) + blocks
+    return b"TNEL" + struct.pack("<I", len(body)) + body
+
+
+def test_sqs_sysex_bank(tmp_path):
+    ws, _ = make_waveseq({0: [40, 41]})
+    perfs = b"".join(_bulk_perf_bytes() for _ in range(50))
+    patches = b"".join(_bulk_patch_bytes() for _ in range(35))
+    frames = (
+        m.frame_bulk(m.Function.ALL_PERFORMANCE_DUMP, 0, perfs)
+        + m.frame_bulk(m.Function.ALL_PATCH_DUMP, 0, patches)
+        + m.frame_bulk(m.Function.ALL_WAVESEQ_DUMP, 0, ws)
+    )
+    path = tmp_path / "bank.sqs"
+    path.write_bytes(_sqs_file(frames))
+
+    out = importers.read_file(str(path))
+    assert len(out) == 1
+    assert out[0].format == "sqs"
+    assert out[0].scope == "RAM1"
+    assert len(out[0].source.performances) == 50
+    assert len(out[0].source.patches) == 35
+    assert out[0].source.waveseq is not None
+
+
+def test_sqs_without_a_leading_f0_is_reassembled(tmp_path):
+    perfs = b"".join(_bulk_perf_bytes() for _ in range(50))
+    frame = m.frame_bulk(m.Function.ALL_PERFORMANCE_DUMP, 0, perfs)
+    path = tmp_path / "bank.sqs"
+    path.write_bytes(_sqs_file(frame[1:]))
+
+    out = importers.read_file(str(path))
+    assert len(out) == 1
+    assert m.decode_name(out[0].source.performances[0]) == "Glass Meridian"
+
+
+def test_sqs_native_body_is_refused(tmp_path):
+    path = tmp_path / "native.sqs"
+    path.write_bytes(_sqs_file(bytes(64)))
+    with pytest.raises(importers.UnsupportedFormat, match="MidiQuest-native"):
+        importers.read_file(str(path))
+
+
+def test_lib_entries_are_listed_and_conversion_refused(tmp_path):
+    from kws import sounddiver
+
+    path = tmp_path / "library.lib"
+    path.write_bytes(
+        _lib_file(_lib_entry(0, "Glass Meridian") + _lib_entry(1, "Amber Drift"))
+    )
+
+    entries = sounddiver.read_entries(str(path))
+    assert [entry.name for entry in entries] == ["Glass Meridian", "Amber Drift"]
+    assert entries[0].location == "1"
+    assert entries[1].comment == "RAM1-01"
+    assert len(entries[0].data) == 8
+
+    with pytest.raises(importers.UnsupportedFormat, match="not decoded"):
+        importers.read_file(str(path))
+
+    described = importers.describe_file(str(path))
+    assert "Glass Meridian" in described
+    assert "Amber Drift" in described
