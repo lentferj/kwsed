@@ -475,16 +475,19 @@ the rules will be made in one of the two.
 
 ## 17. The `Unit` test double answers patch requests only
 
-**Status:** open, real coverage gap. **Verified.**
+**Status:** FIXED (T6).
 
-`tests/test_write.py:70` intercepts `BULK_REQUEST` and always replies with
-`ALL_PATCH_DUMP`. A performance or wave-sequence read against it goes
-unanswered. So `write_bank` is exercised for one kind of three, and the
-kinds differ in dump function, record size and count -- and the bug fixed
-in `5cdaa21` was precisely a kind that defaulted to patch when it should
-not have.
+`tests/test_write.py` intercepts `BULK_REQUEST` and always replied with
+`ALL_PATCH_DUMP`, so `write_bank` was exercised for one kind of three while
+the kinds differ in dump function, record size and count -- and the bug
+fixed in `5cdaa21` was precisely a kind that defaulted to patch when it
+should not have.
 
-**Blocked on:** nothing but writing them.
+The double now answers `ALL_PATCH_DUMP` (`0x4C`), `ALL_PERFORMANCE_DUMP`
+(`0x4D`) and `ALL_WAVESEQ_DUMP` (`0x54`), stores what it is sent per
+`(wire bank byte, dump function)`, and can refuse a dump function (Data
+Load Error) or go silent, so the read-back and abort paths are exercised
+for all three kinds.
 
 ---
 
@@ -511,7 +514,8 @@ the review suggests.
 * `walk_sequence` with a self-loop (step 0's forward link at step 0).
 * `from_nibbles` with a nibble of exactly `0x0F`, the upper boundary of
   the strict check.
-* `write_bank` for performance and wave-sequence kinds -- see item 17.
+* `write_bank` for performance and wave-sequence kinds (covered now — see
+  item 17).
 
 The fourth the review lists, `identity_reply_fields` with a manufacturer
 byte at or above `0x80`, is not worth a test: item 10 explains why the

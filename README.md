@@ -248,10 +248,16 @@ kwsed --port "U6MIDI Pro:U6MIDI Pro MIDI 1 44:0" --device-channel 5
 | `r` | read this bank's names from the unit — **silent** |
 | `/` | search names |
 | `m` | channels: the 32 Multisets and their 16 channels — **silent** |
+| `d` | what the sound under the cursor uses — its patches and wave sequences (silent) |
+| `y` | copy this performance, with private copies of its patches, into RAM 1–3 or the Card — silent until armed |
 | `i` | device identity and the unit's global channel |
 | `?` / `q` | help / quit |
 
 **Moving the cursor never sends anything**, enforced by a test.
+
+Inside the Multi editor (`m`, then `e`), `b` also accepts scoped card banks
+(`CARD/07`, `CARD/c1`) and `s` stages the card performances into RAM so one
+Multiset can hold sounds from several cards at once.
 
 ### Command line
 
@@ -264,6 +270,8 @@ kwscli status                     # who is there, and on which global channel
 kwscli dump CARD                  # read a bank's names (silent)
 kwscli multi                      # the 32 Multisets (silent)
 kwscli select RAM1 performance 12 # select a performance ON THE UNIT (patch refused)
+kwscli deps RAM1 --source RAM1=dumps/ram1-*.syx
+kwscli copy-perf CARD/07:3 CARD/13:11 --to RAM3 --out staged
 ```
 
 ## Building a favourites bank
@@ -286,6 +294,19 @@ python3 tools/build_bank.py \
     --patch A:3 --patch A:7 --patch B:12 \
     --out favourites
 ```
+
+**Performance first** is the other order: you name the performances and the
+builder works out what they drag along.
+
+```sh
+python3 tools/build_bank.py --source A=dumps/cardA-*.syx --perf A:3 --perf A:7 --out favourites
+```
+
+Here every named Performance drags along its own private copies of the
+patches it uses -- two performances that name the same source patch each
+get their own, so editing one copy can never alter the other -- while the
+wave sequences beneath them are still shared and packed once. See
+[docs/BANK_BUILDER.md](docs/BANK_BUILDER.md).
 
 It writes `.syx` files and **never touches the instrument** -- loading them
 is the machine's own business, through its front panel. See
