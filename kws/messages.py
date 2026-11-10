@@ -83,6 +83,7 @@ __all__ = [
     "single_patch_dump",
     "patch_write_command",
     "multi_select",
+    "parameter_change",
     "REQUEST_FOR_DUMP",
     "DATA_OFFSET",
 ]
@@ -151,6 +152,11 @@ class Function:
     MULTISET_DUMP = 0x62  #: ...and this one carries all 32 Multisets
     MULTI_SELECT = 0x5B  #: make a Multiset current (0-15)
     MULTI_SELECT_SR = 0x63  #: make a Multiset current (16-31, SR expanded)
+    #: Both sent and received. Payload: parameter number (LSB, MSB), then
+    #: the value as 7-bit ASCII, then a NUL. Reference Guide Appendix 4
+    #: section 2.1.14; the value is text, not a 14-bit word, which is why
+    #: the unit's own editors send ``+2`` as two bytes rather than 0x0002.
+    PARAMETER_CHANGE = 0x41
 
     # Status replies, as Korg's Reference Guide appendix 4 lists them.
     WRITE_COMPLETED = 0x21
@@ -178,6 +184,7 @@ class Function:
         0x62: "multi mode setup SR expanded dump",
         0x5B: "multi mode setup select",
         0x63: "multi mode setup select SR expanded",
+        0x41: "parameter change",
         0x06: "multi mode setup dump request",
         0x40: "single patch dump",
         0x11: "patch write command",
@@ -540,3 +547,41 @@ def multi_select(number: int, *, channel: int = 0) -> bytes:
         raise ProtocolError(f"Multiset {value} is outside 0-31")
     function = Function.MULTI_SELECT if value <= 15 else Function.MULTI_SELECT_SR
     return frame(function, [value], channel=channel)
+
+
+def parameter_change(parameter: int, value: int | str, *, channel: int = 0) -> bytes:
+    """Change one global parameter. **Changes device state, not memory.**
+
+    Reference Guide Appendix 4 section 2.1.14: function ``0x41``, then the
+    parameter number as two 7-bit bytes (LSB first), then the value as
+    **7-bit ASCII** -- not a 14-bit word -- then a NUL and ``F7``. The
+    unit's own editors send a positive number with a leading ``+``, so
+    MIDI mode 2 is ``04 00 2B 32 00`` ("+2"), which is what a real
+    Wavestation SR MIDI name document carries.
+
+    Parameters 380 and above use the expanded forms (``0x42``/``0x43``);
+    this helper covers the documented 0-379 range.
+    """
+    number = int(parameter)
+    if not 0 <= number <= 379:
+        raise ProtocolError(
+            f"parameter {number} is outside 0-379; expanded parameters use "
+            "the 0x42/0x43 forms"
+        )
+    if isinstance(value, str):
+        text = value
+    elif value > 0:
+        text = f"+{value}"
+    else:
+        text = str(value)
+    ascii_bytes: List[int] = []
+    for char in text:
+        code = ord(char)
+        if not 0x20 <= code <= 0x7E:
+            raise ProtocolError(f"{char!r} is not a printable ASCII value byte")
+        ascii_bytes.append(code)
+    return frame(
+        Function.PARAMETER_CHANGE,
+        [number & 0x7F, (number >> 7) & 0x7F, *ascii_bytes, 0x00],
+        channel=channel,
+    )

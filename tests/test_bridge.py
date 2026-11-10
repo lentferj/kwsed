@@ -443,11 +443,15 @@ class TestReadMulti:
 
 
 class TestSelect:
-    def test_it_sends_bank_select_then_program_change(self):
+    def test_it_switches_to_performance_mode_then_selects(self):
         unit = Unit()
         unit.bridge.select(banks.slot("CARD", banks.Kind.PERFORMANCE, 7))
-        assert len(unit.midi_out.sent) == 3
-        msb, lsb, pc = unit.midi_out.sent
+        assert len(unit.midi_out.sent) == 4
+        mode, msb, lsb, pc = unit.midi_out.sent
+        # global parameter 4 (MIDI mode) = +1 (POLY, single Performance)
+        assert mode == bytes(
+            [0xF0, 0x42, 0x30, 0x28, 0x41, 0x04, 0x00, 0x2B, 0x31, 0x00, 0xF7]
+        )
         assert msb[0] == 0xB0 and msb[1] == 0x00 and msb[2] == 0x00
         assert lsb[0] == 0xB0 and lsb[1] == 0x20
         assert lsb[2] == 1
@@ -456,7 +460,9 @@ class TestSelect:
     def test_it_honours_an_explicit_channel(self):
         unit = Unit()
         unit.bridge.select(banks.slot("RAM1", banks.Kind.PERFORMANCE, 0), channel=9)
-        assert all(d[0] in (0xB9, 0xC9) for d in unit.midi_out.sent)
+        mode = unit.midi_out.sent[0]
+        assert mode[2] == 0x39, "the mode change carries the same channel"
+        assert all(d[0] in (0xB9, 0xC9) for d in unit.midi_out.sent[1:])
 
     def test_a_channel_outside_zero_to_fifteen_is_refused(self):
         unit = Unit()
@@ -465,15 +471,32 @@ class TestSelect:
                 banks.slot("RAM1", banks.Kind.PERFORMANCE, 0), channel=16
             )
 
-    def test_multi_select_sends_the_documented_frame(self):
+    def test_multi_select_switches_to_multi_mode_then_selects(self):
         unit = Unit()
         unit.bridge.select_multi(16)
-        assert unit.midi_out.sent == [bytes([0xF0, 0x42, 0x30, 0x28, 0x63, 0x10, 0xF7])]
+        mode, select = unit.midi_out.sent
+        # global parameter 4 = +2 (MULTI, 16-channel)
+        assert mode == bytes(
+            [0xF0, 0x42, 0x30, 0x28, 0x41, 0x04, 0x00, 0x2B, 0x32, 0x00, 0xF7]
+        )
+        assert select == bytes([0xF0, 0x42, 0x30, 0x28, 0x63, 0x10, 0xF7])
 
     def test_multi_select_refuses_an_unknown_multiset(self):
         unit = Unit()
         with pytest.raises(m.ProtocolError, match="outside 0-31"):
             unit.bridge.select_multi(32)
+
+    def test_set_midi_mode_sends_the_documented_value(self):
+        unit = Unit()
+        unit.bridge.set_midi_mode(2, channel=5)
+        assert unit.midi_out.sent == [
+            bytes([0xF0, 0x42, 0x35, 0x28, 0x41, 0x04, 0x00, 0x2B, 0x32, 0x00, 0xF7])
+        ]
+
+    @pytest.mark.parametrize("mode", [-1, 4])
+    def test_set_midi_mode_refuses_an_unknown_mode(self, mode):
+        with pytest.raises(ValueError, match="outside 0-3"):
+            Unit().bridge.set_midi_mode(mode)
 
 
 class TestClose:

@@ -242,3 +242,30 @@ class TestMultiSelect:
     def test_an_unknown_multiset_is_refused(self, number):
         with pytest.raises(m.ProtocolError, match="outside 0-31"):
             m.multi_select(number)
+
+
+class TestParameterChange:
+    """Appendix 4 §2.1.14: parameter LSB/MSB, then the value as ASCII."""
+
+    def test_mode_two_matches_the_documented_frame(self):
+        # The Wavestation SR MIDI name document ships these exact bytes.
+        assert m.parameter_change(4, 2) == bytes(
+            [0xF0, 0x42, 0x30, 0x28, 0x41, 0x04, 0x00, 0x2B, 0x32, 0x00, 0xF7]
+        )
+
+    def test_zero_is_text_without_a_sign(self):
+        assert m.parameter_change(4, 0)[7:9] == b"0\x00"
+
+    def test_a_string_value_is_sent_verbatim(self):
+        assert m.parameter_change(4, "abc")[7:11] == b"abc\x00"
+
+    def test_the_channel_rides_in_the_format_byte(self):
+        assert m.parameter_change(4, 2, channel=5)[2] == 0x35
+
+    def test_a_parameter_above_379_is_refused(self):
+        with pytest.raises(m.ProtocolError, match="outside 0-379"):
+            m.parameter_change(380, 1)
+
+    def test_a_non_ascii_value_is_refused(self):
+        with pytest.raises(m.ProtocolError, match="printable ASCII"):
+            m.parameter_change(4, "é")

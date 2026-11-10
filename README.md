@@ -201,8 +201,14 @@ bank is a silent, permanent error in a name catalog.
 
 ### Selecting sends Bank Select and a Program Change
 
-`select` addresses the SR's twelve banks as six MIDI banks: Bank Select MSB
-(CC0) = 0, Bank Select LSB (CC32) = 0–5, then Program Change
+A Program Change means a Performance only in Performance (OMNI/POLY/MONO)
+mode; in MULTI mode the same message selects a Multiset. So `select` first
+sets the MIDI mode to POLY and selecting a Multiset sets it to MULTI,
+using a Parameter Change for global parameter 4 (Reference Appendix 4
+§2.1.14/§5.12). Neither is a memory write.
+
+`select` then addresses the SR's twelve banks as six MIDI banks: Bank Select
+MSB (CC0) = 0, Bank Select LSB (CC32) = 0–5, then Program Change
 `program_base + slot`. Each MIDI bank holds two internal banks of 50, so
 Program Change 0–49 selects the first and 50–99 the second (Player's Guide
 §4.8, Reference Appendix 3 §1.3). The SR's Bank Select MIDI-receive parameter

@@ -3870,7 +3870,8 @@ class KwsedApp(App[None]):
         self.call_from_thread(
             self.notify_status,
             f"bank select LSB {entry.bank.midi_bank} + program change "
-            f"{entry.bank.program_base + entry.number} sent for {entry}",
+            f"{entry.bank.program_base + entry.number} sent for {entry} "
+            "— switched the unit to performance (POLY) mode",
         )
 
     def action_read_names(self) -> None:
@@ -4760,8 +4761,7 @@ class KwsedApp(App[None]):
             return
         self.call_from_thread(
             self.notify_status,
-            f"selected Multiset {number:02d} on the unit — switch the unit "
-            "to MULTI mode to hear it",
+            f"selected Multiset {number:02d} on the unit — switched it to MULTI mode",
         )
 
     @work(thread=True)
@@ -5150,8 +5150,9 @@ switch the HCard.
   m   read the 32 Multisets and jump to them: each assigns a performance to
       the 16 MIDI channels. They live in the SR's internal memory, not on
       the card; a Multiset refers to performances, including card ones.
-      ⏎ on a Multiset row makes it current on the unit (switch the unit to
-      MULTI mode to hear it). e edits it as a 16-channel table.
+      ⏎ on a Multiset row makes it current on the unit and switches the unit
+      to MULTI mode; ⏎ on a Performance switches it back to performance
+      (POLY) mode. e edits the setup as a 16-channel table.
   f   favourite this slot; F steps all -> this bank's -> every favourite
   t   tags; n   note (both hang off a favourite, so press f first)
   V   filter the list by favourite rating

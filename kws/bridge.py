@@ -71,6 +71,11 @@ __all__ = [
     "DUMP_TIMEOUT",
     "CARD_NAME_OFFSET",
     "CARD_NAME_LEN",
+    "MIDI_MODE_PARAMETER",
+    "MIDI_MODE_OMNI",
+    "MIDI_MODE_POLY",
+    "MIDI_MODE_MULTI",
+    "MIDI_MODE_MONO",
     "MidiUnavailable",
     "DeviceError",
     "DeviceRefused",
@@ -100,6 +105,15 @@ SINGLE_OBJECT_TIMEOUT = 15.0
 #: How long to wait for a bank dump. A patch bank is nearly 30 kB, which is
 #: about eight seconds of 31250-baud MIDI before the unit's own delay.
 DUMP_TIMEOUT = 20.0
+
+#: The global parameter that selects OMNI/POLY/MULTI/MONO reception, and
+#: its documented values (Reference Guide Appendix 4 section 5.12). The
+#: value travels as ASCII, so MIDI mode 2 is the bytes ``2B 32`` ("+2").
+MIDI_MODE_PARAMETER = 4
+MIDI_MODE_OMNI = 0
+MIDI_MODE_POLY = 1
+MIDI_MODE_MULTI = 2
+MIDI_MODE_MONO = 3
 
 #: Where the card-name field sits in the **decoded** System Setup dump
 #: (function ``0x51``), and how long it is.
@@ -926,18 +940,48 @@ class WavestationBridge:
             return None
         return name
 
-    def select(self, slot: banks.Slot, *, channel: Optional[int] = None) -> None:
-        """Select a performance. **This changes the sound.**
+    def set_midi_mode(self, mode: int, *, channel: Optional[int] = None) -> None:
+        """Select OMNI, POLY, MULTI or MONO reception. **Changes device state.**
 
-        Bank Select MSB (CC0) = 0, Bank Select LSB (CC32) = the bank's MIDI
-        bank, then a Program Change = program_base + slot.number. Per
-        Player's Guide §4.8 and Reference Appendix 3 §1.3 the SR's twelve
-        banks are six MIDI banks (CC32 0-5), each holding two internal banks
-        of 50, so Program Change 0-49 selects the first and 50-99 the second.
-        The SR has no patch mode: a Program Change always selects a
-        Performance (or a Multiset in Multi mode), never a patch, so a patch
-        slot is refused. The SR's "Bank Select" MIDI-receive parameter must
-        be ON for this to work; kwsed cannot read it.
+        The MIDI mode is global parameter 4 on the Wavestation/SR
+        (Reference Guide Appendix 4 section 5.12); it is changed with a
+        Parameter Change message whose value is ASCII. Nothing is written
+        to memory and there is no read-back, so the change is not verified.
+        ``POLY`` is the single-Performance mode; ``MULTI`` routes all
+        sixteen channels through the current Multiset.
+
+        Sending the mode first is what makes a Program Change mean a
+        Performance: in MULTI mode the same Program Change selects a
+        Multiset instead.
+        """
+        value = int(mode)
+        if value not in (
+            MIDI_MODE_OMNI,
+            MIDI_MODE_POLY,
+            MIDI_MODE_MULTI,
+            MIDI_MODE_MONO,
+        ):
+            raise ValueError(f"MIDI mode {value} is outside 0-3")
+        target = self.channel if channel is None else channel
+        if not 0 <= target <= 15:
+            raise ValueError(f"channel {target} is outside 0-15")
+        self._send(m.parameter_change(MIDI_MODE_PARAMETER, value, channel=target))
+
+    def select(self, slot: banks.Slot, *, channel: Optional[int] = None) -> None:
+        """Select a performance. **This changes the sound and the MIDI mode.**
+
+        The unit is first put into ``POLY`` (single-Performance) mode,
+        because in ``MULTI`` mode a Program Change selects a Multiset
+        instead of a Performance. Then Bank Select MSB (CC0) = 0, Bank
+        Select LSB (CC32) = the bank's MIDI bank, then a Program Change =
+        program_base + slot.number. Per Player's Guide §4.8 and Reference
+        Appendix 3 §1.3 the SR's twelve banks are six MIDI banks (CC32
+        0-5), each holding two internal banks of 50, so Program Change
+        0-49 selects the first and 50-99 the second. The SR has no patch
+        mode: a Program Change always selects a Performance, never a
+        patch, so a patch slot is refused. The SR's "Bank Select"
+        MIDI-receive parameter must be ON for this to work; kwsed cannot
+        read it.
         """
         if slot.kind == banks.Kind.PATCH:
             raise ValueError(
@@ -953,6 +997,7 @@ class WavestationBridge:
             raise ValueError(
                 f"program change {program} is outside 0-99 for {bank.label}"
             )
+        self.set_midi_mode(MIDI_MODE_POLY, channel=target)
         status = 0xB0 | target
         self._out.send_message([status, 0x00, 0x00])
         self._out.send_message([status, 0x20, bank.midi_bank])
@@ -960,22 +1005,19 @@ class WavestationBridge:
         time.sleep(SEND_GAP)
 
     def select_multi(self, number: int, *, channel: Optional[int] = None) -> None:
-        """Make a Multiset the current one. **Changes the sound in Multi mode.**
+        """Make a Multiset current. **Changes the sound and the MIDI mode.**
 
-        Reference Guide Appendix 4, sections 2.1.20 and 2.1.21: ``0x5B``
-        for Multisets 0-15, ``0x63`` for 16-31 (SR Expanded), the number
-        sent as the byte the manual shows (16 -> ``0x10``). The unit
-        changes its current multi setup on reception; there is no memory
-        write and no read-back, so nothing is verified.
-
-        The unit must be in Multi mode for the Multiset to be the active
-        one -- kwsed cannot switch the PERF/MULTI mode, so a Multiset
-        selected while the unit is in Performance mode is selected but not
-        heard.
+        The unit is first put into ``MULTI`` mode, then Reference Guide
+        Appendix 4, sections 2.1.20 and 2.1.21: ``0x5B`` for Multisets
+        0-15, ``0x63`` for 16-31 (SR Expanded), the number sent as the
+        byte the manual shows (16 -> ``0x10``). The unit changes its
+        current multi setup on reception; there is no memory write and no
+        read-back, so neither message is verified.
         """
         target = self.channel if channel is None else channel
         if not 0 <= target <= 15:
             raise ValueError(f"channel {target} is outside 0-15")
+        self.set_midi_mode(MIDI_MODE_MULTI, channel=target)
         self._send(m.multi_select(number, channel=target))
 
     # --- writing, which is fenced ------------------------------------------
