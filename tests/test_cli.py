@@ -28,7 +28,7 @@ import pathlib
 
 import pytest
 
-from kws import banks, cards, dumps
+from kws import banks, cards, deps, dumps
 from kws import messages as m
 from kws import records as rec
 from kwsed import cli
@@ -1497,3 +1497,24 @@ class TestCopyPerf:
         assert not cli._offline(
             parser.parse_args(["copy-perf", "RAM1:0", "--to", "RAM3"])
         )
+
+
+class TestLoadedCardScope:
+    def test_one_card_scope_returns_it(self):
+        assert (
+            cli._loaded_card_scope(
+                {"RAM1": deps.Source("RAM1"), "CARD/07": deps.Source("CARD/07")}
+            )
+            == "CARD/07"
+        )
+
+    def test_two_card_scopes_returns_bare(self):
+        assert (
+            cli._loaded_card_scope(
+                {"CARD/07": deps.Source("CARD/07"), "CARD/13": deps.Source("CARD/13")}
+            )
+            == "CARD"
+        )
+
+    def test_no_card_scope_returns_bare(self):
+        assert cli._loaded_card_scope({"RAM1": deps.Source("RAM1")}) == "CARD"

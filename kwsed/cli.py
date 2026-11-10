@@ -21,7 +21,7 @@ import argparse
 import glob
 import os
 import sys
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
 from vinsynlib import cli, midi, render, spec
 from kws import banks
@@ -941,6 +941,12 @@ def _deps_one_patch(
     return spec.EXIT_OK
 
 
+def _loaded_card_scope(sources: Mapping[str, Any]) -> str:
+    """The one archived card scope in `sources`, or the bare slot label."""
+    cards = [scope for scope in sources if scope.startswith("CARD/")]
+    return cards[0] if len(cards) == 1 else "CARD"
+
+
 def _cmd_deps(device: Any, args: argparse.Namespace) -> int:
     """The Perf -> Patch -> WaveSeq graph, for a bank or one slot."""
     from kws import banks as bk, perfcopy, relations
@@ -994,7 +1000,9 @@ def _cmd_deps(device: Any, args: argparse.Namespace) -> int:
             allow_card_slots=allowed,
         )
 
-    graph = relations.RelationGraph(sources, active_card_scope="CARD")
+    graph = relations.RelationGraph(
+        sources, active_card_scope=_loaded_card_scope(sources)
+    )
     if args.kind is None:
         return _deps_whole_bank(graph, sources, scope)
     if args.kind == bk.Kind.PERFORMANCE:
