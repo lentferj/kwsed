@@ -54,6 +54,7 @@ __all__ = [
     "parse_bulk",
     "names_from_dump",
     "parse_performance",
+    "parse_patch",
     "record_name",
     "read_syx_file",
 ]
@@ -183,6 +184,23 @@ def parse_performance(packet: m.Packet) -> bytes:
             f"{PERFORMANCE_RECORD} a performance occupies"
         )
     return data[:PERFORMANCE_RECORD]
+
+
+def parse_patch(packet: m.Packet) -> bytes:
+    """One patch (function ``0x40``) as its 426 raw bytes.
+
+    Analogous to :func:`parse_performance`: the single-object dump carries a
+    bank and a number, so its data begins at :data:`kws.messages.DATA_OFFSET`.
+    """
+    if packet.function != m.Function.SINGLE_PATCH_DUMP:
+        raise m.ProtocolError(f"{packet.function_name} is not a patch dump")
+    data = packet.data()
+    if len(data) < PATCH_RECORD:
+        raise m.ProtocolError(
+            f"patch dump decoded to {len(data)} bytes, fewer than the "
+            f"{PATCH_RECORD} a patch occupies"
+        )
+    return data[:PATCH_RECORD]
 
 
 def read_syx_file(path: str) -> List[m.Packet]:
