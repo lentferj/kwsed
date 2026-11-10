@@ -1133,7 +1133,7 @@ class CopyPerformanceScreen(ModalScreen[Optional[Dict[str, Any]]]):
         ) and self._app._active_card in range(0, 25):
             # refuse and advance
             self._app.notify_status(
-                "Card NN is a read-only HCard ROM bank; "
+                f"Card {self._app._active_card:02d} is a read-only HCard ROM bank; "
                 "select a user bank (25-39) or RAM 1-3",
                 refused=True,
             )

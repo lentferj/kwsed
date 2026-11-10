@@ -2306,6 +2306,26 @@ class TestCopyPerformance:
                 "two parts sharing one source patch keep one private slot"
             )
 
+    async def test_skip_readonly_card_formats_active_bank(self, app):
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._active_card = 7
+            app._sources["RAM1"] = _copied_source()
+            app._fill((0, banks.Kind.PERFORMANCE))
+            app.query_one("#slot-table").focus()
+            await pilot.press("y")
+            await settle(pilot)
+            assert isinstance(app.screen, CopyPerformanceScreen)
+
+            ids = [b.id for b in app.screen._destinations]
+            app.screen._dest_index = ids.index("CARD")
+            app.screen._skip_readonly_card()
+            await settle(pilot)
+
+            text = panel_text(app, "#status")
+            assert "Card 07" in text
+            assert "Card NN" not in text
+
     async def test_y_on_a_card_row_when_another_bank_is_active_writes_nothing(
         self, app
     ):
