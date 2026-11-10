@@ -303,15 +303,17 @@ Read formats:
 | Standard MIDI `.mid` / `.midi` | the SysEx the file carries, including the Korg header without its leading `F0` |
 | SoundQuest `.sqs` | banks carried as embedded Korg SysEx; MidiQuest-native bodies are refused |
 | Edisyn bank `.syx` | standard bank dumps |
-| SoundDiver `.LIB` | patch entries are decoded into their `RAM1-NN` slots; performance entries are listed but not converted |
+| SoundDiver `.LIB` | patches (1, 2 or 4 oscillators) and performances are decoded into their `RAM1-NN` slots; wave sequences and multisets are not assembled |
 
 A bank keeps its own interior bank references, so `--as` may name the same
 internal bank (`RAM1`, `ROM6`, ...), or any `CARD/NN` slot for a card source.
 To move performances to a *different* bank, use `copy-perf`: it puts each
 performance in the first free slot, copies its patches privately, packs them
 contiguously without a gap, and rewrites every part to point at them. A
-SoundDiver `.LIB` import brings its **patches** only; its performance
-entries use SoundDiver's normalized part values and are not converted yet.
+SoundDiver `.LIB` import brings its **patches and performances**; its
+wave-sequence and multiset entries are not assembled, so a performance
+that uses a wave sequence will still be refused by `copy-perf` until a
+wave-sequence bank is supplied.
 
 ## Building a favourites bank
 

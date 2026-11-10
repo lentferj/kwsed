@@ -267,16 +267,18 @@ Two CLI paths read other formats; both end in the same `deps.Source` model:
   three `.syx` files offline; `--yes` writes the target bank through the
   fenced `write_bank_bundle` (backup, send, read-back).
 
-A SoundDiver `.LIB` now decodes its **patch** entries. The 410-byte patch
-payload is the common section split around a two-byte prefix, followed by
-the four oscillator blocks in the adaptation's byte order (the order was
-derived from 42 real library/source patch pairs). A patch's `RAM1-NN`
-comment selects its slot; when several entries name one slot, the last
-entry is kept and the note says how many were replaced. **Performance**
-entries carry 158 bytes of SoundDiver's normalized part values, not the raw
-181-byte performance record -- they do not even share a byte multiset --
-so they are listed by `--list` but not converted; export those as `.syx`
-from SoundDiver. A `0x50` All Data dump is decoded
+A SoundDiver `.LIB` decodes its **patches** and **performances**. A patch
+entry is `74 + 84*n` bytes for `n` = 1, 2 or 4 oscillators (158, 242, 410):
+the common section is split around a two-byte piece and the stored
+oscillator blocks are in the adaptation's byte order (derived from real
+library/source pairs). A 2-oscillator patch's blocks are raw oscillators 0
+and 2. A performance entry is `37 + 16*n` bytes (53..165): a 21-byte
+common in a fixed order, the `n` used parts as full 18-byte raw records,
+then two-byte placeholders for the unused parts. The `RAM1-NN` comment
+selects the slot; duplicate slots keep the last entry. Wave-sequence and
+multiset entries are not assembled, so a performance that uses a wave
+sequence is still refused by `copy-perf` until a wave-sequence bank is
+loaded. A `0x50` All Data dump is decoded
 into its two RAM banks: the six fixed bank blocks (`RAM1`/`RAM2`
 performances, patches and wave sequences) sit at the end of the payload,
 so the prefix before them is derived from the length and checked; a

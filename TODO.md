@@ -729,10 +729,10 @@ Also confirm the editor's write round trip on hardware when the separate
 write session happens: the `0x62` dump is sent by `write_multi`, which
 already backs up and verifies.
 
-## 27. Import formats: the SoundDiver Wavestation performance body
+## 27. Import formats: SoundDiver wave sequences and multisets
 
-**Status:** open, one decode gap; the container and the **patch** payload
-are decoded.
+**Status:** open, two LIB object types remain; patches and performances
+decode.
 
 `kws/importers.py` reads whole banks and single objects from raw SysEx,
 Standard MIDI files, SoundQuest `.sqs` (embedded Korg SysEx) and Edisyn bank
@@ -741,37 +741,34 @@ dumps. `kwscli import` files a bank in the cache and
 patches, compacted and remapped.
 
 * **SoundDiver `.LIB`** (`kws/sounddiver.py`) walks the `MROF`/`BLSS` chunks
-  and the `LENT` blocks. A 410-byte **patch** entry is now decoded into a
-  426-byte bank patch: its common section is split around a two-byte prefix
-  (`data[:2]` and `data[72:74]` are the missing common bytes), and the four
-  84-byte oscillator blocks are stored in the adaptation's byte order. That
-  order was derived from 42 real library/source pairs where the decoded
-  body matches byte-for-byte; the handful of positions that are constant
-  zero in every example decode as zero. The entry's `RAM1-NN` comment
-  selects the slot; duplicate slots keep the last entry. A real 629-entry
-  library yields 35 `RAM1` slots (30 distinct) with 22 bodies matching
-  source patches exactly; the rest are versions not present in the `.syx`
-  sources.
-* **SoundDiver performances** are still not converted. A performance entry
-  carries 158 bytes (14-byte prefix plus 8 x 18) of SoundDiver's
-  **normalized** part values, not the raw 181-byte record: on the five
-  performance names that also occur in the Korg Legacy `.wsram` references,
-  the values do not share a byte multiset with the raw part area, so it is
-  not a permutation like the patch oscillators. Decoding it needs the
-  adaptation's part descriptor / scaling (the Wavestation adaptation lives
-  in `WS.dll`, found under the SoundDiver Wine prefixes), or a `.syx`
-  export from SoundDiver. `read_banks` therefore returns the patch bank and
-  notes how many performance entries were left behind.
+  and the `LENT` blocks. Patch entries are `74 + 84*n` bytes for 1, 2 or 4
+  oscillators (158/242/410); the common section is split around a two-byte
+  piece and the stored oscillator blocks use the adaptation's byte order.
+  A 2-oscillator patch stores raw oscillators 0 and 2. Performance entries
+  are `37 + 16*n` bytes (53..165): a 21-byte common in a fixed order, the
+  `n` used parts as full 18-byte records, then two-byte placeholders for
+  the rest. `RAM1-NN` comments select the slot; duplicate slots keep the
+  last entry.
+* A recursive cross-check against the 409 `.syx` files under
+  `WavestationSR` validated the layout: of the `AllBanksSoundDiver.LIB`'s
+  55 four-oscillator patches, 42 bodies match a source patch exactly; 46
+  of 55 one-oscillator and 98 of 99 two-oscillator commons match; 276 of
+  288 performance entries have their used parts match a source performance
+  (141 also have an identical common). The rest are edited versions, so
+  the LIB is a favourites/merge library, not a byte-identical bank dump.
+* **Wave sequences** (the `16 + 16*n` LIB entries) and **multisets** are
+  not assembled into banks. A patch that points at a wave sequence makes
+  `copy-perf` refuse the performance ("wave sequence bank is not loaded"),
+  so a complete LIB-only import still needs those two decoders. The LIB
+  entries carry the sequence steps and names; the remaining work is
+  relocating the relative step links into the shared 501-step pool and
+  assigning the 32 sequence slots.
 * **All Data dumps** (`0x50`) are decoded into the two RAM banks the
-  documented structure carries (system, multiset, micro-tune and
-  performance map, then RAM1/RAM2 performances, patches and wave
-  sequences). The six bank blocks are fixed size, so the prefix is
-  derived from the payload length and checked against a small range
-  (the example's is 1813 bytes). A payload with a different shape -- for
-  example a three-bank variant -- is refused rather than guessed at.
+  documented structure carries. The six bank blocks are fixed size, so
+  the prefix is derived from the payload length and checked (the example's
+  is 1813 bytes). A payload with a different shape is refused.
 * **MidiQuest-native `.sqs` bodies** are skipped; bodies that carry Korg
-  SysEx are read. No Wavestation `.sqs` example was available to test a
-  native body against.
+  SysEx are read.
 
-**Blocked on:** the Wavestation SoundDiver adaptation's performance part
-layout and value scaling.
+**Blocked on:** the LIB wave-sequence step-relocation layout and multiset
+layout.
