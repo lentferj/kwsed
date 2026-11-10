@@ -2360,8 +2360,6 @@ class TestCopyPerformance:
         class _Ram3Demo(DemoDevice):
             def read_raw(self, bank_number, function, *, timeout=None):
                 if bank_number == banks.bank("RAM3").sysex:
-                    from kws import messages as _m
-
                     active = make_performance("Active Zero", ((0, 0),))
                     perfs = [active, active] + [
                         make_performance("", ())
