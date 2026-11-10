@@ -247,6 +247,35 @@ spanning several banks plus its Multiset, `z` undoes the whole thing in one
 step: the backups the write fence made are what makes that reversal
 possible, and no partial state survives between keystrokes.
 
+## Importing existing banks and performances
+
+Two CLI paths read other formats; both end in the same `deps.Source` model:
+
+* `kwscli import FILE` reads a **whole bank** into the local bank cache. It
+  understands SysEx (`.syx`/`.sysex`; one type per file, all three in one
+  file, single performance/patch dumps, and multi-bank files), Standard MIDI
+  files carrying SysEx, SoundQuest `.sqs` banks whose bodies are embedded
+  Korg SysEx, and Edisyn's standard bank dumps. `--list` shows what a file
+  holds; `--as` files a card bank under a `CARD/NN` slot. A bank keeps its
+  own interior `PartRef`/`WaveRef` bank references, so an internal bank is
+  kept under its own scope; relocating performances is `copy-perf`'s job.
+* `kwscli copy-perf SCOPE:SLOT --to BANK --from-file FILE` imports a
+  **single performance with its dependencies**. The performance goes to the
+  first free slot in the target bank (append) or into a clean bank, its
+  patches are copied privately and packed contiguously with no gaps, and
+  every part is rewritten to the new patch slots. `--out PREFIX` writes the
+  three `.syx` files offline; `--yes` writes the target bank through the
+  fenced `write_bank_bundle` (backup, send, read-back).
+
+A SoundDiver `.LIB` is read for its **entry names**; the Wavestation
+adaptation's data block is not the raw bank record (a patch entry carries
+410 bytes whose common section matches but whose oscillator section is
+reordered), so it is listed rather than guessed at. Export the bank as
+`.syx` from SoundDiver in the meantime. A `0x50` All Data dump is refused
+for the same reason of not guessing a structure this project has not
+decoded; the same sounds usually arrive as separate `0x4C`/`0x4D`/`0x54`
+dumps in every other file.
+
 ## Using it
 
 ```python

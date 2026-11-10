@@ -282,6 +282,35 @@ kwscli deps RAM1 --source RAM1=dumps/ram1-*.syx
 kwscli copy-perf CARD/07:3 CARD/13:11 --to RAM3 --out staged
 ```
 
+### Importing banks and performances
+
+`kwscli import` reads a whole bank from a file into the local bank cache; the
+browser and `copy-perf` then use it. `copy-perf --from-file` copies a single
+performance and the patches it depends on into an existing bank:
+
+```sh
+kwscli import "card07.syx" --as CARD/07       # file a card bank in the cache
+kwscli import "factory.syx" --list             # what banks and performances?
+kwscli copy-perf RAM1:3 --to RAM3 --from-file "factory.syx" --out staged
+kwscli copy-perf RAM1:3 --to RAM3 --from-file "factory.syx" --yes
+```
+
+Read formats:
+
+| format | what is read |
+|---|---|
+| SysEx `.syx` / `.sysex` | one type per file, all three in one file, single performance/patch dumps, and multi-bank files |
+| Standard MIDI `.mid` / `.midi` | the SysEx the file carries, including the Korg header without its leading `F0` |
+| SoundQuest `.sqs` | banks carried as embedded Korg SysEx; MidiQuest-native bodies are refused |
+| Edisyn bank `.syx` | standard bank dumps |
+| SoundDiver `.LIB` | entries are listed by name; the Wavestation data block is not decoded yet -- export the bank as `.syx` from SoundDiver |
+
+A bank keeps its own interior bank references, so `--as` may name the same
+internal bank (`RAM1`, `ROM6`, ...), or any `CARD/NN` slot for a card source.
+To move performances to a *different* bank, use `copy-perf`: it puts each
+performance in the first free slot, copies its patches privately, packs them
+contiguously without a gap, and rewrites every part to point at them.
+
 ## Building a favourites bank
 
 The instrument's programs form a graph: a performance names patches, a patch
