@@ -1116,9 +1116,107 @@ def _copy_perf_fence(
     return spec.EXIT_ERROR
 
 
+def _real_library_scope(scope: str) -> bool:
+    import re
+
+    from kws import banks as bk
+
+    try:
+        bk.bank(scope)
+        return True
+    except LookupError:
+        pass
+    return bool(re.match(r"^CARD/\d{1,2}$", scope) or re.match(r"^CARD/c\d+$", scope))
+
+
+def _cmd_import(_device: Any, args: argparse.Namespace) -> int:
+    import re
+
+    from kws import bankstore, importers
+
+    if getattr(args, "list", False):
+        try:
+            print(importers.describe_file(args.file))
+        except (importers.UnsupportedFormat, ValueError, OSError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return spec.EXIT_USAGE
+        return spec.EXIT_OK
+
+    try:
+        banks_list = importers.read_file(args.file)
+    except (importers.UnsupportedFormat, ValueError, OSError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return spec.EXIT_USAGE
+
+    if getattr(args, "scope", None):
+        selected = None
+        for bank in banks_list:
+            if bank.scope == args.scope:
+                selected = bank
+                break
+        if selected is None:
+            print(
+                "available scopes: " + ", ".join(b.scope for b in banks_list),
+                file=sys.stderr,
+            )
+            return spec.EXIT_USAGE
+    elif len(banks_list) == 1:
+        selected = banks_list[0]
+    else:
+        print(
+            "available scopes: " + ", ".join(b.scope for b in banks_list),
+            file=sys.stderr,
+        )
+        return spec.EXIT_USAGE
+
+    dest = getattr(args, "as", None)
+    if dest is None:
+        if _real_library_scope(selected.scope):
+            dest = selected.scope
+        else:
+            print(
+                "error: this bank needs --as (its scope is not a real library scope)",
+                file=sys.stderr,
+            )
+            return spec.EXIT_USAGE
+
+    # validate dest
+    try:
+        banks.bank(dest)
+    except LookupError:
+        if not (re.match(r"^CARD/\d{1,2}$", dest) or re.match(r"^CARD/c\d+$", dest)):
+            print(f"error: {dest!r} is not a valid destination scope", file=sys.stderr)
+            return spec.EXIT_USAGE
+
+    performances = None
+    if selected.source.performances:
+        performances = b"".join(selected.source.performances) or None
+    patches = None
+    if selected.source.patches:
+        patches = b"".join(selected.source.patches) or None
+    waveseq = selected.source.waveseq
+
+    bankstore.save(
+        dest,
+        performances=performances,
+        patches=patches,
+        waveseq=waveseq,
+        directory=args.bankstore,
+    )
+
+    cache = args.bankstore if args.bankstore is not None else bankstore.default_dir()
+    print(
+        f"{dest}: {len(selected.source.performances)} performances, "
+        f"{len(selected.source.patches)} patches, "
+        f"waveseq={'yes' if waveseq is not None else 'no'}"
+    )
+    print(f"cache: {cache}")
+    return spec.EXIT_OK
+
+
 def _cmd_copy_perf(device: Any, args: argparse.Namespace) -> int:
     """Copy performances and their private patches into one bank."""
-    from kws import banks as bk, perfcopy
+    from kws import banks as bk, importers, perfcopy
 
     try:
         chosen = _parse_perf_specs(args.spec)
@@ -1127,6 +1225,17 @@ def _cmd_copy_perf(device: Any, args: argparse.Namespace) -> int:
         return spec.EXIT_USAGE
     destination = bk.bank(args.to)
     target_scope = destination.id
+
+    # read --from-file banks first
+    file_sources: Dict[str, Any] = {}
+    for path in getattr(args, "from_file", None) or []:
+        try:
+            imported = importers.read_file(path)
+        except (importers.UnsupportedFormat, ValueError, OSError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return spec.EXIT_USAGE
+        for bank in imported:
+            file_sources[bank.scope] = bank.source
 
     requested: List[str] = []
     for perf in chosen:
@@ -1139,12 +1248,13 @@ def _cmd_copy_perf(device: Any, args: argparse.Namespace) -> int:
             device,
             specs=args.source,
             bankstore_dir=args.bankstore,
-            need=requested,
+            need=[s for s in requested if s not in file_sources],
             allow_card_slots=allowed,
         )
     except (LookupError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return spec.EXIT_USAGE
+    sources.update(file_sources)
 
     if target_scope not in sources:
         try:
@@ -1650,8 +1760,9 @@ _COMMANDS: Dict[str, Callable[[Any, argparse.Namespace], Any]] = {
     "cards": _cmd_cards,
     "deps": _cmd_deps,
     "copy-perf": _cmd_copy_perf,
+    "import": _cmd_import,
 }
-_OFFLINE = {"banks", "list", "find", "ports", "cards"}
+_OFFLINE = {"banks", "list", "find", "ports", "cards", "import"}
 
 
 def _has_source_for(args: argparse.Namespace, scope: str) -> bool:
@@ -1827,6 +1938,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="write <PREFIX>-perf.syx etc.; omit to write to the unit",
     )
     sp.add_argument(
+        "--from-file",
+        action="append",
+        default=[],
+        metavar="FILE",
+        help="a bank file (SysEx, MIDI, .sqs or .lib listing) to copy from; repeatable",
+    )
+    sp.add_argument(
         "--yes", action="store_true", help="actually write; without it nothing is sent"
     )
     sp.add_argument(
@@ -1846,6 +1964,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--backup-dir",
         default=None,
         help="where to save the destination before overwriting",
+    )
+    sp = sub.add_parser("import", help="read a bank from a file into the bank cache")
+    sp.add_argument("file")
+    sp.add_argument("--list", action="store_true", help="list the file's banks")
+    sp.add_argument("--scope", default=None, metavar="SCOPE")
+    sp.add_argument("--as", dest="as", default=None, metavar="DEST")
+    sp.add_argument(
+        "--bankstore",
+        default=None,
+        metavar="DIR",
+        help="bank cache directory (default: the per-platform data dir)",
     )
     sp = sub.add_parser("list", help="one bank's slots (no unit needed)")
     sp.add_argument("bank")

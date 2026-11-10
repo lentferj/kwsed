@@ -848,7 +848,14 @@ class TestTheChannelArguments:
 
 class TestOfflineNeverBuildsADevice:
     def test_the_offline_set_is_what_it_claims(self):
-        assert set(cli._OFFLINE) == {"banks", "list", "find", "ports", "cards"}
+        assert set(cli._OFFLINE) == {
+            "banks",
+            "list",
+            "find",
+            "ports",
+            "cards",
+            "import",
+        }
 
     def test_backup_list_needs_no_unit_but_save_and_restore_do(self):
         parser = cli.build_parser()
@@ -1518,3 +1525,125 @@ class TestLoadedCardScope:
 
     def test_no_card_scope_returns_bare(self):
         assert cli._loaded_card_scope({"RAM1": deps.Source("RAM1")}) == "CARD"
+
+
+class TestImportCommand:
+    """`kwscli import` reads a file into the bank cache, or lists it."""
+
+    def _args(self, path, *extra):
+        return cli.build_parser().parse_args(["import", str(path), *extra])
+
+    def test_list_names_the_bank_and_its_performances(self, tmp_path, capsys):
+        args = self._args(_perf_source(tmp_path), "--list")
+        assert cli._cmd_import(None, args) == 0
+        out = capsys.readouterr().out
+        assert "RAM1" in out
+        assert "Glass Meridian" in out
+
+    def test_it_saves_a_bank_to_the_cache(self, tmp_path, capsys):
+        from kws import bankstore
+
+        cache = str(tmp_path / "banks")
+        args = self._args(_perf_source(tmp_path), "--as", "RAM1", "--bankstore", cache)
+        assert cli._cmd_import(None, args) == 0
+        loaded = bankstore.load("RAM1", cache)
+        assert loaded is not None
+        assert len(loaded.performances) == 50
+        assert len(loaded.patches) == 35
+        assert loaded.waveseq is not None
+        assert "RAM1" in capsys.readouterr().out
+
+    def test_two_banks_need_a_scope(self, tmp_path, capsys):
+        from tests.test_bankbuild import make_patch, make_performance
+
+        perf = make_performance("Glass Meridian", ((0, 0),))
+        perf_rows = b"".join([perf] + [bytes(rec.PERFORMANCE_SIZE)] * 49)
+        patch_rows = b"".join(
+            make_patch("Amber Drift") for _ in range(banks.PATCHES_PER_BANK)
+        )
+        path = tmp_path / "two.syx"
+        path.write_bytes(
+            m.frame_bulk(m.Function.ALL_PERFORMANCE_DUMP, 0, perf_rows)
+            + m.frame_bulk(m.Function.ALL_PATCH_DUMP, 0, patch_rows)
+            + m.frame_bulk(m.Function.ALL_PERFORMANCE_DUMP, 1, perf_rows)
+            + m.frame_bulk(m.Function.ALL_PATCH_DUMP, 1, patch_rows)
+        )
+        args = self._args(path, "--as", "RAM1", "--bankstore", str(tmp_path / "b"))
+        assert cli._cmd_import(None, args) == 2
+        err = capsys.readouterr().err
+        assert "RAM1" in err and "RAM2" in err
+
+    def test_a_lib_lists_its_entries_but_is_not_imported(self, tmp_path, capsys):
+        from tests.test_importers import _lib_entry, _lib_file
+
+        path = tmp_path / "library.lib"
+        path.write_bytes(_lib_file(_lib_entry(0, "Glass Meridian")))
+
+        assert cli._cmd_import(None, self._args(path, "--list")) == 0
+        assert "Glass Meridian" in capsys.readouterr().out
+
+        assert cli._cmd_import(None, self._args(path, "--as", "RAM1")) == 2
+        assert "not decoded" in capsys.readouterr().err
+
+
+class TestCopyPerfFromAFile:
+    def _file_args(self, tmp_path, *extra):
+        return cli.build_parser().parse_args(
+            [
+                "copy-perf",
+                "RAM1:0",
+                "RAM1:1",
+                "--to",
+                "RAM3",
+                "--from-file",
+                str(_perf_source(tmp_path)),
+                "--backup-dir",
+                str(tmp_path / "pre-write"),
+                *extra,
+            ]
+        )
+
+    def _no_cache(self, tmp_path, monkeypatch):
+        from kws import bankstore
+
+        monkeypatch.setattr(
+            bankstore, "default_dir", lambda: str(tmp_path / "emptybanks")
+        )
+
+    def test_out_mode_reads_the_file_and_remaps(self, tmp_path, monkeypatch, capsys):
+        self._no_cache(tmp_path, monkeypatch)
+        out = tmp_path / "copied"
+        args = self._file_args(tmp_path, "--mode", "clean", "--out", str(out))
+        assert cli._cmd_copy_perf(None, args) == 0
+        printed = capsys.readouterr().out
+        assert "perf 0 <- RAM1:0 Glass Meridian" in printed
+        assert "patch 0 <- RAM1:0" in printed
+        for suffix in ("perf", "patch", "seq"):
+            assert (tmp_path / f"copied-{suffix}.syx").exists()
+
+    def test_fenced_mode_writes_the_bundle_once(self, tmp_path, monkeypatch, capsys):
+        self._no_cache(tmp_path, monkeypatch)
+        device = DemoDevice()
+        args = self._file_args(tmp_path, "--mode", "clean", "--yes")
+        assert cli._cmd_copy_perf(device, args) == 0
+        assert device.bundle_write_count == 1
+        out = capsys.readouterr().out
+        assert "about to replace: RAM 3" in out
+        assert "written and verified" in out
+
+    def test_a_missing_file_is_a_usage_error(self, tmp_path, monkeypatch, capsys):
+        self._no_cache(tmp_path, monkeypatch)
+        args = cli.build_parser().parse_args(
+            [
+                "copy-perf",
+                "RAM1:0",
+                "--to",
+                "RAM3",
+                "--from-file",
+                str(tmp_path / "missing.syx"),
+                "--out",
+                str(tmp_path / "x"),
+            ]
+        )
+        assert cli._cmd_copy_perf(None, args) == 2
+        assert "error" in capsys.readouterr().err
