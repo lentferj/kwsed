@@ -30,6 +30,7 @@ import pytest
 
 from kws import banks, cards, dumps
 from kws import messages as m
+from kws import records as rec
 from kwsed import cli
 from kwsed.demo import DemoDevice
 
@@ -1116,3 +1117,266 @@ def test_one_banks_kind_filter_narrows_the_display(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "Bell" in out
     assert "Opening" not in out
+
+
+def _perf_source(tmp_path: pathlib.Path) -> pathlib.Path:
+    """A RAM 1 source: two patches (patch 0 uses wave sequence 0), two perfs.
+
+    Both performances use patch 0 twice, so the patch is *shared* between
+    them in the source bank. Performance-first copying must give each its own
+    target slot.
+    """
+    from tests.test_bankbuild import make_patch, make_performance, make_waveseq
+
+    patch = make_patch("Kelp Forest", ((0, 0), (0, 40), (0, 40), (0, 40)))
+    second_patch = make_patch("Amber Drift", ((0, 41), (0, 41), (0, 41), (0, 41)))
+    first = make_performance("Glass Meridian", parts=((0, 0), (0, 0)))
+    second = make_performance("Amber Drift", parts=((0, 0), (0, 0)))
+    waveseq = make_waveseq({0: [40, 41]})[0]
+
+    patches = bytearray(banks.PATCHES_PER_BANK * rec.PATCH_SIZE)
+    patches[0 : rec.PATCH_SIZE] = patch
+    patches[rec.PATCH_SIZE : 2 * rec.PATCH_SIZE] = second_patch
+    # Every other slot is an empty performance: all eight parts switched off.
+    empty = make_performance("", ())
+    performances = bytearray(empty * banks.PERFORMANCES_PER_BANK)
+    performances[0 : rec.PERFORMANCE_SIZE] = first
+    performances[rec.PERFORMANCE_SIZE : 2 * rec.PERFORMANCE_SIZE] = second
+
+    path = tmp_path / "perf-source.syx"
+    path.write_bytes(
+        m.frame_bulk(
+            m.Function.ALL_PATCH_DUMP, banks.bank("RAM1").sysex, bytes(patches)
+        )
+        + m.frame_bulk(
+            m.Function.ALL_PERFORMANCE_DUMP,
+            banks.bank("RAM1").sysex,
+            bytes(performances),
+        )
+        + m.frame_bulk(m.Function.ALL_WAVESEQ_DUMP, banks.bank("RAM1").sysex, waveseq)
+    )
+    return path
+
+
+class TestDeps:
+    """`kwscli deps` shows the Perf -> Patch -> WaveSeq graph.
+
+    Offline when the bank is loaded from `--source` or the cache: the whole
+    point is to answer "what would I break?" without a unit attached.
+    """
+
+    def _run(self, tmp_path, monkeypatch, *argv):
+        from kws import bankstore
+
+        monkeypatch.setattr(
+            bankstore, "default_dir", lambda: str(tmp_path / "emptybanks")
+        )
+        return run(["deps", *argv])
+
+    def test_a_whole_bank_names_parts_and_shared_and_unused_patches(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        source = _perf_source(tmp_path)
+        assert (
+            self._run(
+                tmp_path,
+                monkeypatch,
+                "RAM1",
+                "--source",
+                f"RAM1={source}",
+            )
+            == 0
+        )
+        out = capsys.readouterr().out
+        assert 'RAM1 00 "Glass Meridian"' in out
+        assert 'RAM1 01 "Amber Drift"' in out
+        assert "0 -> RAM1:0 Kelp Forest" in out
+        assert "shared patches: 0 (used by 00, 01)" in out
+        assert "unreferenced patches:" in out
+        assert "1," in out, "patch 1 is not named by any part"
+
+    def test_one_performance_shows_its_patches_sequences_and_sharing(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        source = _perf_source(tmp_path)
+        assert (
+            self._run(
+                tmp_path,
+                monkeypatch,
+                "RAM1",
+                "performance",
+                "0",
+                "--source",
+                f"RAM1={source}",
+            )
+            == 0
+        )
+        out = capsys.readouterr().out
+        assert 'RAM1 00 "Glass Meridian"' in out
+        assert "unique patches: RAM1:0" in out
+        assert "sequences: 1" in out
+        assert "step cost: 2" in out
+        assert "patches: shared with other performances" in out
+        assert "patch 0 also used by 01" in out
+        assert "multisets: none" in out
+
+    def test_one_patch_shows_its_oscillators_and_what_uses_it(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        source = _perf_source(tmp_path)
+        assert (
+            self._run(
+                tmp_path,
+                monkeypatch,
+                "RAM1",
+                "patch",
+                "0",
+                "--source",
+                f"RAM1={source}",
+            )
+            == 0
+        )
+        out = capsys.readouterr().out
+        assert 'RAM1 00 "Kelp Forest"' in out
+        assert "Osc 1 -> wave sequence 0 in RAM1" in out
+        assert 'used by: RAM1 00 "Glass Meridian", RAM1 01 "Amber Drift"' in out
+
+    def test_it_needs_a_unit_only_when_the_bank_is_not_on_disk(
+        self, tmp_path, monkeypatch
+    ):
+        from kws import bankstore
+
+        monkeypatch.setattr(
+            bankstore, "default_dir", lambda: str(tmp_path / "emptybanks")
+        )
+        parser = cli.build_parser()
+        args = parser.parse_args(
+            ["deps", "RAM1", "--bankstore", str(tmp_path / "emptybanks")]
+        )
+        assert not cli._offline(args)
+        args = parser.parse_args(
+            [
+                "deps",
+                "RAM1",
+                "--source",
+                f"RAM1={_perf_source(tmp_path)}",
+            ]
+        )
+        assert cli._offline(args)
+
+
+class TestCopyPerf:
+    """`copy-perf` gives each performance its own patches and renumbers both.
+
+    The remapping table is the contract: a performance slot and the patch
+    slots beneath it are what the destination will hold.
+    """
+
+    def _args(self, tmp_path, *extra):
+        return cli.build_parser().parse_args(
+            [
+                "copy-perf",
+                "RAM1:0",
+                "RAM1:1",
+                "--to",
+                "RAM3",
+                "--source",
+                f"RAM1={_perf_source(tmp_path)}",
+                "--backup-dir",
+                str(tmp_path / "pre-write"),
+                *extra,
+            ]
+        )
+
+    def _no_cache(self, tmp_path, monkeypatch):
+        from kws import bankstore
+
+        monkeypatch.setattr(
+            bankstore, "default_dir", lambda: str(tmp_path / "emptybanks")
+        )
+
+    def test_out_mode_writes_three_files_and_the_remapping_table(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        self._no_cache(tmp_path, monkeypatch)
+        out = tmp_path / "copied"
+        args = self._args(tmp_path, "--mode", "clean", "--out", str(out))
+        assert cli._cmd_copy_perf(None, args) == 0
+
+        printed = capsys.readouterr().out
+        assert "perf 0 <- RAM1:0 Glass Meridian" in printed
+        assert "perf 1 <- RAM1:1 Amber Drift" in printed
+        assert "patch 0 <- RAM1:0" in printed
+        assert "patch 1 <- RAM1:0" in printed
+        assert "performances 2/50" in printed
+        assert "patches      2/35" in printed
+        assert "wave seqs    1/32" in printed
+        assert "steps        2/501" in printed
+        assert "Nothing was sent to the instrument." in printed
+
+        for suffix in ("perf", "patch", "seq"):
+            assert (tmp_path / f"copied-{suffix}.syx").exists()
+
+        destination = banks.bank("RAM3")
+        assert (destination.sysex, destination.number) == (4, 2)
+        perf_packets = dumps.read_syx_file(str(out) + "-perf.syx")
+        assert len(perf_packets) == 1
+        assert perf_packets[0].bank == destination.sysex
+        dump = dumps.parse_bulk(perf_packets[0])
+        for record, expected_patch in (
+            (dump.records[0], 0),
+            (dump.records[1], 1),
+        ):
+            used = [part for part in rec.performance_parts(record) if part.used]
+            assert used
+            assert {part.patch for part in used} == {expected_patch}
+            assert {part.bank for part in used} == {destination.number}
+
+        patch_packets = dumps.read_syx_file(str(out) + "-patch.syx")
+        assert patch_packets[0].bank == destination.sysex
+
+    def test_fenced_mode_writes_once_with_all_three_kinds(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        self._no_cache(tmp_path, monkeypatch)
+        device = DemoDevice()
+        args = self._args(tmp_path, "--mode", "clean", "--yes")
+        assert cli._cmd_copy_perf(device, args) == 0
+        assert device.bundle_write_count == 1
+        written = device.bundle_writes[0]
+        assert set(written["kinds"]) == {"performances", "patches", "waveseq"}
+        out = capsys.readouterr().out
+        assert (
+            "about to replace: RAM 3, all performances, patches and wave sequences"
+            in out
+        )
+        assert "written and verified" in out
+
+    def test_without_yes_it_reads_the_destination_and_writes_nothing(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        self._no_cache(tmp_path, monkeypatch)
+        device = DemoDevice()
+        args = self._args(tmp_path, "--mode", "clean")
+        assert cli._cmd_copy_perf(device, args) == 0
+        assert device.bundle_write_count == 0
+        assert device.bank_write_count == 0
+        out = capsys.readouterr().out
+        assert "about to replace" in out
+        assert "Nothing has been sent" in out
+        assert "--yes" in out
+
+    def test_bad_spec_syntax_is_a_usage_error(self, tmp_path, monkeypatch, capsys):
+        self._no_cache(tmp_path, monkeypatch)
+        args = cli.build_parser().parse_args(["copy-perf", "RAM1", "--to", "RAM3"])
+        assert cli._cmd_copy_perf(None, args) == 2
+        assert "SCOPE:NUMBER" in capsys.readouterr().err
+
+    def test_out_mode_is_offline_and_a_bare_copy_is_not(self):
+        parser = cli.build_parser()
+        assert cli._offline(
+            parser.parse_args(["copy-perf", "RAM1:0", "--to", "RAM3", "--out", "x"])
+        )
+        assert not cli._offline(
+            parser.parse_args(["copy-perf", "RAM1:0", "--to", "RAM3"])
+        )

@@ -526,3 +526,104 @@ class TestBuildBankCLI:
             if part.used:
                 assert part.bank == interior
                 assert part.patch < 35
+
+
+class TestBuildBankPerf:
+    """Performance first: two performances never share a target patch slot.
+
+    ``--perf`` names performances rather than patches. Each one drags along
+    its own copy of every patch it uses, so editing the patch under one
+    performance cannot change what another plays -- even when both named the
+    same patch in the source bank.
+    """
+
+    def _source(self, tmp_path: Path) -> Path:
+        """One patch, used twice by each of two performances."""
+        patch = make_patch("Kelp Forest", ((0, 40), (0, 40), (0, 40), (0, 40)))
+        first = make_performance("Glass Meridian", parts=((0, 0), (0, 0)))
+        second = make_performance("Amber Drift", parts=((0, 0), (0, 0)))
+        waveseq = make_waveseq({0: [40, 41]})[0]
+
+        patches = bytearray(banks.PATCHES_PER_BANK * r.PATCH_SIZE)
+        patches[0 : r.PATCH_SIZE] = patch
+        performances = bytearray(banks.PERFORMANCES_PER_BANK * r.PERFORMANCE_SIZE)
+        performances[0 : r.PERFORMANCE_SIZE] = first
+        performances[r.PERFORMANCE_SIZE : 2 * r.PERFORMANCE_SIZE] = second
+
+        path = tmp_path / "source.syx"
+        path.write_bytes(
+            m.frame_bulk(
+                m.Function.ALL_PATCH_DUMP,
+                banks.bank("RAM1").sysex,
+                bytes(patches),
+            )
+            + m.frame_bulk(
+                m.Function.ALL_PERFORMANCE_DUMP,
+                banks.bank("RAM1").sysex,
+                bytes(performances),
+            )
+            + m.frame_bulk(
+                m.Function.ALL_WAVESEQ_DUMP,
+                banks.bank("RAM1").sysex,
+                waveseq,
+            )
+        )
+        return path
+
+    def test_each_performance_owns_a_private_contiguous_patch_slot(
+        self, tmp_path, capsys
+    ):
+        source = self._source(tmp_path)
+        out = tmp_path / "built"
+        rc = module.main(
+            [
+                "--source",
+                f"RAM1={source}",
+                "--bank",
+                "RAM3",
+                "--perf",
+                "RAM1:0",
+                "--perf",
+                "RAM1:1",
+                "--out",
+                str(out),
+            ]
+        )
+        assert rc == 0
+
+        printed = capsys.readouterr().out
+        assert "perf 0 <- RAM1:0 Glass Meridian : patches 0..0" in printed
+        assert "perf 1 <- RAM1:1 Amber Drift : patches 1..1" in printed
+        assert "performances    2 / 50" in printed
+        assert "patches         2 / 35" in printed
+        assert "wave seqs       0 / 32" in printed
+        assert "steps           0 / 501" in printed
+
+        destination = banks.bank("RAM3")
+        assert (destination.sysex, destination.number) == (4, 2)
+        packets = dumps.read_syx_file(f"{out}-perf.syx")
+        assert len(packets) == 1
+        assert packets[0].bank == destination.sysex
+        dump = dumps.parse_bulk(packets[0])
+        assert len(dump.records) == banks.PERFORMANCES_PER_BANK
+        assert dumps.record_name(dump.records[0]) == "Glass Meridian"
+        assert dumps.record_name(dump.records[1]) == "Amber Drift"
+
+        for record, expected_slot in (
+            (dump.records[0], 0),
+            (dump.records[1], 1),
+        ):
+            used = [part for part in r.performance_parts(record) if part.used]
+            assert len(used) == 2
+            assert {part.patch for part in used} == {expected_slot}, (
+                "a performance's two parts name the same patch, so it gets "
+                "one slot -- intra-performance dedup still applies"
+            )
+            assert {part.bank for part in used} == {destination.number}
+
+        patch_packets = dumps.read_syx_file(f"{out}-patch.syx")
+        assert len(patch_packets) == 1
+        assert patch_packets[0].bank == destination.sysex
+        patch_dump = dumps.parse_bulk(patch_packets[0])
+        assert dumps.record_name(patch_dump.records[0]) == "Kelp Forest"
+        assert dumps.record_name(patch_dump.records[1]) == "Kelp Forest"

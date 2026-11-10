@@ -18,9 +18,10 @@
 from __future__ import annotations
 
 import argparse
+import glob
 import os
 import sys
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from vinsynlib import cli, midi, render, spec
 from kws import banks
@@ -547,6 +548,569 @@ def _cmd_send(device: Any, args: argparse.Namespace) -> int:
     return spec.EXIT_ERROR
 
 
+def _read_dump(device: Any, bank_byte: int, function: int) -> bytes:
+    """Ask the unit for one bank dump and return its decoded payload."""
+    from kws import messages as m
+
+    packet = m.parse(device.read_raw(bank_byte, function))
+    if packet is None:
+        raise ValueError(
+            f"the reply to {m.Function.name(function)} was not a Wavestation message"
+        )
+    return packet.data()
+
+
+def _read_records(
+    device: Any, bank_byte: int, function: int, count: int, size: int
+) -> List[bytes]:
+    """One bank dump, split into whole records."""
+    data = _read_dump(device, bank_byte, function)
+    if len(data) < count * size:
+        raise ValueError(
+            f"the reply decodes to {len(data)} bytes; a whole bank is {count * size}"
+        )
+    return [data[index * size : (index + 1) * size] for index in range(count)]
+
+
+def _read_scope(device: Any, scope: str) -> Any:
+    """Read a whole scope off the unit as performances, patches and waveseq."""
+    from kws import banks as bk, deps as deps_mod, messages as m
+    from kws import records as rec
+
+    if scope.startswith("CARD/") or scope == "CARD":
+        entry = bk.bank("CARD")
+    else:
+        entry = bk.bank(scope)
+    performances = _read_records(
+        device,
+        entry.sysex,
+        m.Function.ALL_PERFORMANCE_DUMP,
+        bk.PERFORMANCES_PER_BANK,
+        rec.PERFORMANCE_SIZE,
+    )
+    patches = _read_records(
+        device,
+        entry.sysex,
+        m.Function.ALL_PATCH_DUMP,
+        bk.PATCHES_PER_BANK,
+        rec.PATCH_SIZE,
+    )
+    waveseq: Optional[bytes]
+    try:
+        raw = _read_dump(device, entry.sysex, m.Function.ALL_WAVESEQ_DUMP)
+        waveseq = raw[: rec.WAVESEQ_BANK_SIZE]
+    except Exception:
+        # A bank can be complete without its wave sequences; the relation
+        # graph reports the cost of that rather than refusing to show anything.
+        waveseq = None
+    return deps_mod.Source(
+        bank_id=scope,
+        performances=performances,
+        patches=patches,
+        waveseq=waveseq,
+    )
+
+
+def _source_specs(specs: Optional[Sequence[str]]) -> Dict[str, Any]:
+    """Every ``ID=GLOB`` an offline caller named, loaded as a bank."""
+    from kws import deps as deps_mod
+
+    out: Dict[str, Any] = {}
+    for text in specs or ():
+        if "=" not in text:
+            raise ValueError(f"--source wants ID=GLOB, got {text!r}")
+        bank_id, pattern = text.split("=", 1)
+        files = sorted(glob.glob(os.path.expanduser(pattern)))
+        if not files:
+            raise ValueError(f"no files matched {pattern!r}")
+        out[bank_id] = deps_mod.load_syx(files, bank_id)
+    return out
+
+
+def _scope_source(device: Any, scope: str, directory: Optional[str]) -> Optional[Any]:
+    """A scope from the bank cache, or off the unit when one is attached."""
+    from kws import bankstore
+
+    where = directory or bankstore.default_dir()
+    cached = bankstore.load(scope, where)
+    if cached is not None:
+        return cached
+    if device is None:
+        return None
+    return _read_scope(device, scope)
+
+
+def _cli_sources(
+    device: Any,
+    *,
+    specs: Optional[Sequence[str]],
+    bankstore_dir: Optional[str],
+    need: Sequence[str],
+) -> Dict[str, Any]:
+    """The source banks a handler needs, from files, the cache or the unit."""
+    sources = _source_specs(specs)
+    for scope in need:
+        if scope in sources:
+            continue
+        loaded = _scope_source(device, scope, bankstore_dir)
+        if loaded is None:
+            raise ValueError(
+                f"{scope} is not loaded: pass --source {scope}=GLOB, or fill "
+                f"the bank cache with `kwscli backup save`"
+            )
+        sources[scope] = loaded
+    return sources
+
+
+def _extend_sources(
+    sources: Dict[str, Any],
+    device: Any,
+    scopes: Sequence[str],
+    directory: Optional[str],
+) -> None:
+    """Fill in dependency scopes when they can be found; leave the rest out."""
+    for scope in scopes:
+        if scope in sources:
+            continue
+        try:
+            loaded = _scope_source(device, scope, directory)
+        except Exception:
+            loaded = None
+        if loaded is not None:
+            sources[scope] = loaded
+
+
+def _part_scopes(sources: Dict[str, Any], chosen: Sequence[Any]) -> List[str]:
+    """Every bank a set of performances' used parts points at."""
+    from kws import records as rec, relations
+
+    out: List[str] = []
+    seen: set[str] = set()
+    for perf in chosen:
+        record = _performance_record(sources, perf.scope_id, perf.number)
+        if record is None:
+            continue
+        for part in rec.performance_parts(record):
+            if not part.used:
+                continue
+            scope = relations.resolve_part_scope(part.bank, perf.scope_id)
+            if scope not in seen:
+                seen.add(scope)
+                out.append(scope)
+    return out
+
+
+def _sequence_scopes(sources: Dict[str, Any], chosen: Sequence[Any]) -> List[str]:
+    """Every wave-sequence bank the chosen performances' patches quote."""
+    from kws import records as rec, relations
+
+    out: List[str] = []
+    seen: set[str] = set()
+    for perf in chosen:
+        record = _performance_record(sources, perf.scope_id, perf.number)
+        if record is None:
+            continue
+        for part in rec.performance_parts(record):
+            if not part.used:
+                continue
+            patch_scope = relations.resolve_part_scope(part.bank, perf.scope_id)
+            patch = _patch_record(sources, patch_scope, part.patch)
+            if patch is None:
+                continue
+            for wave in rec.patch_waves(patch):
+                if not wave.is_sequence:
+                    continue
+                scope = relations.resolve_part_scope(wave.bank, patch_scope)
+                if scope not in seen:
+                    seen.add(scope)
+                    out.append(scope)
+    return out
+
+
+def _patch_wave_scopes(sources: Dict[str, Any], scope: str, number: int) -> List[str]:
+    """Every wave-sequence bank one patch's oscillators quote."""
+    from kws import records as rec, relations
+
+    record = _patch_record(sources, scope, number)
+    if record is None:
+        return []
+    out: List[str] = []
+    seen: set[str] = set()
+    for wave in rec.patch_waves(record):
+        if not wave.is_sequence:
+            continue
+        seq_scope = relations.resolve_part_scope(wave.bank, scope)
+        if seq_scope not in seen:
+            seen.add(seq_scope)
+            out.append(seq_scope)
+    return out
+
+
+def _performance_record(
+    sources: Dict[str, Any], scope: str, number: int
+) -> Optional[bytes]:
+    source = sources.get(scope)
+    if source is None or number >= len(source.performances):
+        return None
+    return bytes(source.performances[number])
+
+
+def _patch_record(sources: Dict[str, Any], scope: str, number: int) -> Optional[bytes]:
+    source = sources.get(scope)
+    if source is None or number >= len(source.patches):
+        return None
+    return bytes(source.patches[number])
+
+
+def _patch_name(sources: Dict[str, Any], scope: str, number: int) -> str:
+    from kws import dumps
+
+    record = _patch_record(sources, scope, number)
+    return "(not loaded)" if record is None else dumps.record_name(record)
+
+
+def _performance_label(sources: Dict[str, Any], perf: Any) -> str:
+    from kws import dumps
+
+    record = _performance_record(sources, perf.scope_id, perf.number)
+    if record is None:
+        return f"{perf.scope_id}:{perf.number}"
+    return f'{perf.scope_id} {perf.number:02d} "{dumps.record_name(record)}"'
+
+
+def _print_parts(sources: Dict[str, Any], record: bytes, scope: str) -> None:
+    from kws import records as rec, relations
+
+    for part in rec.performance_parts(record):
+        if not part.used:
+            continue
+        patch_scope = relations.resolve_part_scope(part.bank, scope)
+        name = _patch_name(sources, patch_scope, part.patch)
+        print(f"  {part.index} -> {patch_scope}:{part.patch} {name}")
+
+
+def _format_numbers(numbers: Sequence[int]) -> str:
+    return ", ".join(str(number) for number in numbers) if numbers else "none"
+
+
+def _format_shared(shared: Dict[int, List[int]]) -> str:
+    if not shared:
+        return "none"
+    return ", ".join(
+        f"{patch} (used by {', '.join(f'{number:02d}' for number in perfs)})"
+        for patch, perfs in sorted(shared.items())
+    )
+
+
+def _deps_whole_bank(graph: Any, sources: Dict[str, Any], scope: str) -> int:
+    from kws import dumps, perfcopy
+
+    source = sources[scope]
+    active = perfcopy.active_performances(source)
+    if not active:
+        print(f"{scope}: no active performances")
+    for number in active:
+        record = source.performances[number]
+        print(f'{scope} {number:02d} "{dumps.record_name(record)}"')
+        _print_parts(sources, record, scope)
+    print(f"shared patches: {_format_shared(graph.shared_patches_in_bank(scope))}")
+    print(
+        "unreferenced patches: "
+        f"{_format_numbers(graph.unreferenced_patches_in_bank(scope))}"
+    )
+    return spec.EXIT_OK
+
+
+def _deps_one_performance(
+    graph: Any, sources: Dict[str, Any], scope: str, number: int
+) -> int:
+    from kws import relations
+
+    perf = relations.PerfId(scope, number)
+    try:
+        relation = graph.performance_relation(perf)
+    except LookupError as exc:
+        print(f"{exc}")
+        return spec.EXIT_OK
+    print(f'{scope} {number:02d} "{relation.name}"')
+    _print_parts(sources, sources[scope].performances[number], scope)
+    patches = ", ".join(
+        f"{patch.scope_id}:{patch.number}" for patch in relation.unique_patches
+    )
+    print(f"unique patches: {patches or 'none'}")
+    print(f"sequences: {len(relation.sequences)}")
+    for seq_scope, wave_bank, sequence in relation.sequences:
+        print(f"  {seq_scope} {sequence:02d} (wave bank {wave_bank})")
+    print(f"step cost: {relation.step_cost}")
+    for missing in relation.missing:
+        print("  missing:", missing)
+
+    shared = graph.shared_patches_in_bank(scope)
+    sharing = [
+        patch.number
+        for patch in relation.unique_patches
+        if patch.scope_id == scope and patch.number in shared
+    ]
+    if sharing:
+        print("patches: shared with other performances")
+        for patch_number in sharing:
+            others = [
+                f"{other:02d}" for other in shared[patch_number] if other != number
+            ]
+            print(
+                f"  patch {patch_number} also used by "
+                f"{', '.join(others) or 'no other performance'}"
+            )
+    else:
+        print("patches: atomic")
+    multisets = graph.multisets_using_performance(perf)
+    print(
+        "multisets: "
+        + (", ".join(f"{number}.{channel}" for number, channel in multisets) or "none")
+    )
+    return spec.EXIT_OK
+
+
+def _deps_one_patch(
+    graph: Any, sources: Dict[str, Any], scope: str, number: int
+) -> int:
+    from kws import dumps, records as rec, relations
+
+    record = _patch_record(sources, scope, number)
+    if record is None:
+        print(f"{scope}:{number} is not loaded")
+        return spec.EXIT_OK
+    print(f'{scope} {number:02d} "{dumps.record_name(record)}"')
+    for wave in rec.patch_waves(record):
+        if wave.is_sequence:
+            seq_scope = relations.resolve_part_scope(wave.bank, scope)
+            print(f"  Osc {wave.index + 1} -> wave sequence {wave.wave} in {seq_scope}")
+        else:
+            print(f"  Osc {wave.index + 1} -> wave {wave.wave}")
+    used = graph.performances_using_patch(relations.PatchId(scope, number))
+    if not used:
+        print("used by: none")
+    else:
+        print(
+            "used by: " + ", ".join(_performance_label(sources, perf) for perf in used)
+        )
+    return spec.EXIT_OK
+
+
+def _cmd_deps(device: Any, args: argparse.Namespace) -> int:
+    """The Perf -> Patch -> WaveSeq graph, for a bank or one slot."""
+    from kws import banks as bk, perfcopy, relations
+
+    if (args.kind is None) != (args.number is None):
+        print("error: a kind and a number go together", file=sys.stderr)
+        return spec.EXIT_USAGE
+    scope = args.bank
+    try:
+        sources = _cli_sources(
+            device,
+            specs=args.source,
+            bankstore_dir=args.bankstore,
+            need=[scope],
+        )
+    except (LookupError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return spec.EXIT_USAGE
+
+    chosen: List[Any] = []
+    if args.kind is None:
+        chosen = [
+            relations.PerfId(scope, number)
+            for number in perfcopy.active_performances(sources[scope])
+        ]
+    elif args.kind == bk.Kind.PERFORMANCE:
+        chosen = [relations.PerfId(scope, args.number)]
+    _extend_sources(sources, device, _part_scopes(sources, chosen), args.bankstore)
+    _extend_sources(sources, device, _sequence_scopes(sources, chosen), args.bankstore)
+    if args.kind == bk.Kind.PATCH and args.number is not None:
+        _extend_sources(
+            sources,
+            device,
+            _patch_wave_scopes(sources, scope, args.number),
+            args.bankstore,
+        )
+
+    graph = relations.RelationGraph(sources, active_card_scope="CARD")
+    if args.kind is None:
+        return _deps_whole_bank(graph, sources, scope)
+    if args.kind == bk.Kind.PERFORMANCE:
+        return _deps_one_performance(graph, sources, scope, args.number)
+    return _deps_one_patch(graph, sources, scope, args.number)
+
+
+def _parse_perf_specs(texts: Sequence[str]) -> List[Any]:
+    from kws import relations
+
+    chosen: List[Any] = []
+    for text in texts:
+        if ":" not in text:
+            raise ValueError(f"copy-perf wants SCOPE:NUMBER, got {text!r}")
+        scope, number = text.rsplit(":", 1)
+        try:
+            chosen.append(relations.PerfId(scope, int(number)))
+        except ValueError:
+            raise ValueError(f"copy-perf wants SCOPE:NUMBER, got {text!r}") from None
+    return chosen
+
+
+def _print_atomic_remap(plan: Any) -> None:
+    for alloc in plan.allocations:
+        print(
+            f"perf {alloc.target_perf_slot} <- {alloc.source_perf.scope_id}:"
+            f"{alloc.source_perf.number} {alloc.name}"
+        )
+        for patch, slot in alloc.allocated_patches:
+            print(f"  patch {slot} <- {patch.scope_id}:{patch.number}")
+    for why in plan.rejected:
+        print("  left out:", why)
+
+
+def _print_atomic_usage(plan: Any) -> None:
+    from kws import banks as bk, records as rec
+
+    print(f"performances {len(plan.allocations)}/{bk.PERFORMANCES_PER_BANK}")
+    print(f"patches      {plan.patch_count}/{bk.PATCHES_PER_BANK}")
+    print(f"wave seqs    {len(plan.sequence_map)}/{rec.SEQUENCES_PER_BANK}")
+    print(f"steps        {plan.steps_used}/{rec.STEPS_PER_BANK}")
+
+
+def _write_atomic_files(
+    prefix: str, destination: Any, channel: int, built: Any
+) -> List[str]:
+    """Write the three bank files a copy produces, and say where."""
+    from kws import messages as m
+
+    written: List[str] = []
+    for suffix, function, payload in (
+        ("patch", m.Function.ALL_PATCH_DUMP, built.patches),
+        ("perf", m.Function.ALL_PERFORMANCE_DUMP, built.performances),
+        ("seq", m.Function.ALL_WAVESEQ_DUMP, built.waveseq),
+    ):
+        if payload is None:
+            continue
+        frame = m.frame_bulk(function, destination.sysex, payload, channel=channel)
+        path = f"{prefix}-{suffix}.syx"
+        with open(path, "wb") as handle:
+            handle.write(bytes(frame))
+        print(f"wrote {path}  ({len(frame)} bytes)")
+        written.append(path)
+    print("Nothing was sent to the instrument.")
+    return written
+
+
+def _copy_perf_fence(
+    device: Any, args: argparse.Namespace, destination: Any, built: Any
+) -> int:
+    """Name what the destination holds, then write only with ``--yes``."""
+    from kws import backup
+
+    kinds = (banks.Kind.PERFORMANCE, banks.Kind.PATCH, "waveseq")
+    print(
+        f"about to replace: {destination.label}, all "
+        f"{_word_list([_plural(kind) for kind in kinds])}"
+    )
+    print("if any read below fails, nothing is sent")
+    for kind in kinds:
+        try:
+            held = _destination_names(device, destination, kind)
+        except Exception as exc:
+            print(f"     it now holds: could not be read ({exc})")
+            print("Refusing to write a bank that cannot first be read and backed up.")
+            return spec.EXIT_ERROR
+        print(f"     it now holds ({_plural(kind)}): {held}")
+
+    if not args.yes:
+        print(
+            "\nNothing has been sent. Add --yes to write, and be sure: "
+            "this replaces the whole bank and no power cycle brings it "
+            "back."
+        )
+        return spec.EXIT_OK
+
+    where = args.backup_dir or backup.default_dir()
+    result = device.write_bank_bundle(
+        destination.number,
+        performances=built.performances,
+        patches=built.patches,
+        waveseq=built.waveseq,
+        backup_dir=where,
+    )
+    print(f"\nbacked up to: {result['backup']}")
+    if result["verified"] is True:
+        print("written and verified by reading it back")
+        return spec.EXIT_OK
+    print(f"written, but the read-back does NOT match: {result['mismatch']}")
+    print("The backup above holds what was there before.")
+    return spec.EXIT_ERROR
+
+
+def _cmd_copy_perf(device: Any, args: argparse.Namespace) -> int:
+    """Copy performances and their private patches into one bank."""
+    from kws import banks as bk, perfcopy
+
+    try:
+        chosen = _parse_perf_specs(args.spec)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return spec.EXIT_USAGE
+    destination = bk.bank(args.to)
+    target_scope = destination.id
+
+    requested: List[str] = []
+    for perf in chosen:
+        if perf.scope_id not in requested:
+            requested.append(perf.scope_id)
+    try:
+        sources = _cli_sources(
+            device,
+            specs=args.source,
+            bankstore_dir=args.bankstore,
+            need=requested,
+        )
+    except (LookupError, ValueError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return spec.EXIT_USAGE
+
+    if target_scope not in sources:
+        try:
+            target_source = _scope_source(device, target_scope, args.bankstore)
+        except Exception:
+            target_source = None
+        if target_source is not None:
+            sources[target_scope] = target_source
+        elif args.mode == "append":
+            print(
+                f"note: {destination.label} could not be loaded, so append "
+                f"starts from an empty bank"
+            )
+    _extend_sources(sources, device, _part_scopes(sources, chosen), args.bankstore)
+    _extend_sources(sources, device, _sequence_scopes(sources, chosen), args.bankstore)
+
+    built = perfcopy.copy_into_bank(
+        sources,
+        target_scope,
+        chosen,
+        mode=args.mode,
+        destination_bank=destination,
+    )
+    _print_atomic_remap(built.plan)
+    _print_atomic_usage(built.plan)
+
+    if args.out is not None:
+        _write_atomic_files(
+            args.out,
+            destination,
+            (args.channel or 1) - 1,
+            built,
+        )
+        return spec.EXIT_OK
+    return _copy_perf_fence(device, args, destination, built)
+
+
 def _cmd_backup_list(_args: argparse.Namespace) -> int:
     from kws import backup
 
@@ -1001,15 +1565,47 @@ _COMMANDS: Dict[str, Callable[[Any, argparse.Namespace], Any]] = {
     "multi": _cmd_multi,
     "backup": _cmd_backup,
     "cards": _cmd_cards,
+    "deps": _cmd_deps,
+    "copy-perf": _cmd_copy_perf,
 }
 _OFFLINE = {"banks", "list", "find", "ports", "cards"}
 
 
+def _has_source_for(args: argparse.Namespace, scope: str) -> bool:
+    """True when ``--source`` names ``scope`` (its ID, not its glob)."""
+    for text in getattr(args, "source", None) or ():
+        if "=" in text and text.split("=", 1)[0] == scope:
+            return True
+    return False
+
+
+def _deps_offline(args: argparse.Namespace) -> bool:
+    """True when the bank `deps` must look at is already on disk."""
+    from kws import bankstore
+
+    scope = getattr(args, "bank", None)
+    if not scope:
+        return False
+    if _has_source_for(args, scope):
+        return True
+    where = getattr(args, "bankstore", None) or bankstore.default_dir()
+    return bankstore.load(scope, where) is not None
+
+
 def _offline(args: argparse.Namespace) -> bool:
     """True when a command needs no unit. ``backup list`` is the one
-    subcommand that qualifies: ``save`` and ``restore`` both open one."""
+    subcommand that qualifies: ``save`` and ``restore`` both open one.
+
+    ``deps`` is offline when the bank it asks about is loaded from
+    ``--source`` or the bank cache; ``copy-perf`` is offline when it writes
+    files with ``--out``, because that path touches no unit at all.
+    """
     if args.command == "backup":
         return getattr(args, "backup_command", None) == "list"
+    if args.command == "deps":
+        return _deps_offline(args)
+    if args.command == "copy-perf":
+        return getattr(args, "out", None) is not None
     return args.command in _OFFLINE
 
 
@@ -1082,6 +1678,91 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="TEXT",
         help="set a local label on a captured bank (offline)",
+    )
+    sp = sub.add_parser(
+        "deps",
+        help="the Perf -> Patch -> WaveSeq graph for a bank or slot "
+        "(no unit when cached)",
+    )
+    sp.add_argument(
+        "bank",
+        help="scope: RAM1, ROM6, CARD/07 or CARD/c1",
+    )
+    sp.add_argument(
+        "kind",
+        nargs="?",
+        default=None,
+        choices=kinds,
+        help="show one performance or patch instead of the whole bank",
+    )
+    sp.add_argument(
+        "number",
+        nargs="?",
+        type=int,
+        default=None,
+        help="the slot to show, with a kind",
+    )
+    sp.add_argument(
+        "--source",
+        action="append",
+        default=[],
+        metavar="ID=GLOB",
+        help="a source bank's dumps; repeatable",
+    )
+    sp.add_argument(
+        "--bankstore",
+        default=None,
+        metavar="DIR",
+        help="bank cache directory (default: the per-platform data dir)",
+    )
+    sp = sub.add_parser(
+        "copy-perf",
+        help="copy performances with their private patches into one bank",
+    )
+    sp.add_argument(
+        "spec",
+        nargs="+",
+        metavar="SCOPE:NUMBER",
+        help="a performance to copy, in priority order",
+    )
+    sp.add_argument(
+        "--to",
+        required=True,
+        choices=["RAM1", "RAM2", "RAM3", "CARD"],
+        help="destination bank",
+    )
+    sp.add_argument(
+        "--mode",
+        choices=["append", "clean"],
+        default="append",
+        help="append to the destination's active performances, or replace it",
+    )
+    sp.add_argument(
+        "--out",
+        default=None,
+        metavar="PREFIX",
+        help="write <PREFIX>-perf.syx etc.; omit to write to the unit",
+    )
+    sp.add_argument(
+        "--yes", action="store_true", help="actually write; without it nothing is sent"
+    )
+    sp.add_argument(
+        "--source",
+        action="append",
+        default=[],
+        metavar="ID=GLOB",
+        help="a source bank's dumps; repeatable",
+    )
+    sp.add_argument(
+        "--bankstore",
+        default=None,
+        metavar="DIR",
+        help="bank cache directory (default: the per-platform data dir)",
+    )
+    sp.add_argument(
+        "--backup-dir",
+        default=None,
+        help="where to save the destination before overwriting",
     )
     sp = sub.add_parser("list", help="one bank's slots (no unit needed)")
     sp.add_argument("bank")
