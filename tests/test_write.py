@@ -765,7 +765,11 @@ class TestTheDemoDeviceStoresWrites:
         )
 
         assert result["verified"] is True
-        assert result["backup"] is None
+        from kws import backup as _backup
+
+        loaded = _backup.load(result["backup"])
+        assert loaded.kind == banks.Kind.PATCH
+        assert "dump" in loaded.blocks
         assert device.bank_write_count == 1
         dump = device.read_bank("CARD", banks.Kind.PATCH)
         assert b"".join(dump.records) == bytes(data)
@@ -808,6 +812,11 @@ class TestTheDemoDeviceStoresWrites:
         assert result["kind"] == "bank-bundle"
         assert result["kinds"] == ["waveseq", "patches", "performances"]
         assert result["verified"] is True
+        from kws import backup as _backup
+
+        loaded = _backup.load(result["backup"])
+        assert loaded.kind == "bank-bundle"
+        assert set(loaded.blocks) == {"performances", "patches", "waveseq"}
         assert device.bundle_write_count == 1
 
         perf_dump = device.read_bank("CARD", banks.Kind.PERFORMANCE)
@@ -817,3 +826,17 @@ class TestTheDemoDeviceStoresWrites:
         stored = m.parse(device.read_raw(CARD_SYSEX, m.Function.ALL_WAVESEQ_DUMP))
         assert stored is not None
         assert stored.data()[: len(waveseq)] == bytes(waveseq)
+
+
+def test_a_demo_write_multi_returns_a_multi_envelope(tmp_path):
+    from kwsed.demo import DemoDevice
+
+    device = DemoDevice()
+    result = device.write_multi(b"hello", backup_dir=str(tmp_path))
+
+    assert result["verified"] is True
+    from kws import backup as _backup
+
+    loaded = _backup.load(result["backup"])
+    assert loaded.kind == "multi"
+    assert "dump" in loaded.blocks

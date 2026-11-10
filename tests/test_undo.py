@@ -297,3 +297,37 @@ class TestBundleUndo:
             assert bytes(device.multi_written) == multi_frame, (
                 "the multisets must come back too"
             )
+
+
+class TestPlainDemoUndo:
+    @pytest.mark.asyncio
+    async def test_a_plain_demo_write_records_one_undo_step(self, tmp_path):
+        device = DemoDevice()
+        old = BundleFixture("Old")
+        new = BundleFixture("New")
+        old.write(device, str(tmp_path))
+        result_b = device.write_bank_bundle(
+            "CARD",
+            performances=new.bytes["performances"],
+            patches=new.bytes["patches"],
+            waveseq=new.bytes["waveseq"],
+            backup_dir=str(tmp_path),
+        )
+
+        app = KwsedApp(
+            device,
+            catalog=_catalog.empty(),
+            allow_write=True,
+        )
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._record_write(result_b)
+            assert len(app._undo_log) == 1
+            app.action_undo()
+            for _ in range(10):
+                await pilot.pause()
+                if len(app._undo_log) == 0:
+                    break
+            assert len(app._undo_log) == 0
+            for name in ("performances", "patches", "waveseq"):
+                assert old.read_back(device, name) == old.bytes[name]

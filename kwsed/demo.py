@@ -29,6 +29,7 @@ from __future__ import annotations
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+from kws import backup
 from kws import banks
 from kws import dumps
 from kws import messages as m
@@ -87,6 +88,15 @@ _BUNDLE_KINDS = {
     "performances": banks.Kind.PERFORMANCE,
     "patches": banks.Kind.PATCH,
     "waveseq": "waveseq",
+}
+
+
+#: The framed dump function for each writable kind, mirroring
+#: ``kws.bridge``'s mapping so a backup envelope matches the bridge's.
+_DUMP_FUNCTION = {
+    banks.Kind.PATCH: m.Function.ALL_PATCH_DUMP,
+    banks.Kind.PERFORMANCE: m.Function.ALL_PERFORMANCE_DUMP,
+    "waveseq": m.Function.ALL_WAVESEQ_DUMP,
 }
 
 
@@ -311,9 +321,23 @@ class DemoDevice:
     ) -> Dict[str, Any]:
         """Accept a Multi Mode Setup write; a fake has nothing to verify."""
         self._tick()
+        before = (
+            self.multi_written
+            if self.multi_written is not None
+            else bytes(len(bytes(data)))
+        )
         self.multi_written = bytes(data)
         self.multi_write_count += 1
-        return {"backup": None, "verified": True, "mismatch": None}
+        path = backup.save(
+            backup_dir,
+            kind="multi",
+            slot="multi",
+            name="Multi Mode Setup",
+            device_id=str(self.channel),
+            source="kwsed",
+            blocks={"dump": bytes(before)},
+        )
+        return {"backup": path, "verified": True, "mismatch": None}
 
     # --- writing, which is stored so a read-back and an undo can see it -----
 
@@ -367,15 +391,26 @@ class DemoDevice:
         rather than short-circuited.
         """
         self._tick()
+        entry, payload = self._checked(bank, kind, data)
+        frame = self.read_raw(entry.sysex, _DUMP_FUNCTION[kind])
         entry, payload = self._accept(bank, kind, data)
         self.bank_write_count += 1
         self.bank_writes.append(
             {"bank": entry.label, "kind": kind, "bytes": len(payload)}
         )
+        path = backup.save(
+            backup_dir,
+            kind=kind,
+            slot=entry.label,
+            name=entry.label,
+            device_id=str(self.channel),
+            source="kwsed",
+            blocks={"dump": frame},
+        )
         return {
             "bank": entry.label,
             "kind": kind,
-            "backup": None,
+            "backup": path,
             "verified": True,
             "mismatch": None,
         }
@@ -410,6 +445,9 @@ class DemoDevice:
             checked.append((bundle_kind, kind, payload))
         if not checked:
             raise ValueError("nothing to write")
+        before: Dict[str, bytes] = {}
+        for bundle_kind, kind, _payload in checked:
+            before[bundle_kind] = self.read_raw(entry.sysex, _DUMP_FUNCTION[kind])
         for _bundle_kind, kind, payload in checked:
             self._written[(entry.id, kind)] = payload
         kinds = [bundle_kind for bundle_kind, _kind, _payload in checked]
@@ -421,11 +459,20 @@ class DemoDevice:
                 "bytes": sum(len(payload) for _bundle, _kind, payload in checked),
             }
         )
+        path = backup.save(
+            backup_dir,
+            kind="bank-bundle",
+            slot=entry.label,
+            name=entry.label,
+            device_id=str(self.channel),
+            source="kwsed",
+            blocks=before,
+        )
         return {
             "bank": entry.label,
             "kind": "bank-bundle",
             "kinds": kinds,
-            "backup": None,
+            "backup": path,
             "verified": True,
             "mismatch": None,
         }
