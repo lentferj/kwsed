@@ -1985,7 +1985,10 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="FILE",
-        help="a bank file (SysEx, MIDI, .sqs or .lib listing) to copy from; repeatable",
+        help=(
+            "a bank file (SysEx, MIDI, .sqs, .LIB, .img, .zip or .bnk) "
+            "to copy from; repeatable"
+        ),
     )
     sp.add_argument(
         "--yes", action="store_true", help="actually write; without it nothing is sent"
@@ -2011,14 +2014,25 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("import", help="read a bank from a file into the bank cache")
     sp.add_argument("file")
     sp.add_argument("--list", action="store_true", help="list the file's banks")
-    sp.add_argument("--scope", default=None, metavar="SCOPE")
+    sp.add_argument(
+        "--scope",
+        default=None,
+        metavar="SCOPE",
+        help="choose the first bank with this scope",
+    )
     sp.add_argument(
         "--label",
         default=None,
         metavar="LABEL",
         help="exact bank label from --list",
     )
-    sp.add_argument("--as", dest="as", default=None, metavar="DEST")
+    sp.add_argument(
+        "--as",
+        dest="as",
+        default=None,
+        metavar="DEST",
+        help="cache scope (default: the source's own internal scope)",
+    )
     sp.add_argument(
         "--bankstore",
         default=None,

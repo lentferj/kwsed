@@ -135,7 +135,48 @@ unit or emulator **before** connecting irreplaceable equipment.
   a Universal Identity Request, and the reply carries the channel it is set
   to — the one number you cannot guess and without which every request is
   met with silence.
+- **Copies performances atomically.** `y` in the browser, or
+  `kwscli copy-perf`, puts the performance in the first free slot, copies its
+  patches privately, packs them with no gap, and rewrites every part to point
+  at the new slots. The patch, sequence and step budgets are checked before
+  anything is written.
+- **Shows what a sound depends on.** `d`, the `D` pane and `kwscli deps` walk
+  Performance → Patch → WaveSeq, with structural deduplication.
+- **Builds favourites banks offline.** `tools/build_bank.py` writes `.syx`
+  files and never touches the unit; patch-first and performance-first orders
+  are both supported.
+- **Imports whole banks and single performances** from SysEx, Standard MIDI,
+  SoundDiver `.LIB`, SoundQuest/MidiQuest `.sqs`, FAT12 floppy images, `.zip`
+  archives and `.bnk` bundles. See [Importing banks and
+  performances](#importing-banks-and-performances).
+- **Caches whole bank records locally**, not just names. The browser,
+  `deps` and `copy-perf` all use the same per-bank cache.
+- **Writes behind a fence, with backups and undo.** Every write reads the
+  destination first, saves an envelope, writes, and verifies the read-back.
+  The browser has a write gate and `z` undo; the CLI requires `--yes`.
+- **Favourites, tags, notes and star ratings**, stored per slot and kept for
+  HCard banks and physical cards separately.
+- **Multi-card Multisets.** The Multi editor can accept scoped card banks and
+  stage their performances into RAM, so one Multiset can span several cards;
+  the staged banks and the Multiset are written and undone as one bundle.
+- **Remembers UI state.** Pane visibility and the scan offer live in
+  `ui-state.toml`, separate from the connection settings.
 - **A CLI** (`kwscli`), most of which needs no unit at all.
+
+Feature map:
+
+| feature | documented in |
+|---|---|
+| Cards, physical cards, HCard | [Cards](#cards-card_mode), [docs/CARDS.md](docs/CARDS.md) |
+| Multisets and multi-card staging | [Multisets and multi-card staging](#multisets-and-multi-card-staging) |
+| Atomic performance copy and dependencies | [Dependencies and atomic copying](#dependencies-and-atomic-copying) |
+| Bank builder | [Building a favourites bank](#building-a-favourites-bank), [docs/BANK_BUILDER.md](docs/BANK_BUILDER.md) |
+| Imports, disk images, `.LIB`, `.sqs` | [Importing banks and performances](#importing-banks-and-performances) |
+| Bank cache | [Local bank cache](#local-bank-cache) |
+| Writes, backups and undo | [Writes, backups and undo](#writes-backups-and-undo) |
+| Favourites, tags, notes, ratings | [Favourites, tags, notes and ratings](#favourites-tags-notes-and-ratings) |
+| Remembered UI state | [Remembered UI state](#remembered-ui-state) |
+| Every key and CLI command | [Keys](#keys), [Command line](#command-line) |
 
 ### Cards: `card_mode`
 
@@ -252,73 +293,278 @@ kwsed --port "U6MIDI Pro:U6MIDI Pro MIDI 1 44:0" --device-channel 5
 | arrows, `tab` | move; `tab` switches pane |
 | `enter` | select this sound — **it will sound** |
 | `r` | read this bank's names from the unit — **silent** |
+| `S` | scan every real bank into the local cache — **silent**, cancellable |
 | `/` | search names |
-| `m` | multis: read the 32 Multisets and their 16 channels — **silent** |
-| `p` | show/hide the patch rows in the bank list — remembered between runs (they can be inspected, not selected) |
-| `d` | what the sound under the cursor uses — its patches and wave sequences (silent) |
-| `D` | show/hide the dependency pane that follows the selection — remembered between runs |
+| `f` / `F` | favourite this slot / cycle all slots → this bank's favourites → every favourite (silent) |
+| `t` / `n` | edit tags / note on a favourite (silent; `f` first) |
+| `V` | filter by star rating (silent) |
+| `c`, `[`, `]` | pick / step the MIDI channel used for select and audition |
+| `m` / `e` | read the 32 Multisets / edit the selected one — **silent** |
+| `d` / `D` | show the selection's dependencies / show-hide the dependency pane — silent, remembered |
+| `p` | show/hide the patch rows in the bank list — remembered (they can be inspected, not selected) |
 | `y` | copy this performance, with private copies of its patches, into RAM 1–3 or the Card — silent until armed |
-| `i` | device identity and the unit's global channel |
-| `?` / `q` | help / quit |
+| `z` / `w` | undo the last write / toggle the write gate |
+| `C` / `L` / `X` | capture the inserted card / label it / sweep HCard banks — read-only on the unit |
+| `i` / `?` / `q` | device identity / help / quit |
 
 **Moving the cursor never sends anything**, enforced by a test.
 
-Inside the Multi editor (`m`, then `e`), `b` also accepts scoped card banks
-(`CARD/07`, `CARD/c1`) and `s` stages the card performances into RAM so one
-Multiset can hold sounds from several cards at once.
+`S` is the bulk version of `r`: it reads every real bank and kind, caches the
+records, and can be stopped with `S` again between banks. The demo refuses it
+rather than writing invented names into the live cache. `C`, `L` and `X` do
+nothing when `card_mode = "none"`; `X` is HCard-only. `c`, `[` and `]` set the
+MIDI channel used for selection and audition; the unit's own SysEx base
+channel is the separate `--device-channel`.
+
+On the **copy-performance** screen (`y`), `a` arms and `w` writes; `esc`/`q`
+cancels. In the **Multi editor** (`m`, then `e`), `b` chooses a bank (including
+`CARD/07` and `CARD/c1`), `s` stages card performances into RAM, `space`
+toggles a channel's used flag, `+`/`-` nudges its level, `n` renames it, and
+`a`/`w` arm and write the staged bundle.
+
+### Writes, backups and undo
+
+Every write is fenced equally, whether it comes from the browser or the CLI:
+the destination is read first, a backup envelope is saved, the write is sent,
+and the read-back is verified. If the first read fails, nothing is written at
+all. CLI writes require `--yes`; `--backup-dir DIR` chooses where the
+envelope goes.
+
+The browser starts with the **write gate locked**. `w` arms or locks it;
+`--allow-write` starts it armed. While the gate is armed, `z` restores the
+most recent write. A copy restores the destination bank; a multi-card staging
+write restores every staged bank *and* the Multiset in one step; a failed
+write leaves the gate and the backups intact so it can be retried or undone.
+
+`kwscli send` writes one bank `.syx`; `kwscli copy-perf --yes` writes a copied
+performance bundle; `kwscli backup restore --yes` restores an envelope.
+`kwscli backup list` and `backup save` use the same envelope format;
+`backup save` reads banks off the unit with `--yes` and never writes. Envelopes
+default to `~/.local/share/kwsed/backups` on Linux.
+
+### Favourites, tags, notes and ratings
+
+`f` toggles a favourite without sending MIDI; `F` cycles three views: all
+slots, this bank's favourites, every favourite. `t` sets comma-separated tags
+and `n` a free-text note; both require an existing favourite and say so
+otherwise. `V` filters by 0–5 stars. These live in the favourites database
+(`--favorites PATH`, default `~/.local/share/kwsed/favorites.db`), not in the
+bank cache. HCard banks and physical cards keep their favourites separately,
+so the same slot number on two cards cannot collide.
+
+### Dependencies and atomic copying
+
+`d` shows what the selected performance uses; `D` keeps a live dependency pane
+open and remembers that choice. `kwscli deps BANK [KIND NUMBER]` prints the
+same graph, using `--source ID=GLOB` or the local cache and needing no unit
+when the bank is cached. The graph is Performance → Patch → WaveSeq; identical
+patches are deduplicated structurally, not by name.
+
+`y`, or `kwscli copy-perf SCOPE:NUMBER...`, copies a performance atomically:
+
+- it goes into the first free performance slot (or into a clean bank with
+  `--mode clean`);
+- every part's patch is copied privately, so editing one copy cannot alter
+  another performance;
+- the patch bank is packed contiguously, with no gap;
+- every part is rewritten to the new patch slot, and the patch/sequence/step
+  budgets are checked before anything is sent.
+
+`--out PREFIX` writes the three `.syx` files and touches no unit; `--yes`
+writes the destination through the fence. `--source ID=GLOB` and
+`--from-file FILE` supply the source; the latter also accepts every import
+format below except the undecoded KryoFlux flux. Use `--backup-dir` to choose
+the destination backup directory.
+
+### Local bank cache
+
+`kwscli import` files a bank in the per-user **bank cache**, one JSON envelope
+per scope, under `~/.local/share/kwsed/banks` on Linux
+(`--bankstore DIR` overrides). A card scope such as `CARD/07` becomes
+`CARD__07.json`. The cache stores performance, patch and wave-sequence
+records, because `copy-perf`, `deps` and the browser need the records, not
+just names. Multisets are read for listing but are not stored there; the live
+Multiset view reads them from the unit.
+
+The cache is not the name catalog. Names read from the unit are a separate
+live layer (`--live-names PATH`), and the generated catalog remains the
+read-only fallback. `import --as` writes the cache; the other commands read it
+unless `--source` or `--from-file` supplies the bank directly.
+
+### Remembered UI state
+
+Connection and card settings live in `~/.config/kwsed/config.toml`
+(`--config PATH`): `card_mode` and `show_card_defaults`. Pane visibility and
+the scan offer live in `~/.config/kwsed/ui-state.toml` beside it, so a
+hand-edited dotted key cannot freeze settings saves:
+
+```toml
+[browser]
+show_patches = true
+deps_pane = true
+[scan]
+offer_dismissed = false
+```
+
+Older builds wrote these into `config.toml`; kwsed migrates them
+automatically. Both files are safe to delete. `--favorites`, `--live-names`
+and `--cards` point at the other state files.
+
+| path | contents |
+|---|---|
+| `~/.config/kwsed/config.toml` | port, channel, card mode, HCard defaults |
+| `~/.config/kwsed/ui-state.toml` | pane visibility and scan-offer state |
+| `~/.local/share/kwsed/favorites.db` | favourites, tags, notes, ratings |
+| `~/.local/share/kwsed/live-names.json` | names read from the unit |
+| `~/.local/share/kwsed/cards.json` | HCard bank archive |
+| `~/.local/share/kwsed/physical-cards.json` | physical card archive and labels |
+| `~/.local/share/kwsed/banks/` | imported bank records |
+| `~/.local/share/kwsed/backups/` | write-fence backup envelopes |
+
+### Multisets and multi-card staging
+
+`m` reads the 32 Multisets; `e` edits the selected one's 16 channels. Silent
+throughout until the final write. A channel's `b` accepts an ordinary bank or
+a scoped card bank (`CARD/07`, `CARD/c1`). For a card performance, `s` stages
+it into RAM — RAM 3 first, then the other writable banks — copying its
+dependencies and remapping the channel, so one Multiset can hold sounds from
+several cards at once. `a` then `w` writes the staged bank(s) *and* the Multi
+Mode Setup as one fenced bundle; `z` restores all of it. The budgets and the
+full staging rules are in [docs/BANK_BUILDER.md](docs/BANK_BUILDER.md).
+`kwscli multi --all` includes empty Multisets.
 
 ### Command line
 
+`kwscli` covers the same ground without the TUI. "No" in the unit column
+means the command works from the local archives/cache.
+
+| command | what it does | unit? | unit writes? |
+|---|---|---|---|
+| `banks` | the twelve-bank table | no | no |
+| `list BANK KIND` | one bank's slots | no | no |
+| `find TEXT` | search names | no | no |
+| `ports` | MIDI ports on this host | no | no |
+| `cards` | HCard archive; `--label` sets a local label, `--syx` writes one bank's names | no | no |
+| `status` | identity and the unit's global channel | yes | no |
+| `dump BANK [KIND]` | read one bank's names — silent | yes | no |
+| `select BANK KIND N` | select a performance/Multiset (patches refused) | yes | no (sets mode) |
+| `multi [--all]` | the 32 Multisets and their 16 channels — silent | yes | no |
+| `deps BANK [KIND N]` | Performance → Patch → WaveSeq graph | no if cached | no |
+| `import FILE` | file/disk → local bank cache | no | no |
+| `copy-perf ...` | copy performances with dependencies | yes unless `--out` | with `--yes` |
+| `send FILE --to BANK` | write one bank dump | yes | with `--yes` |
+| `backup list` | list backup envelopes | no | no |
+| `backup save` | read banks into backup envelopes with `--yes` | yes | no |
+| `backup restore FILE` | write an envelope back | yes | with `--yes` |
+
 ```sh
-kwscli banks                      # the bank table (no unit needed)
-kwscli list RAM1 performance      # one bank's slots (no unit needed)
-kwscli find "glass"               # search names (no unit needed)
-kwscli ports                      # MIDI ports on this host
-kwscli status                     # who is there, and on which global channel
-kwscli dump CARD                  # read a bank's names (silent)
-kwscli multi                      # the 32 Multisets (silent)
-kwscli select RAM1 performance 12 # select a performance ON THE UNIT (patch refused)
+kwscli banks
+kwscli list RAM1 performance
+kwscli find "glass"
+kwscli status
+kwscli dump CARD
+kwscli multi --all
+kwscli select RAM1 performance 12
 kwscli deps RAM1 --source RAM1=dumps/ram1-*.syx
 kwscli copy-perf CARD/07:3 CARD/13:11 --to RAM3 --out staged
+kwscli send staged-perf.syx --to RAM3 --yes
+kwscli backup list
+kwscli backup save --bank RAM1 --yes
+kwscli cards --kind patch --syx hcard07.syx
 ```
+
+`import` writes only the local cache; `copy-perf --out` writes only files.
+The only unit writes are `send`, `copy-perf --yes`, `backup restore --yes`
+and the browser's armed write gate. `backup save` defaults to all four
+writable banks and both kinds; `--bank` and `--kind` narrow it. `cards --kind`
+chooses the names-only `.syx` and `--label` sets its local archive label.
+
+Common options: `--port`, `--recv-port`, `--scan` (re-probe ports, not a
+bank scan), `--device-channel`, `--demo`, `--catalog`, `--live-names`.
+`kwscli` additionally has `--channel` and `--cards`; the app's channel key is
+`c`. The app adds `--config`, `--favorites` and `--allow-write`. Run
+`kwscli --help` or `kwsed --help` for the rest.
 
 ### Importing banks and performances
 
-`kwscli import` reads a whole bank from a file into the local bank cache; the
-browser and `copy-perf` then use it. `copy-perf --from-file` copies a single
-performance and the patches it depends on into an existing bank:
+`kwscli import` reads a whole bank into the local bank cache; the browser and
+`copy-perf` then use it. `kwscli copy-perf --from-file` reads a file, disk or
+archive as the source of one performance and its dependencies. Both use the
+same readers; `--list` before choosing is cheap and needs no unit.
 
 ```sh
-kwscli import "card07.syx" --as CARD/07       # file a card bank in the cache
-kwscli import "factory.syx" --list             # what banks and performances?
-kwscli import "DANGER WORLD.img" --list       # banks inside a disk image
-kwscli import "set.zip" --label "..."          # pick one bank from a zip
+kwscli import "card07.syx" --as CARD/07
+kwscli import "factory.syx" --list
+kwscli import "DANGER WORLD.img" --list
+kwscli import "set.zip" --label "set.zip / DANGER WORLD.img / DANGERW.SYX [RAM1]"
 kwscli copy-perf RAM1:3 --to RAM3 --from-file "factory.syx" --out staged
+kwscli copy-perf RAM1:3 --to RAM3 --from-file "DANGER WORLD.img" --mode clean --out staged
 kwscli copy-perf RAM1:3 --to RAM3 --from-file "factory.syx" --yes
 ```
 
-Read formats:
+#### What each source supplies
 
-| format | what is read |
-|---|---|
-| SysEx `.syx` / `.sysex` | one type per file, all three in one file, single performance/patch dumps, multi-bank files, and All Data (`0x50`; its RAM1/RAM2 banks) |
-| Standard MIDI `.mid` / `.midi` | the SysEx the file carries, including the Korg header without its leading `F0` |
-| SoundQuest `.sqs` | banks carried as embedded Korg SysEx; MidiQuest-native bodies are refused |
-| Edisyn bank `.syx` | standard bank dumps |
-| SoundDiver `.LIB` | patches (1, 2 or 4 oscillators), performances and wave sequences are decoded into their `RAM1-NN` slots; multisets are not present in the example libraries and are not converted |
-| FAT12 floppy `.img` | a disk image; the `.syx`/`.mid`/`.bnk` files inside it (`.arr`, docs and images are skipped) |
-| `.zip` archive | disk images and loose `.syx`/`.mid`/`.bnk` files inside it; KryoFlux `.7z` flux archives are **not** decoded (use the `.img` files) |
+| source | extensions | performances | patches | wave sequences | multisets | notes |
+|---|---|---|---|---|---|---|
+| SysEx | `.syx`, `.sysex` | yes | yes | yes | `0x62` only (read, not cached) | one type per file, all three in one file, single performance/patch, multi-bank, and All Data `0x50` (its RAM1/RAM2 banks) |
+| Edisyn bank | `.syx` | yes | yes | yes | — | standard bank dumps; the same SysEx reader |
+| Standard MIDI | `.mid`, `.midi` | yes | yes | yes | if present (read, not cached) | the SysEx the file carries, including the Korg header without its leading `F0` |
+| SoundQuest / MidiQuest | `.sqs` | yes | yes | yes | if embedded (read, not cached) | embedded Korg SysEx; MidiQuest-native bodies are refused. MidiQuest `.mid` exports use the row above |
+| SoundDiver | `.LIB` | yes | yes | yes | — | 1-, 2- or 4-oscillator patches; `RAM1-NN` slots; duplicate slots keep the last entry; multisets are absent from the examples |
+| FAT12 floppy | `.img` | if contained | if contained | if contained | if contained (read, not cached) | reads the disk's `.syx`, `.mid` and `.bnk` files; `.arr`, docs and images are skipped |
+| ZIP archive | `.zip` | if contained | if contained | if contained | if contained (read, not cached) | disk images plus loose `.syx`/`.mid`/`.bnk`; KryoFlux `.7z` members are skipped |
+| `.bnk` bundle | `.bnk` | yes | yes | yes | if present (read, not cached) | an `FR`-prefixed or bare SysEx bundle |
+| KryoFlux flux | `.7z` | — | — | — | — | **not decoded**; use the `.img` files in the same download |
 
-A bank keeps its own interior bank references, so `--as` may name the same
-internal bank (`RAM1`, `ROM6`, ...), or any `CARD/NN` slot for a card source.
-To move performances to a *different* bank, use `copy-perf`: it puts each
-performance in the first free slot, copies its patches privately, packs them
-contiguously without a gap, and rewrites every part to point at them. A
-SoundDiver `.LIB` import brings its **patches, performances and wave
-sequences**; multisets are not present in the example libraries and are
-not converted. `copy-perf` now works for performances whose sequences are
-in the LIB's RAM1 wave-sequence bank; references to another sequence bank
-still need that bank supplied.
+All Data `0x50` is the one exception to "all three": the documented structure
+it carries has RAM1 and RAM2 only. The `.LIB` multisets are genuinely absent
+from the example libraries; an unknown entry type is reported, never guessed
+at.
+
+#### Choosing a bank
+
+- `--list` prints the labels. A `.syx` lists its performances; a `.LIB` lists
+  its entries; an `.img`/`.zip` prints one compact line per bank with counts.
+- `--scope RAM1` chooses the first bank with that scope. `--label "..."` chooses
+  exactly one label from `--list` and is the reliable choice for a disk or a
+  zip, where several banks legitimately share `RAM1`.
+- `--as DEST` names the cache scope. It defaults to the source's own internal
+  bank, and a card source may be filed under any `CARD/NN` slot. An internal
+  source keeps its own scope because its parts and waves point at that bank;
+  use `copy-perf` to move a performance to a different bank.
+- `--bankstore DIR` overrides the cache directory. The default is
+  `~/.local/share/kwsed/banks` on Linux.
+
+#### Import and copy options
+
+| option | command | meaning |
+|---|---|---|
+| `FILE` | `import` | the source file; required |
+| `--list` | `import` | print the banks, entries or disk/zip labels and exit |
+| `--scope SCOPE` | `import` | first bank with this scope |
+| `--label LABEL` | `import` | exact label from `--list`; combine with `--scope` if wanted |
+| `--as DEST` | `import` | cache scope (default: the source's own internal scope) |
+| `--bankstore DIR` | `import`, `deps`, `copy-perf` | cache directory |
+| `SCOPE:NUMBER...` | `copy-perf` | performances to copy, in priority order |
+| `--from-file FILE` | `copy-perf` | read the source from any format above; repeatable |
+| `--source ID=GLOB` | `copy-perf`, `deps` | source bank dumps; repeatable |
+| `--to BANK` | `copy-perf`, `send` | destination: `RAM1`, `RAM2`, `RAM3` or `CARD` |
+| `--mode append|clean` | `copy-perf` | append to active performances, or replace the bank |
+| `--out PREFIX` | `copy-perf` | write `<PREFIX>-perf/-patch/-seq.syx`; no unit is touched |
+| `--yes` | `copy-perf`, `send`, `backup save`, `backup restore` | take the action; without it the fence/read stops first |
+| `--backup-dir DIR` | `copy-perf`, `send`, `backup list/save/restore` | where the backup envelopes live |
+
+`copy-perf` is the single-performance import. It puts the performance in the
+first free slot, copies its patches privately, packs them contiguously with no
+gap, and rewrites every part to the new patch slots. If the source is a
+container with several banks of the same scope, import the chosen one first
+with `--label` and then copy from the cache; `--from-file` keeps one source per
+scope.
+
+A SoundDiver `.LIB` brings its own RAM1 wave-sequence bank, so its
+sequence-based performances copy too. A patch that points at a different
+sequence bank still needs that bank supplied. Multisets are read for listing
+but are not stored in the bank cache.
 
 ## Building a favourites bank
 
@@ -353,6 +599,10 @@ patches it uses -- two performances that name the same source patch each
 get their own, so editing one copy can never alter the other -- while the
 wave sequences beneath them are still shared and packed once. See
 [docs/BANK_BUILDER.md](docs/BANK_BUILDER.md).
+
+`--bank` chooses the destination used for the interior bank references
+(default `CARD`); `--channel` frames the output for the unit's global channel.
+Omit `--out` for a dry run that reports the plan without writing files.
 
 It writes `.syx` files and **never touches the instrument** -- loading them
 is the machine's own business, through its front panel. See
