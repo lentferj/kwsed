@@ -254,7 +254,9 @@ kwsed --port "U6MIDI Pro:U6MIDI Pro MIDI 1 44:0" --device-channel 5
 | `r` | read this bank's names from the unit — **silent** |
 | `/` | search names |
 | `m` | multis: read the 32 Multisets and their 16 channels — **silent** |
+| `p` | show/hide the patch rows in the bank list — remembered between runs (they can be inspected, not selected) |
 | `d` | what the sound under the cursor uses — its patches and wave sequences (silent) |
+| `D` | show/hide the dependency pane that follows the selection — remembered between runs |
 | `y` | copy this performance, with private copies of its patches, into RAM 1–3 or the Card — silent until armed |
 | `i` | device identity and the unit's global channel |
 | `?` / `q` | help / quit |

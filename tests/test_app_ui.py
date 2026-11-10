@@ -2081,6 +2081,26 @@ def _copied_source(scope: str = "RAM1") -> deps.Source:
     return deps.Source(scope, performances=perfs, patches=patches, waveseq=waveseq)
 
 
+def _shared_source(scope: str = "RAM1") -> deps.Source:
+    """Two performances that both use patch 0, for where-used reports."""
+    from tests.test_bankbuild import make_patch, make_performance, make_waveseq
+
+    patch = make_patch("Kelp Forest", ((0, 0), (0, 40), (0, 40), (0, 40)))
+    first = make_performance("Glass Meridian", parts=((0, 0), (0, 0)))
+    second = make_performance("Amber Drift", parts=((0, 0),))
+    patches: list[bytes] = [
+        bytes(rec.PATCH_SIZE) for _ in range(banks.PATCHES_PER_BANK)
+    ]
+    patches[0] = patch
+    perfs: list[bytes] = [
+        make_performance("", ()) for _ in range(banks.PERFORMANCES_PER_BANK)
+    ]
+    perfs[0] = first
+    perfs[1] = second
+    waveseq = make_waveseq({0: [40, 41]})[0]
+    return deps.Source(scope, performances=perfs, patches=patches, waveseq=waveseq)
+
+
 def _empty_source(scope: str) -> deps.Source:
     from tests.test_bankbuild import make_performance
 
@@ -2248,6 +2268,159 @@ class TestTheDependencyInspector:
             assert "CARD/07" in text
             assert "CARD/13" in text, "the status names the bank actually in the slot"
             assert "refused" in text
+
+    async def test_d_on_a_cached_card_row_works_when_another_card_is_active(self, app):
+        """Only a read needs the slot; cached or archived records are safe."""
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._active_physical = None
+            app._active_card = 13
+            app._sources["CARD/07"] = _copied_source("CARD/07")
+            app._fill((banks.bank("CARD").number, banks.Kind.PERFORMANCE), 7)
+            await settle(pilot)
+            assert "Glass Meridian" in str(
+                app.query_one("#deps-pane-body", Static).content
+            )
+
+            app.query_one("#slot-table").focus()
+            await pilot.press("d")
+            await settle(pilot)
+            assert isinstance(app.screen, ReportScreen)
+            assert "Glass Meridian" in app.screen.body
+            await pilot.press("escape")
+            await settle(pilot)
+
+    async def test_d_names_the_other_performances_using_each_patch(self, app):
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._sources["RAM1"] = _shared_source()
+            app._fill((0, banks.Kind.PERFORMANCE))
+            app.query_one("#slot-table").focus()
+            await pilot.press("d")
+            await settle(pilot)
+            assert isinstance(app.screen, ReportScreen)
+            assert "(also RAM1:01)" in app.screen.body
+            await pilot.press("escape")
+            await settle(pilot)
+
+            table = app.query_one("#slot-table", DataTable)
+            table.move_cursor(row=1)
+            await settle(pilot)
+            await pilot.press("d")
+            await settle(pilot)
+            assert isinstance(app.screen, ReportScreen)
+            assert "(also RAM1:00)" in app.screen.body
+            await pilot.press("escape")
+            await settle(pilot)
+
+
+class TestTheBrowserPanes:
+    """The patch rows and the live dependency pane are both optional."""
+
+    async def test_p_hides_and_shows_the_patch_rows(self, app):
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            table = app.query_one("#bank-table", DataTable)
+            before = len(app._pairs)
+            assert any(kind == banks.Kind.PATCH for _number, kind in app._pairs)
+            assert table.row_count == before
+
+            await pilot.press("p")
+            await settle(pilot)
+            assert app._show_patches is False
+            assert all(kind != banks.Kind.PATCH for _number, kind in app._pairs)
+            assert len(app._pairs) < before
+            assert table.row_count == len(app._pairs)
+            assert "hiding patches" in panel_text(app, "#status")
+
+            await pilot.press("p")
+            await settle(pilot)
+            assert app._show_patches is True
+            assert len(app._pairs) == before
+
+    async def test_hiding_patches_moves_off_a_patch_bank(self, app):
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._fill((0, banks.Kind.PATCH))
+            assert app._current_pair[1] == banks.Kind.PATCH
+
+            await pilot.press("p")
+            await settle(pilot)
+            assert app._current_pair[1] == banks.Kind.PERFORMANCE
+            assert app._current
+            assert all(item.kind == banks.Kind.PERFORMANCE for item in app._current)
+
+    async def test_the_dependency_pane_follows_the_selection(self, app):
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            body = app.query_one("#deps-pane-body", Static)
+            assert "not loaded" in str(body.content)
+
+            app._sources["RAM1"] = _shared_source()
+            app._fill((0, banks.Kind.PERFORMANCE))
+            await settle(pilot)
+            text = str(body.content)
+            assert "Glass Meridian" in text
+            assert "(also RAM1:01)" in text
+
+            table = app.query_one("#slot-table", DataTable)
+            table.move_cursor(row=1)
+            await settle(pilot)
+            text = str(body.content)
+            assert "Amber Drift" in text
+            assert "(also RAM1:00)" in text
+
+    async def test_D_hides_and_shows_the_dependency_pane(self, app):
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            pane = app.query_one("#deps-pane")
+            assert pane.display is True
+
+            await pilot.press("D")
+            await settle(pilot)
+            assert pane.display is False
+            assert "dependency pane hidden" in panel_text(app, "#status")
+
+            await pilot.press("D")
+            await settle(pilot)
+            assert pane.display is True
+
+    async def test_the_toggles_are_remembered_between_runs(self, tmp_path):
+        config_path = str(tmp_path / "config.toml")
+        first = KwsedApp(DemoDevice(), catalog=cat.Catalog([]), config_path=config_path)
+        async with first.run_test() as pilot:
+            await pilot.pause()
+            assert first._show_patches is True
+            assert first._deps_pane_visible is True
+            first.action_toggle_patches()
+            first.action_toggle_deps_pane()
+            await pilot.pause()
+            assert first._show_patches is False
+            assert first._deps_pane_visible is False
+
+        second = KwsedApp(
+            DemoDevice(), catalog=cat.Catalog([]), config_path=config_path
+        )
+        async with second.run_test() as pilot:
+            await pilot.pause()
+            assert second._show_patches is False
+            assert second._deps_pane_visible is False
+            assert all(kind != banks.Kind.PATCH for _number, kind in second._pairs)
+            assert second.query_one("#deps-pane").display is False
+
+        third = KwsedApp(DemoDevice(), catalog=cat.Catalog([]), config_path=config_path)
+        async with third.run_test() as pilot:
+            await pilot.pause()
+            third.action_toggle_patches()
+            third.action_toggle_deps_pane()
+            await pilot.pause()
+        fourth = KwsedApp(
+            DemoDevice(), catalog=cat.Catalog([]), config_path=config_path
+        )
+        async with fourth.run_test() as pilot:
+            await pilot.pause()
+            assert fourth._show_patches is True
+            assert fourth._deps_pane_visible is True
 
 
 class TestCopyPerformance:

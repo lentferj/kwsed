@@ -63,7 +63,7 @@ from vinsynlib.ui.work import QUIET_BRIDGE_ERRORS, BusyGate, close_when_idle
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import DataTable, Header, Input, Label, Static
@@ -208,12 +208,14 @@ KEY_HINTS = (
     # named the view and hid the device read the key performs.
     "m multi",
     "e edit multi",
+    "p patches",
     "S scan",
     "C capture card",
     "L label card",
     "X card sweep",
     "V rating filter",
     "d deps",
+    "D deps pane",
     "y copy perf",
     "z undo",
     "w write gate",
@@ -1294,6 +1296,13 @@ class KwsedApp(App[None]):
         border-right: solid $panel;
     }
     #slot-table { width: 1fr; }
+    /* The dependency pane is a third column, hidden with `D`. It scrolls
+       rather than truncates: the report can be longer than the screen. */
+    #deps-pane {
+        width: 1fr; min-width: 24; height: 1fr;
+        border-left: solid $panel;
+    }
+    #deps-pane-body { height: auto; padding: 0 1; }
     DataTable { height: 1fr; }
     /* Fixed: `height: auto` under-counts a wrapped line in this Textual
        version, and the last line was clipped. Content is kept to two
@@ -1330,6 +1339,8 @@ class KwsedApp(App[None]):
         Binding("X", "card_sweep", "Card sweep", show=False),
         Binding("V", "rating_filter", "Rating filter"),
         Binding("d", "show_deps", "Deps"),
+        Binding("D", "toggle_deps_pane", "Deps pane"),
+        Binding("p", "toggle_patches", "Patches"),
         Binding("y", "copy_performance", "Copy perf"),
         Binding("z", "undo", "Undo"),
         Binding("w", "toggle_write_gate", "Write gate"),
@@ -1394,6 +1405,24 @@ class KwsedApp(App[None]):
         self._current_physical: Optional[str] = None
         self._current_physical_kind: Optional[str] = None
         self._lock = threading.RLock()
+        #: Whether the bank list also shows patch rows. Patches cannot be
+        #: auditioned or copied on their own, so a viewer that only wants
+        #: performances can hide them without losing any action. Remembered
+        #: between runs when a settings path was given.
+        if config_path is not None:
+            from kws import config as _ui_cfg
+
+            self._show_patches = _ui_cfg.load_show_patches(config_path)
+            self._deps_pane_visible = _ui_cfg.load_deps_pane(config_path)
+        else:
+            self._show_patches = True
+            self._deps_pane_visible = True
+        #: The merged sources and relation graph for the live pane, rebuilt
+        #: only when ``_sources`` changes so cursor movement reads no disk.
+        self._deps_sources_cache: Optional[Dict[str, deps.Source]] = None
+        self._deps_sources_key: Any = None
+        self._deps_graph: Any = None
+        self._deps_graph_key: Any = None
         #: The left pane lists bank-and-kind pairs, because a Wavestation
         #: bank holds 50 performances *and* 35 patches and they are
         #: different things. A pane listing banks alone would need a second
@@ -2136,6 +2165,7 @@ class KwsedApp(App[None]):
         # local_sources holds the destination as it was read *before* the
         # write; the built bank is what the bank now holds.
         self._sources[destination.id] = self._source_from_built(destination.id, built)
+        self._refresh_deps_pane()
         if self._bankstore_dir is not None:
             try:
                 bankstore.save(
@@ -2197,6 +2227,8 @@ class KwsedApp(App[None]):
         with Horizontal(id="panes"):
             yield DataTable(id="bank-table", cursor_type="row")
             yield DataTable(id="slot-table", cursor_type="row")
+            with VerticalScroll(id="deps-pane", can_focus=False):
+                yield Static("", id="deps-pane-body")
         yield Static("", id="detail")
         yield Static("", id="status")
         # The library's widget takes the blocks; the local one read this
@@ -2227,11 +2259,16 @@ class KwsedApp(App[None]):
         card archive change (capture, label) so the left pane reflects the
         new set of physical cards.
         """
+        kinds = (
+            (banks.Kind.PERFORMANCE, banks.Kind.PATCH)
+            if self._show_patches
+            else (banks.Kind.PERFORMANCE,)
+        )
         self._real_pairs: List[Tuple[int, str]] = [
             (entry.number, kind)
             for entry in banks.BANKS
             if entry.id != "CARD"
-            for kind in (banks.Kind.PERFORMANCE, banks.Kind.PATCH)
+            for kind in kinds
         ]
         _card_pairs: List[Tuple[int, str]] = []
         _extra_cards: List[Optional[int]] = []
@@ -2240,10 +2277,10 @@ class KwsedApp(App[None]):
             _card_pairs = [
                 (banks.bank("CARD").number, kind)
                 for _number in _cards.bank_numbers()
-                for kind in (banks.Kind.PERFORMANCE, banks.Kind.PATCH)
+                for kind in kinds
             ]
             _extra_cards = [
-                number for number in _cards.bank_numbers() for _kind in range(2)
+                number for number in _cards.bank_numbers() for _kind in kinds
             ]
             _extra_physical = [None] * len(_card_pairs)
         elif self._card_mode == "cards":
@@ -2251,12 +2288,10 @@ class KwsedApp(App[None]):
             if not ids:
                 ids = [""]
             _card_pairs = [
-                (banks.bank("CARD").number, kind)
-                for _id in ids
-                for kind in (banks.Kind.PERFORMANCE, banks.Kind.PATCH)
+                (banks.bank("CARD").number, kind) for _id in ids for kind in kinds
             ]
             _extra_cards = [None] * len(_card_pairs)
-            _extra_physical = [_id for _id in ids for _ in (0, 1)]
+            _extra_physical = [_id for _id in ids for _ in kinds]
         # mode "none": no extra pairs.
 
         self._pairs: List[Tuple[int, str]] = (
@@ -2459,6 +2494,9 @@ class KwsedApp(App[None]):
         if self._live_path is not None:
             _livenames.apply_to(self.catalog, self._live_path)
         self._fill(self._current_pair)
+        with contextlib.suppress(NoMatches):
+            self.query_one("#deps-pane").display = self._deps_pane_visible
+        self._refresh_deps_pane()
         table.focus()
         self.notify_status(
             f"{len(self.catalog)} names from the catalog"
@@ -2784,6 +2822,78 @@ class KwsedApp(App[None]):
 
         self.push_screen(RatingFilterScreen(current), apply)
 
+    def action_toggle_patches(self) -> None:
+        """Show or hide the patch rows in the bank list.
+
+        A patch cannot be selected, auditioned or copied on its own; its
+        rows exist for inspection. Hiding them halves the list without
+        losing an action, and the dependency pane still shows the patches
+        of whichever Performance is selected.
+        """
+        multi = self._current_multi
+        pair = self._current_pair
+        card = self._current_card
+        physical = self._current_physical
+        self._show_patches = not self._show_patches
+        if not self._show_patches and pair[1] == banks.Kind.PATCH:
+            pair = (pair[0], banks.Kind.PERFORMANCE)
+        self._build_row_model()
+        self._apply_row_model()
+        table = self.query_one("#bank-table", DataTable)
+        key = (
+            f"multi:{multi:02d}"
+            if multi is not None
+            else self._row_key(pair, card, None, physical)
+        )
+        with contextlib.suppress(Exception):
+            table.move_cursor(row=table.get_row_index(key))
+        if multi is not None:
+            self._refresh_deps_pane()
+        elif physical is not None:
+            self._fill_physical(physical, pair[1])
+        else:
+            self._fill(pair, card)
+        self._remember_show_patches()
+        self.notify_status(
+            "showing patches" if self._show_patches else "hiding patches"
+        )
+
+    def action_toggle_deps_pane(self) -> None:
+        """Show or hide the live dependency pane on the right."""
+        self._deps_pane_visible = not self._deps_pane_visible
+        with contextlib.suppress(NoMatches):
+            self.query_one("#deps-pane").display = self._deps_pane_visible
+        if self._deps_pane_visible:
+            self._refresh_deps_pane()
+        self._remember_deps_pane()
+        self.notify_status(
+            "dependency pane shown"
+            if self._deps_pane_visible
+            else "dependency pane hidden"
+        )
+
+    def _remember_show_patches(self) -> None:
+        """Save the patch-row choice for the next run."""
+        if self._config_path is None:
+            return
+        from kws import config as _ui_cfg
+
+        try:
+            _ui_cfg.save_show_patches(self._show_patches, self._config_path)
+        except OSError:
+            pass
+
+    def _remember_deps_pane(self) -> None:
+        """Save the dependency-pane choice for the next run."""
+        if self._config_path is None:
+            return
+        from kws import config as _ui_cfg
+
+        try:
+            _ui_cfg.save_deps_pane(self._deps_pane_visible, self._config_path)
+        except OSError:
+            pass
+
     def _deps_target(self) -> "tuple[Optional[int], Optional[SlotLike]]":
         """The Multiset row under the bank cursor, or the slot under the list."""
         try:
@@ -2809,6 +2919,72 @@ class KwsedApp(App[None]):
             except Exception:  # noqa: S110 - a corrupt cache is not fatal
                 pass
         return sources
+
+    def _deps_sources(self) -> Dict[str, deps.Source]:
+        """The merged source map for the live pane, cached until it changes.
+
+        ``_sources_with_store`` reads the bank cache from disk; the pane
+        refreshes on every cursor move, so that read happens once per
+        change to ``_sources`` rather than once per key press.
+        """
+        key = tuple(sorted((scope, id(src)) for scope, src in self._sources.items()))
+        if key == self._deps_sources_key and self._deps_sources_cache is not None:
+            return self._deps_sources_cache
+        sources = self._sources_with_store()
+        self._deps_sources_key = key
+        self._deps_sources_cache = sources
+        return sources
+
+    def _deps_graph_for_pane(self, sources: Dict[str, deps.Source]) -> Any:
+        """One relation graph per loaded snapshot, so its own caches help."""
+        key = (
+            tuple(sorted((scope, id(src)) for scope, src in sources.items())),
+            tuple(id(ms) for ms in self._multisets),
+        )
+        if key != self._deps_graph_key or self._deps_graph is None:
+            self._deps_graph = relations.RelationGraph(
+                sources,
+                multisets=self._multisets,
+                active_card_scope=self._active_card_scope(),
+            )
+            self._deps_graph_key = key
+        return self._deps_graph
+
+    def _deps_pane_lines(self) -> List[str]:
+        """The ``d`` report for the current selection, without reading the unit."""
+        multiset, entry = self._deps_target()
+        sources = self._deps_sources()
+        if multiset is not None:
+            return self._deps_multiset_lines(multiset, sources)
+        if entry is None:
+            return ["(nothing selected)"]
+        scope = self._resolve_card_scope(self._scoped_bank_id(entry))
+        if scope not in sources:
+            # This pane never reads the unit; it only shows what is cached.
+            return [f"({scope} is not loaded — press d to read it)"]
+        graph = self._deps_graph_for_pane(sources)
+        try:
+            if entry.kind == banks.Kind.PERFORMANCE:
+                return self._deps_performance_lines(graph, sources, scope, entry.number)
+            if entry.kind == banks.Kind.PATCH:
+                return self._deps_patch_lines(graph, sources, scope, entry.number)
+        except Exception as exc:
+            return [f"(error: {exc})"]
+        return [f"{scope} {entry.number} (unknown kind)"]
+
+    def _refresh_deps_pane(self) -> None:
+        """Rewrite the live pane, if it is showing. Never touches MIDI."""
+        if not self._deps_pane_visible:
+            return
+        try:
+            body = self.query_one("#deps-pane-body", Static)
+        except NoMatches:
+            return
+        try:
+            lines = self._deps_pane_lines()
+        except Exception as exc:  # pragma: no cover - defensive
+            lines = [f"(error: {exc})"]
+        body.update("\n".join(lines))
 
     def _active_card_scope(self) -> str:
         """The archived scope that the one physical card slot currently holds.
@@ -2867,13 +3043,16 @@ class KwsedApp(App[None]):
             self.notify_status("nothing under the cursor", refused=True)
             return
         scope = self._resolve_card_scope(self._scoped_bank_id(entry))
-        try:
-            self._guard_card_slot(scope)
-        except ValueError as exc:
-            self.notify_status(str(exc), refused=True)
-            return
         sources = self._sources_with_store()
         if scope not in sources:
+            # Only a *read* needs the slot to hold the card the row names;
+            # a bank already in the archive or cache can be inspected even
+            # when a different card is inserted.
+            try:
+                self._guard_card_slot(scope)
+            except ValueError as exc:
+                self.notify_status(str(exc), refused=True)
+                return
             if not self._exchange.acquire(blocking=False):
                 self.notify_status("busy", refused=True)
                 return
@@ -2997,6 +3176,7 @@ class KwsedApp(App[None]):
             self._show_deps_multiset(multiset, sources)
         else:
             self._show_deps(scope, kind, number, multiset, sources)
+        self._refresh_deps_pane()
 
     def _bank_for_scope(self, scope: str) -> Any:
         if scope.startswith("CARD") or scope == "CARD":
@@ -3030,6 +3210,14 @@ class KwsedApp(App[None]):
             body_lines = [f"(error: {exc})"]
         self.push_screen(ReportScreen("Dependencies", "\n".join(body_lines)))
 
+    @staticmethod
+    def _where_used(graph: Any, patch: Any, current: Any) -> str:
+        """Other Performances that use ``patch``, as ``SCOPE:NN``, no names."""
+        others = [
+            perf for perf in graph.performances_using_patch(patch) if perf != current
+        ]
+        return ", ".join(f"{perf.scope_id}:{perf.number:02d}" for perf in others)
+
     def _deps_performance_lines(
         self, graph: Any, sources: Dict[str, deps.Source], scope: str, number: int
     ) -> List[str]:
@@ -3061,8 +3249,11 @@ class KwsedApp(App[None]):
                     pname = dumps_mod.record_name(psrc.patches[patch.number])
                 except Exception:
                     pname = ""
+            used = self._where_used(graph, patch, pid)
+            suffix = f"   (also {used})" if used else ""
             lines.append(
-                f"  {mapping.part_index} -> {patch.scope_id}:{patch.number:02d} {pname}"
+                f"  {mapping.part_index} -> {patch.scope_id}:{patch.number:02d} "
+                f"{pname}{suffix}"
             )
         lines.append(
             "  unique patches: "
@@ -3076,19 +3267,11 @@ class KwsedApp(App[None]):
             lines.append(f"    {seq_scope} {sequence} (wave bank {wave_bank})")
         lines.append(f"  step cost: {rel.step_cost}")
         shared = {
-            pnum: [other for other in perfs if other != number]
+            pnum
             for pnum, perfs in graph.shared_patches_in_bank(scope).items()
             if number in perfs
         }
-        if shared:
-            lines.append("  patches: shared")
-            for pnum, others in sorted(shared.items()):
-                lines.append(
-                    f"  patch {pnum} also used by "
-                    f"{', '.join(str(other) for other in others)}"
-                )
-        else:
-            lines.append("  patches: atomic")
+        lines.append("  patches: shared" if shared else "  patches: atomic")
         multisets = graph.multisets_using_performance(pid)
         lines.append(
             "  multisets: "
@@ -3182,9 +3365,10 @@ class KwsedApp(App[None]):
         )
         return line, scope
 
-    def _show_deps_multiset(
+    def _deps_multiset_lines(
         self, ms_number: int, sources: Optional[Dict[str, deps.Source]] = None
-    ) -> None:
+    ) -> List[str]:
+        """The 16 channels of one Multiset, as a list of report lines."""
         if sources is None:
             sources = dict(self._sources)
         lines: List[str] = []
@@ -3193,10 +3377,7 @@ class KwsedApp(App[None]):
         except Exception:
             ms = None
         if ms is None:
-            lines.append(f"Multiset {ms_number:02d}")
-            lines.append("(not loaded)")
-            self.push_screen(ReportScreen("Dependencies", "\n".join(lines)))
-            return
+            return [f"Multiset {ms_number:02d}", "(not loaded)"]
         lines.append(f"Multiset {getattr(ms, 'number', ms_number):02d}")
         graph = relations.RelationGraph(
             sources,
@@ -3216,7 +3397,16 @@ class KwsedApp(App[None]):
             lines.append("  card conflicts: " + ", ".join(sorted(distinct_card)))
         else:
             lines.append("  card conflicts: none")
-        self.push_screen(ReportScreen("Dependencies", "\n".join(lines)))
+        return lines
+
+    def _show_deps_multiset(
+        self, ms_number: int, sources: Optional[Dict[str, deps.Source]] = None
+    ) -> None:
+        self.push_screen(
+            ReportScreen(
+                "Dependencies", "\n".join(self._deps_multiset_lines(ms_number, sources))
+            )
+        )
 
     def _refill_keeping_place(self) -> None:
         if self._current_physical is not None:
@@ -3224,15 +3414,15 @@ class KwsedApp(App[None]):
             if kind is None:
                 kind = self._current_pair[1]
             self._fill_physical(self._current_physical, kind)
-            return
-        if self._current_multi is not None:
+        elif self._current_multi is not None:
             self._fill_multiset(self._current_multi)
-            return
-        table = self.query_one("#slot-table", DataTable)
-        row = table.cursor_row or 0
-        self._fill(self._current_pair, self._current_card)
-        if self._current:
-            table.move_cursor(row=min(row, len(self._current) - 1))
+        else:
+            table = self.query_one("#slot-table", DataTable)
+            row = table.cursor_row or 0
+            self._fill(self._current_pair, self._current_card)
+            if self._current:
+                table.move_cursor(row=min(row, len(self._current) - 1))
+        self._refresh_deps_pane()
 
     def _card_slot_name(self, card: int, kind: str, number: int) -> str:
         captured = self._archive.get(card)
@@ -3346,6 +3536,7 @@ class KwsedApp(App[None]):
         finally:
             self._filling = False
         self._detail(0)
+        self._refresh_deps_pane()
 
     def _fill_multiset(self, number: int) -> None:
         self._current_multi = number
@@ -3402,6 +3593,7 @@ class KwsedApp(App[None]):
                 f"[b]Multi {number:02d} {ms_name}[/b]\n"
                 "[dim]m reads the setup and e edits it[/dim]"
             )
+        self._refresh_deps_pane()
 
     def _fill_all_favourites(self, table: DataTable[Any]) -> None:
         """Rows for the every-favourite view, independent of the card row."""
@@ -3499,6 +3691,7 @@ class KwsedApp(App[None]):
             self._filling = False
         if self.view_mode == VIEW_ALL_FAVOURITES:
             self._detail(0)
+            self._refresh_deps_pane()
             return
         # Detail
         if card_id in ("", None) or card_id not in self._physical:
@@ -3506,6 +3699,7 @@ class KwsedApp(App[None]):
                 self.query_one("#detail", Static).update(
                     "[dim]insert a card and press C[/dim]"
                 )
+            self._refresh_deps_pane()
             return
         card = self._physical[card_id]
         active_marker = " • active" if self._active_physical == card_id else ""
@@ -3517,6 +3711,7 @@ class KwsedApp(App[None]):
                 f"[dim]{verified} · {digest_prefix} · "
                 f"C captures the inserted card; L labels this one[/dim]"
             )
+        self._refresh_deps_pane()
 
     def _detail_scoped(self, item: SlotLike, scope: str) -> None:
         """The detail line for a row from the all-favourites view."""
@@ -3726,6 +3921,7 @@ class KwsedApp(App[None]):
                     self._fill(self._pairs[row], self._row_cards[row])
         elif event.data_table.id == "slot-table":
             self._detail(event.cursor_row)
+            self._refresh_deps_pane()
 
     def on_data_table_row_selected(self, event: DataTable.RowSelected) -> None:
         """Enter on a slot. It arrives here, not as a binding."""
@@ -4797,6 +4993,7 @@ class KwsedApp(App[None]):
         self._refresh_multi_rows()
         if self._current_multi is not None:
             self._fill_multiset(self._current_multi)
+        self._refresh_deps_pane()
 
     def _show_multi(self, raw: bytes) -> None:
         from kws import multi as multi_mod
@@ -4829,9 +5026,10 @@ class KwsedApp(App[None]):
             pass
         table.focus()
         self._fill_multiset(number)
+        self._refresh_deps_pane()
         self.notify_status(
             f"read {len(sets)} Multisets — Enter selects one on the unit "
-            "(Multi mode), e edits"
+            "(MULTI mode), e edits"
         )
 
     def action_edit_multi(self) -> None:
@@ -5097,8 +5295,10 @@ class KwsedApp(App[None]):
 
 
 _HELP = """\
-Two panes. Left: the banks, each listed once per kind -- once for its 50
-performances, once for its 35 patches. Right: that bank-and-kind's slots.
+Two tables and a detail pane. Left: the banks, each listed once per kind --
+once for its 50 performances, once for its 35 patches (`p` hides the patch
+rows). Right: that bank-and-kind's slots. The third pane on the right
+repeats the `d` report for the current selection; `D` hides it.
 
   RAM 1-3   writable; somebody's own work lives here.
   ROM 4-11  read-only.
@@ -5156,7 +5356,12 @@ switch the HCard.
   t   tags; n   note (both hang off a favourite, so press f first)
   V   filter the list by favourite rating
   [ ] step the send channel; c set it by number
+  p   show or hide the patch rows in the bank list -- they cannot be
+      selected or copied on their own, so a performer-only view hides them.
+      The choice is remembered between runs.
   d   dependency inspector for a Performance, Patch or Multiset
+  D   show or hide the dependency pane that follows the selection
+      (remembered between runs)
   y   copy a Performance (with its patches) into a writable bank
   z   undo the last write (the write gate must be armed)
   w   arm or lock the write gate (or start with --allow-write)

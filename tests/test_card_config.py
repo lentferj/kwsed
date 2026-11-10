@@ -80,3 +80,31 @@ def test_saving_keeps_port_and_channel(tmp_path):
     assert config.load_last_port(path) == "some port"
     assert config.load_card_mode(path) == "hcard"
     assert config.load_show_card_defaults(path) is True
+
+
+def test_browser_ui_flags_round_trip(tmp_path):
+    from kws import config
+
+    path = str(tmp_path / "config.toml")
+    assert config.load_show_patches(path) is True
+    assert config.load_deps_pane(path) is True
+
+    config.save_show_patches(False, path)
+    config.save_deps_pane(False, path)
+    assert config.load_show_patches(path) is False
+    assert config.load_deps_pane(path) is False
+
+    config.save_show_patches(True, path)
+    assert config.load_show_patches(path) is True
+
+
+def test_non_bool_browser_flags_fall_back(tmp_path):
+    from kws import config
+
+    path = tmp_path / "config.toml"
+    path.write_text(
+        '"browser.show_patches" = 1\n"browser.deps_pane" = "yes"\n',
+        encoding="utf-8",
+    )
+    assert config.load_show_patches(str(path)) is True
+    assert config.load_deps_pane(str(path)) is True

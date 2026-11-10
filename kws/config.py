@@ -65,6 +65,8 @@ __all__ = [
     "load_port_pair",
     "load_scan_offer_dismissed",
     "load_show_card_defaults",
+    "load_show_patches",
+    "load_deps_pane",
     "migrate_legacy_config",
     "save_card_mode",
     "save_channel",
@@ -74,6 +76,8 @@ __all__ = [
     "save_ports",
     "save_scan_offer_dismissed",
     "save_show_card_defaults",
+    "save_show_patches",
+    "save_deps_pane",
 ]
 
 _settings = bind("kwsed", DEFAULT_PATH)
@@ -151,3 +155,23 @@ def load_show_card_defaults(path: str | None = None) -> bool:
 def save_show_card_defaults(value: object, path: str | None = None) -> None:
     """Coerce and store the show_card_defaults flag."""
     _settings.update(path or DEFAULT_PATH, show_card_defaults=bool(value))
+
+
+def load_show_patches(path: str | None = None) -> bool:
+    """Whether the browser lists patch rows, remembered between runs."""
+    return bool(_settings.load_ui_bool("browser.show_patches", path, default=True))
+
+
+def save_show_patches(value: bool, path: str | None = None) -> None:
+    """Remember whether the browser lists patch rows."""
+    _settings.save_ui_state("browser.show_patches", bool(value), path)
+
+
+def load_deps_pane(path: str | None = None) -> bool:
+    """Whether the browser's dependency pane is visible, remembered."""
+    return bool(_settings.load_ui_bool("browser.deps_pane", path, default=True))
+
+
+def save_deps_pane(value: bool, path: str | None = None) -> None:
+    """Remember whether the browser's dependency pane is visible."""
+    _settings.save_ui_state("browser.deps_pane", bool(value), path)
