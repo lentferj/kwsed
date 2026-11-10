@@ -202,12 +202,11 @@ KEY_HINTS = (
     "F favourites view",
     "t tags",
     "n note",
-    # `m` means channels everywhere in a browser, and a Wavestation Multiset
-    # *is* a channel assignment: Multiset 3 is what answers on MIDI channel 3.
-    # So this is a clarification rather than a change of function. The
-    # `multi` subcommand keeps the instrument's own word for the object, which
-    # docs/UX-SPEC.md section 2 permits; the legend names what the key does.
-    "m channels",
+    # `m` reads the 32 Multisets from the unit and lands on them; the right
+    # pane is the selected one's 16 channels. The hint names the object the
+    # key reads, matching `kwscli multi` and `e edit multi` -- "channels"
+    # named the view and hid the device read the key performs.
+    "m multi",
     "e edit multi",
     "S scan",
     "C capture card",
@@ -1312,9 +1311,9 @@ class KwsedApp(App[None]):
         Binding("left_square_bracket", "channel_down", "Channel -"),
         Binding("right_square_bracket", "channel_up", "Channel +"),
         Binding("c", "pick_channel", "Set channel"),
-        # Description matches the legend: `m` opens the channel assignment,
-        # which is what a Multiset is. The action keeps its own name.
-        Binding("m", "multi", "Channels"),
+        # Description matches the legend: `m` reads the Multisets and opens
+        # them, so the hint names the object rather than its channel view.
+        Binding("m", "multi", "Multi"),
         Binding("e", "edit_multi", "Edit multi", show=False),
         Binding("f", "toggle_favorite", "Favourite"),
         Binding("F", "cycle_favorites", "Favourites view"),

@@ -172,10 +172,10 @@ See [docs/CARDS.md](docs/CARDS.md).
 
 `m` in the browser, or `kwscli multi`, shows the second. One request, three
 replies, nothing selected and no sound. The legend calls that key
-`m channels`, because in every browser in this family `m` is channels and a
-Multiset is precisely a channel assignment — Multiset 3 is what answers on
-MIDI channel 3. The subcommand keeps `multi`, which is the instrument's own
-word for the object.
+`m multi`, matching `kwscli multi` and `e edit multi`: the key reads the 32
+Multisets and lands on them, and the right pane is the selected one's 16
+channels. `multi` is the instrument's own word for the object; the hint
+names what the key reads rather than the view it opens.
 
 ### A performance is not a patch
 
@@ -253,7 +253,7 @@ kwsed --port "U6MIDI Pro:U6MIDI Pro MIDI 1 44:0" --device-channel 5
 | `enter` | select this sound — **it will sound** |
 | `r` | read this bank's names from the unit — **silent** |
 | `/` | search names |
-| `m` | channels: the 32 Multisets and their 16 channels — **silent** |
+| `m` | multis: read the 32 Multisets and their 16 channels — **silent** |
 | `d` | what the sound under the cursor uses — its patches and wave sequences (silent) |
 | `y` | copy this performance, with private copies of its patches, into RAM 1–3 or the Card — silent until armed |
 | `i` | device identity and the unit's global channel |
