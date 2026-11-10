@@ -1952,6 +1952,9 @@ def _build_device(args: argparse.Namespace) -> Any:
     # No --config flag on this parser, so the settings file is the browser's
     # default per-tool path. Migrate a legacy working-directory file first.
     cfg.migrate_legacy_config("kwsed")
+    # Heal a settings file an older build wrote UI state into: the unquoted
+    # dotted key is a table, and the settings writer refuses such a file.
+    cfg.migrate_ui_state(cfg.DEFAULT_PATH)
     import os
 
     os.makedirs(cfg.config_dir("kwsed"), exist_ok=True)

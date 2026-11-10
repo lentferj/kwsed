@@ -2422,6 +2422,28 @@ class TestTheBrowserPanes:
             assert fourth._show_patches is True
             assert fourth._deps_pane_visible is True
 
+    async def test_a_stale_settings_file_is_healed_on_startup(self, tmp_path):
+        from kws import config as cfg
+
+        config_path = tmp_path / "config.toml"
+        config_path.write_text(
+            "# kwsed local config - gitignored, safe to delete.\n"
+            "channel = 4\n"
+            "browser.deps_pane = false\n",
+            encoding="utf-8",
+        )
+        app = KwsedApp(
+            DemoDevice(), catalog=cat.Catalog([]), config_path=str(config_path)
+        )
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            assert app._deps_pane_visible is False
+            assert app.query_one("#deps-pane").display is False
+        assert "browser" not in config_path.read_text(encoding="utf-8")
+        # The stale table is gone, so ordinary settings can be saved again.
+        cfg.save_channel(5, str(config_path))
+        assert cfg.load_channel(str(config_path)) == 5
+
 
 class TestCopyPerformance:
     """`y` copies a Performance and its private patches, arm then fire."""

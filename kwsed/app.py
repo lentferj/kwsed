@@ -1412,6 +1412,7 @@ class KwsedApp(App[None]):
         if config_path is not None:
             from kws import config as _ui_cfg
 
+            _ui_cfg.migrate_ui_state(config_path)
             self._show_patches = _ui_cfg.load_show_patches(config_path)
             self._deps_pane_visible = _ui_cfg.load_deps_pane(config_path)
         else:
@@ -5431,6 +5432,10 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         os.makedirs(cfg.config_dir("kwsed"), exist_ok=True)
     config_path = getattr(args, "config", None) or cfg.DEFAULT_PATH
+    # Heal a settings file that an older build wrote UI state into: an
+    # unquoted dotted key is a TOML table, and it would block the channel
+    # save below as well as every later preference.
+    cfg.migrate_ui_state(config_path)
 
     # Either a DemoDevice or a WavestationBridge: the two share the handful
     # of operations the browser calls, and neither is a base of the other.

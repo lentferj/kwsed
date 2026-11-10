@@ -102,9 +102,65 @@ def test_non_bool_browser_flags_fall_back(tmp_path):
     from kws import config
 
     path = tmp_path / "config.toml"
-    path.write_text(
-        '"browser.show_patches" = 1\n"browser.deps_pane" = "yes"\n',
-        encoding="utf-8",
-    )
+    ui_path = config.ui_state_path(str(path))
+    assert ui_path is not None
+    with open(ui_path, "w", encoding="utf-8") as handle:
+        handle.write('"browser.show_patches" = 1\n"browser.deps_pane" = "yes"\n')
     assert config.load_show_patches(str(path)) is True
     assert config.load_deps_pane(str(path)) is True
+
+
+def test_ui_state_moves_out_of_the_settings_file(tmp_path):
+    import os
+
+    from kws import config
+
+    path = tmp_path / "config.toml"
+    path.write_text(
+        "# kwsed local config - gitignored, safe to delete.\n"
+        "channel = 4\n"
+        "browser.deps_pane = false\n",
+        encoding="utf-8",
+    )
+    config.migrate_ui_state(str(path))
+
+    text = path.read_text(encoding="utf-8")
+    assert "browser" not in text
+    assert config.load_channel(str(path)) == 4
+    assert config.load_deps_pane(str(path)) is False
+    ui_path = config.ui_state_path(str(path))
+    assert ui_path is not None and os.path.exists(ui_path)
+    # The settings file is writable again: the table is gone.
+    config.save_channel(5, str(path))
+    assert config.load_channel(str(path)) == 5
+
+
+def test_ui_state_moves_a_flat_dotted_key_too(tmp_path):
+    from kws import config
+
+    path = tmp_path / "config.toml"
+    path.write_text(
+        'channel = 4\n"browser.show_patches" = false\n',
+        encoding="utf-8",
+    )
+    config.migrate_ui_state(str(path))
+
+    assert "browser" not in path.read_text(encoding="utf-8")
+    assert config.load_show_patches(str(path)) is False
+    config.save_channel(5, str(path))
+    assert config.load_channel(str(path)) == 5
+
+
+def test_migration_leaves_unknown_tables_alone(tmp_path):
+    from kws import config
+
+    path = tmp_path / "config.toml"
+    original = (
+        "# kwsed local config - gitignored, safe to delete.\n"
+        "channel = 4\n"
+        "[other]\n"
+        "x = 1\n"
+    )
+    path.write_text(original, encoding="utf-8")
+    config.migrate_ui_state(str(path))
+    assert path.read_text(encoding="utf-8") == original

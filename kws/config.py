@@ -37,6 +37,9 @@ able to tell which one is unhappy.
 
 from __future__ import annotations
 
+import os
+import re
+
 from vinsynlib.config import (
     bind,
     config_dir,
@@ -50,6 +53,15 @@ DEFAULT_PATH = default_config_path("kwsed")
 CARD_MODES = ("none", "cards", "hcard")
 DEFAULT_CARD_MODE = "cards"
 
+#: UI state lives in its own file beside the settings, not inside them. A
+#: hand-edited dotted key in the settings file is a TOML table, and the
+#: writer refuses any file holding one -- so one such line used to freeze
+#: every later save, the channel and port included.
+UI_STATE_FILENAME = "ui-state.toml"
+
+#: The namespaces whose keys are UI state rather than connection settings.
+UI_NAMESPACES = ("browser", "scan")
+
 __all__ = [
     "CARD_MODES",
     "DEFAULT_CARD_MODE",
@@ -62,6 +74,9 @@ __all__ = [
     "load_device_id",
     "load_last_port",
     "load_last_recv_port",
+    "UI_STATE_FILENAME",
+    "ui_state_path",
+    "migrate_ui_state",
     "load_port_pair",
     "load_scan_offer_dismissed",
     "load_show_card_defaults",
@@ -119,14 +134,29 @@ def load_port_pair(path: str | None = None) -> tuple[str, str] | None:
     return (send, _settings.load_recv_port(path) or send)
 
 
+def ui_state_path(path: str | None = None) -> str | None:
+    """``ui-state.toml`` beside the settings file, or the library's default.
+
+    ``None`` keeps the library's default (a ``ui-state.toml`` next to the
+    default settings); a settings path places it beside that path instead.
+    """
+    if path is None:
+        return None
+    return os.path.join(os.path.dirname(os.path.abspath(path)), UI_STATE_FILENAME)
+
+
 def load_scan_offer_dismissed(path: str | None = None) -> bool:
     """Whether the user chose "don't ask again" for the scan offer."""
-    return bool(_settings.load_ui_bool("scan.offer_dismissed", path, default=False))
+    return bool(
+        _settings.load_ui_bool(
+            "scan.offer_dismissed", ui_state_path(path), default=False
+        )
+    )
 
 
 def save_scan_offer_dismissed(value: bool, path: str | None = None) -> None:
     """Remember the scan offer's "don't ask again" answer."""
-    _settings.save_ui_state("scan.offer_dismissed", value, path)
+    _settings.save_ui_state("scan.offer_dismissed", value, ui_state_path(path))
 
 
 def load_card_mode(path: str | None = None) -> str:
@@ -159,19 +189,123 @@ def save_show_card_defaults(value: object, path: str | None = None) -> None:
 
 def load_show_patches(path: str | None = None) -> bool:
     """Whether the browser lists patch rows, remembered between runs."""
-    return bool(_settings.load_ui_bool("browser.show_patches", path, default=True))
+    return bool(
+        _settings.load_ui_bool(
+            "browser.show_patches", ui_state_path(path), default=True
+        )
+    )
 
 
 def save_show_patches(value: bool, path: str | None = None) -> None:
     """Remember whether the browser lists patch rows."""
-    _settings.save_ui_state("browser.show_patches", bool(value), path)
+    _settings.save_ui_state("browser.show_patches", bool(value), ui_state_path(path))
 
 
 def load_deps_pane(path: str | None = None) -> bool:
     """Whether the browser's dependency pane is visible, remembered."""
-    return bool(_settings.load_ui_bool("browser.deps_pane", path, default=True))
+    return bool(
+        _settings.load_ui_bool("browser.deps_pane", ui_state_path(path), default=True)
+    )
 
 
 def save_deps_pane(value: bool, path: str | None = None) -> None:
     """Remember whether the browser's dependency pane is visible."""
-    _settings.save_ui_state("browser.deps_pane", bool(value), path)
+    _settings.save_ui_state("browser.deps_pane", bool(value), ui_state_path(path))
+
+
+def _toml_scalar(value: object) -> str | None:
+    """One flat setting as TOML, or ``None`` when it is not a scalar."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, str):
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
+    return None
+
+
+def _write_settings(where: str, values: dict[str, object]) -> None:
+    """Rewrite a settings file with flat scalar keys only, atomically."""
+    lines = ["# kwsed local config - gitignored, safe to delete."]
+    for key, value in values.items():
+        rendered = _toml_scalar(value)
+        if rendered is None:
+            continue
+        written_key = key if re.fullmatch(r"[A-Za-z0-9_-]+", key) else f'"{key}"'
+        lines.append(f"{written_key} = {rendered}")
+    temp = where + ".tmp"
+    try:
+        with open(temp, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(lines) + "\n")
+        os.replace(temp, where)
+    except OSError:
+        try:
+            if os.path.exists(temp):
+                os.remove(temp)
+        except OSError:
+            pass
+        raise
+
+
+def _split_ui_state(
+    data: dict[str, object],
+) -> "tuple[dict[str, str | int | float | bool], dict[str, object], bool] | None":
+    """Separate UI keys from flat settings, or ``None`` if the file is not ours.
+
+    A table or list outside the known UI namespaces means the settings file
+    holds something this program did not write; the caller must leave it
+    alone rather than rewrite it.
+    """
+    moved: dict[str, str | int | float | bool] = {}
+    flat: dict[str, object] = {}
+    stale = False
+    for key, value in data.items():
+        if isinstance(value, dict):
+            if key not in UI_NAMESPACES:
+                return None
+            stale = True
+            for sub, subvalue in value.items():
+                if not isinstance(subvalue, (str, int, float, bool)):
+                    return None
+                moved[f"{key}.{sub}"] = subvalue
+        elif isinstance(value, list):
+            return None
+        elif "." in key and isinstance(value, (str, int, float, bool)):
+            stale = True
+            moved[key] = value
+        elif key in UI_NAMESPACES:
+            return None
+        else:
+            flat[key] = value
+    return moved, flat, stale
+
+
+def migrate_ui_state(path: str | None = None) -> None:
+    """Move UI state out of the settings file and heal a dotted-key table.
+
+    Older builds wrote UI state into ``config.toml``. An unquoted dotted key
+    (``browser.deps_pane = false``) is a TOML table, and both writers refuse
+    a file that holds one -- so that single line froze every later save,
+    including the channel and port. The known UI namespaces are copied to
+    ``ui-state.toml`` and the settings file is rewritten with its flat keys
+    only. A table or list this does not recognise is left untouched: the
+    file is then someone else's, and the refusal is right.
+    """
+    where = path or DEFAULT_PATH
+    data, status = _settings.read(where)
+    if status != "ok" or not data:
+        return
+    split = _split_ui_state(data)
+    if split is None:
+        return
+    moved, flat, stale = split
+    if not stale:
+        return
+    target = ui_state_path(where)
+    try:
+        for key, value in moved.items():
+            _settings.save_ui_state(key, value, target)
+        _write_settings(where, flat)
+    except OSError:
+        return
