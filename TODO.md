@@ -729,9 +729,10 @@ Also confirm the editor's write round trip on hardware when the separate
 write session happens: the `0x62` dump is sent by `write_multi`, which
 already backs up and verifies.
 
-## 27. Import formats: the SoundDiver Wavestation payload
+## 27. Import formats: the SoundDiver Wavestation performance body
 
-**Status:** open, one decode gap; the containers and the other formats work.
+**Status:** open, one decode gap; the container and the **patch** payload
+are decoded.
 
 `kws/importers.py` reads whole banks and single objects from raw SysEx,
 Standard MIDI files, SoundQuest `.sqs` (embedded Korg SysEx) and Edisyn bank
@@ -740,14 +741,27 @@ dumps. `kwscli import` files a bank in the cache and
 patches, compacted and remapped.
 
 * **SoundDiver `.LIB`** (`kws/sounddiver.py`) walks the `MROF`/`BLSS` chunks
-  and the `LENT` blocks and lists every entry's name, location and comment.
-  The Wavestation adaptation's **data block** is not the raw bank record: a
-  patch entry carries 410 bytes (a bank patch body is 410 after its
-  name) whose first 70 bytes match the bank record and whose oscillator
-  section is reordered or expanded; a performance entry carries 158 bytes.
-  No entry matched any raw record body exactly across the example library.
-  Converting needs the adaptation layout, so `read_file` refuses a `.LIB`
-  with an instruction to export the bank as `.syx` from SoundDiver.
+  and the `LENT` blocks. A 410-byte **patch** entry is now decoded into a
+  426-byte bank patch: its common section is split around a two-byte prefix
+  (`data[:2]` and `data[72:74]` are the missing common bytes), and the four
+  84-byte oscillator blocks are stored in the adaptation's byte order. That
+  order was derived from 42 real library/source pairs where the decoded
+  body matches byte-for-byte; the handful of positions that are constant
+  zero in every example decode as zero. The entry's `RAM1-NN` comment
+  selects the slot; duplicate slots keep the last entry. A real 629-entry
+  library yields 35 `RAM1` slots (30 distinct) with 22 bodies matching
+  source patches exactly; the rest are versions not present in the `.syx`
+  sources.
+* **SoundDiver performances** are still not converted. A performance entry
+  carries 158 bytes (14-byte prefix plus 8 x 18) of SoundDiver's
+  **normalized** part values, not the raw 181-byte record: on the five
+  performance names that also occur in the Korg Legacy `.wsram` references,
+  the values do not share a byte multiset with the raw part area, so it is
+  not a permutation like the patch oscillators. Decoding it needs the
+  adaptation's part descriptor / scaling (the Wavestation adaptation lives
+  in `WS.dll`, found under the SoundDiver Wine prefixes), or a `.syx`
+  export from SoundDiver. `read_banks` therefore returns the patch bank and
+  notes how many performance entries were left behind.
 * **All Data dumps** (`0x50`) are decoded into the two RAM banks the
   documented structure carries (system, multiset, micro-tune and
   performance map, then RAM1/RAM2 performances, patches and wave
@@ -759,4 +773,5 @@ patches, compacted and remapped.
   SysEx are read. No Wavestation `.sqs` example was available to test a
   native body against.
 
-**Blocked on:** the Wavestation SoundDiver adaptation's parameter layout.
+**Blocked on:** the Wavestation SoundDiver adaptation's performance part
+layout and value scaling.

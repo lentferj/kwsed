@@ -267,11 +267,16 @@ Two CLI paths read other formats; both end in the same `deps.Source` model:
   three `.syx` files offline; `--yes` writes the target bank through the
   fenced `write_bank_bundle` (backup, send, read-back).
 
-A SoundDiver `.LIB` is read for its **entry names**; the Wavestation
-adaptation's data block is not the raw bank record (a patch entry carries
-410 bytes whose common section matches but whose oscillator section is
-reordered), so it is listed rather than guessed at. Export the bank as
-`.syx` from SoundDiver in the meantime. A `0x50` All Data dump is decoded
+A SoundDiver `.LIB` now decodes its **patch** entries. The 410-byte patch
+payload is the common section split around a two-byte prefix, followed by
+the four oscillator blocks in the adaptation's byte order (the order was
+derived from 42 real library/source patch pairs). A patch's `RAM1-NN`
+comment selects its slot; when several entries name one slot, the last
+entry is kept and the note says how many were replaced. **Performance**
+entries carry 158 bytes of SoundDiver's normalized part values, not the raw
+181-byte performance record -- they do not even share a byte multiset --
+so they are listed by `--list` but not converted; export those as `.syx`
+from SoundDiver. A `0x50` All Data dump is decoded
 into its two RAM banks: the six fixed bank blocks (`RAM1`/`RAM2`
 performances, patches and wave sequences) sit at the end of the payload,
 so the prefix before them is derived from the length and checked; a
