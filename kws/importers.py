@@ -199,8 +199,6 @@ def _merge_packet(
     fmt: str,
 ) -> Optional[dict[str, Any]]:
     fn = pkt.function
-    if fn == m.Function.ALL_DATA_DUMP:
-        raise UnsupportedFormat("all-data dumps are not decoded yet")
     if _is_ignored(fn):
         return current_card
     if fn == m.Function.MULTISET_DUMP:
@@ -279,6 +277,61 @@ def _apply_single(g: dict[str, Any], pkt: m.Packet, fn: int) -> None:
             g["has_patch"] = True
 
 
+def _expand_all_data(packet: m.Packet) -> List[m.Packet]:
+    try:
+        data = m.from_nibbles(packet.payload)
+    except ValueError as exc:
+        raise UnsupportedFormat("all-data dump could not be decoded") from exc
+    prefix = len(data) - 2 * (50 * 181 + 35 * 426 + 8784)
+    if not (0 <= prefix <= 4096):
+        raise UnsupportedFormat(
+            "all-data dump does not match the 2-bank (RAM1/RAM2) layout: "
+            f"prefix {prefix} is outside 0..4096; only the two-bank all-data "
+            "structure is recognised"
+        )
+    perf_size = 50 * 181
+    patch_size = 35 * 426
+    ws_size = 8784
+    off = prefix
+    perf1 = data[off : off + perf_size]
+    off += perf_size
+    perf2 = data[off : off + perf_size]
+    off += perf_size
+    patch1 = data[off : off + patch_size]
+    off += patch_size
+    patch2 = data[off : off + patch_size]
+    off += patch_size
+    ws1 = data[off : off + ws_size]
+    off += ws_size
+    ws2 = data[off : off + ws_size]
+    off += ws_size
+
+    out: List[m.Packet] = []
+    specs = (
+        (m.Function.ALL_PERFORMANCE_DUMP, 0, perf1),
+        (m.Function.ALL_PERFORMANCE_DUMP, 1, perf2),
+        (m.Function.ALL_PATCH_DUMP, 0, patch1),
+        (m.Function.ALL_PATCH_DUMP, 1, patch2),
+        (m.Function.ALL_WAVESEQ_DUMP, 0, ws1),
+        (m.Function.ALL_WAVESEQ_DUMP, 1, ws2),
+    )
+    for fn, wire, block in specs:
+        parsed = m.parse(m.frame_bulk(fn, wire, block))
+        if parsed is not None:
+            out.append(parsed)
+    return out
+
+
+def _expand_packets(packets: List[m.Packet]) -> List[m.Packet]:
+    out: List[m.Packet] = []
+    for pkt in packets:
+        if pkt.function == m.Function.ALL_DATA_DUMP:
+            out.extend(_expand_all_data(pkt))
+        else:
+            out.append(pkt)
+    return out
+
+
 def _collect_groups(
     packets: List[m.Packet], basename: str, fmt: str
 ) -> Tuple[List[dict[str, Any]], List[ImportedBank]]:
@@ -286,7 +339,7 @@ def _collect_groups(
     group_by_wire: dict[int, dict[str, Any]] = {}
     current_card: Optional[dict[str, Any]] = None
     multiset_banks: List[ImportedBank] = []
-    for pkt in packets:
+    for pkt in _expand_packets(packets):
         current_card = _merge_packet(
             pkt, groups, group_by_wire, current_card, multiset_banks, basename, fmt
         )
@@ -444,7 +497,7 @@ def describe_file(path: str) -> str:
     banks_list = read_file(path)
     lines = []
     for ib in banks_list:
-        lines.append(f"{ib.label}  [{ib.scope}]")
+        lines.append(ib.label)
         perfs = ib.source.performances
         for slot, perf in enumerate(perfs):
             if not perf:

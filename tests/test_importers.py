@@ -314,3 +314,47 @@ def test_lib_entries_are_listed_and_conversion_refused(tmp_path):
     described = importers.describe_file(str(path))
     assert "Glass Meridian" in described
     assert "Amber Drift" in described
+
+
+def _all_data_frame(
+    perf1: bytes, perf2: bytes, patch1: bytes, patch2: bytes, ws: bytes
+) -> bytes:
+    data = bytes(1813) + perf1 + perf2 + patch1 + patch2 + ws + ws
+    nibbles = list(m.to_nibbles(data))
+    return m.frame(m.Function.ALL_DATA_DUMP, nibbles + [m.checksum(nibbles)])
+
+
+def test_all_data_reads_ram1_and_ram2(tmp_path):
+    perf1 = b"".join(
+        [make_performance("Glass Meridian", ((0, 0),))]
+        + [bytes(r.PERFORMANCE_SIZE)] * 49
+    )
+    perf2 = b"".join(
+        [make_performance("Amber Drift", ((0, 0),))] + [bytes(r.PERFORMANCE_SIZE)] * 49
+    )
+    patch1 = b"".join([make_patch("Kelp Forest")] + [bytes(r.PATCH_SIZE)] * 34)
+    patch2 = b"".join([make_patch("Tidal Glass")] + [bytes(r.PATCH_SIZE)] * 34)
+    ws, _ = make_waveseq({0: [40, 41]})
+
+    path = tmp_path / "all.syx"
+    path.write_bytes(_all_data_frame(perf1, perf2, patch1, patch2, ws))
+
+    out = importers.read_file(str(path))
+    assert [bank.scope for bank in out] == ["RAM1", "RAM2"]
+    for bank in out:
+        assert len(bank.source.performances) == 50
+        assert len(bank.source.patches) == 35
+        assert bank.source.waveseq is not None
+    assert m.decode_name(out[0].source.performances[0]) == "Glass Meridian"
+    assert m.decode_name(out[1].source.performances[0]) == "Amber Drift"
+    assert m.decode_name(out[0].source.patches[0]) == "Kelp Forest"
+    assert m.decode_name(out[1].source.patches[0]) == "Tidal Glass"
+
+
+def test_all_data_with_an_unknown_layout_is_refused(tmp_path):
+    data = bytes(5000) + bytes(65488)
+    nibbles = list(m.to_nibbles(data))
+    path = tmp_path / "all.syx"
+    path.write_bytes(m.frame(m.Function.ALL_DATA_DUMP, nibbles + [m.checksum(nibbles)]))
+    with pytest.raises(importers.UnsupportedFormat, match="all-data"):
+        importers.read_file(str(path))
