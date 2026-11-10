@@ -24,22 +24,29 @@ A favourites database is injected rather than opened, so a test cannot
 write into the user's real one.
 """
 
+from typing import Any, Optional
+
 import pytest
 from textual.widgets import DataTable, Label, Static
 
-from kws import banks
+from kws import backup, banks, deps
 from kws import catalog as cat
+from kws import messages as m
+from kws import multi as multi_mod
+from kws import records as rec
 from kws.favorites import Favorites
 from kwsed.app import (
     VIEW_ALL,
     VIEW_ALL_FAVOURITES,
     VIEW_BANK_FAVOURITES,
+    CopyPerformanceScreen,
     KwsedApp,
     ViewSlot,
     favorite_bank_id,
 )
 from kwsed.demo import DemoDevice
 from vinsynlib.ui.modals import RatingFilter
+from vinsynlib.ui.report import ReportScreen
 
 
 @pytest.fixture()
@@ -2054,3 +2061,203 @@ class TestCardModesFollowUps:
             bank_table = app.query_one("#bank-table", DataTable)
             row = bank_table.get_row("physical:c1:performance")
             assert row[-1] == "1"
+
+
+def _copied_source(scope: str = "RAM1") -> deps.Source:
+    """One performance whose two parts share patch 0, whose osc is a sequence."""
+    from tests.test_bankbuild import make_patch, make_performance, make_waveseq
+
+    patch = make_patch("Kelp Forest", ((0, 0), (0, 40), (0, 40), (0, 40)))
+    perf = make_performance("Glass Meridian", parts=((0, 0), (0, 0)))
+    patches: list[bytes] = [
+        bytes(rec.PATCH_SIZE) for _ in range(banks.PATCHES_PER_BANK)
+    ]
+    patches[0] = patch
+    perfs: list[bytes] = [
+        make_performance("", ()) for _ in range(banks.PERFORMANCES_PER_BANK)
+    ]
+    perfs[0] = perf
+    waveseq = make_waveseq({0: [40, 41]})[0]
+    return deps.Source(scope, performances=perfs, patches=patches, waveseq=waveseq)
+
+
+def _empty_source(scope: str) -> deps.Source:
+    from tests.test_bankbuild import make_performance
+
+    perfs: list[bytes] = [
+        make_performance("", ()) for _ in range(banks.PERFORMANCES_PER_BANK)
+    ]
+    patches: list[bytes] = [
+        bytes(rec.PATCH_SIZE) for _ in range(banks.PATCHES_PER_BANK)
+    ]
+    return deps.Source(
+        scope,
+        performances=perfs,
+        patches=patches,
+        waveseq=bytes(rec.WAVESEQ_BANK_SIZE),
+    )
+
+
+class _RecordingDemo(DemoDevice):
+    """A demo device whose bundle write leaves a real backup behind.
+
+    DemoDevice keeps what it was given but writes no envelope, so undo has
+    nothing to load. The real bridge always writes one; this adds the step
+    the fake leaves out, without changing what the fake stores.
+    """
+
+    def __init__(self, directory: str) -> None:
+        super().__init__()
+        self._directory = directory
+
+    def write_bank_bundle(
+        self,
+        bank: int | str,
+        *,
+        performances: Optional[bytes] = None,
+        patches: Optional[bytes] = None,
+        waveseq: Optional[bytes] = None,
+        backup_dir: str,
+        verify: bool = True,
+        timeout: Optional[float] = None,
+    ) -> dict[str, Any]:
+        result = super().write_bank_bundle(
+            bank,
+            performances=performances,
+            patches=patches,
+            waveseq=waveseq,
+            backup_dir=backup_dir,
+            verify=verify,
+            timeout=timeout,
+        )
+        entry = banks.bank(bank)
+        blocks: dict[str, bytes] = {}
+        for name, function, data in (
+            ("performances", m.Function.ALL_PERFORMANCE_DUMP, performances),
+            ("patches", m.Function.ALL_PATCH_DUMP, patches),
+            ("waveseq", m.Function.ALL_WAVESEQ_DUMP, waveseq),
+        ):
+            if data is not None:
+                blocks[name] = bytes(
+                    m.frame_bulk(function, entry.sysex, data, channel=self.channel)
+                )
+        result["backup"] = backup.save(
+            self._directory,
+            kind="bank-bundle",
+            slot=entry.label,
+            name=entry.label,
+            device_id=str(self.channel),
+            source="kwsed",
+            blocks=blocks,
+        )
+        return result
+
+
+class TestTheDependencyInspector:
+    """`d` shows what a Performance, a Patch or a Multiset depends on."""
+
+    async def test_d_on_a_performance_lists_parts_sequences_and_ownership(self, app):
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._sources["RAM1"] = _copied_source()
+            app._fill((0, banks.Kind.PERFORMANCE))
+            app.query_one("#slot-table").focus()
+            await pilot.press("d")
+            await settle(pilot)
+            assert isinstance(app.screen, ReportScreen)
+            body = app.screen.body
+            assert 'RAM1 00 "Glass Meridian"' in body
+            assert "0 -> RAM1:00 Kelp Forest" in body
+            assert "step cost: 2" in body
+            assert "patches: atomic" in body
+            await pilot.press("escape")
+            await settle(pilot)
+
+    async def test_d_on_a_patch_lists_oscillators_and_where_used(self, app):
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._sources["RAM1"] = _copied_source()
+            app._fill((0, banks.Kind.PATCH))
+            app.query_one("#slot-table").focus()
+            await pilot.press("d")
+            await settle(pilot)
+            assert isinstance(app.screen, ReportScreen)
+            body = app.screen.body
+            assert "Osc 1 -> wave sequence 0 in RAM1" in body
+            assert "Where used:" in body
+            assert "RAM1:00 Glass Meridian" in body
+            await pilot.press("escape")
+            await settle(pilot)
+
+    async def test_d_on_a_multiset_lists_the_sixteen_channels(self, app):
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._multisets = multi_mod.parse(
+                bytes(multi_mod.NAME_BASE + multi_mod.MULTISETS * multi_mod.NAME_SIZE)
+            )
+            table = app.query_one("#bank-table", DataTable)
+            RowKey = table.get_row_index("multi:00")
+            table.move_cursor(row=RowKey)
+            table.focus()
+            await pilot.press("d")
+            await settle(pilot)
+            assert isinstance(app.screen, ReportScreen)
+            body = app.screen.body
+            assert "Ch 01" in body
+            assert "card conflicts: none" in body
+            await pilot.press("escape")
+            await settle(pilot)
+
+
+class TestCopyPerformance:
+    """`y` copies a Performance and its private patches, arm then fire."""
+
+    async def test_y_on_a_patch_is_refused_with_the_reason(self, app):
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._fill((0, banks.Kind.PATCH))
+            app.query_one("#slot-table").focus()
+            await pilot.press("y")
+            await settle(pilot)
+            text = panel_text(app, "#status")
+            assert "select a Performance to copy" in text
+            assert "refused" in text
+
+    async def test_arm_then_fire_copies_atomically_into_ram3(self, tmp_path):
+        device = _RecordingDemo(str(tmp_path / "backups"))
+        app = KwsedApp(device, catalog=cat.Catalog([]))
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._sources["RAM1"] = _copied_source()
+            app._sources["RAM3"] = _empty_source("RAM3")
+            app._fill((0, banks.Kind.PERFORMANCE))
+            app.query_one("#slot-table").focus()
+            await pilot.press("y")
+            await settle(pilot)
+            assert isinstance(app.screen, CopyPerformanceScreen)
+            screen = app.screen
+
+            # Nothing is written before the screen is armed.
+            await pilot.press("w")
+            await settle(pilot)
+            assert device.bundle_write_count == 0
+            assert "arm" in panel_text(app, "#status")
+
+            await pilot.press("a")
+            ids = [bank.id for bank in screen._destinations]
+            screen._dest_index = ids.index("RAM3")
+            screen._refresh()
+            await pilot.press("w")
+            await settle(pilot, 40)
+
+            assert device.bundle_write_count == 1
+            assert len(app._undo_log) == 1, "one copy is one undo step"
+            dump = device.read_bank("RAM3", banks.Kind.PERFORMANCE)
+            used = [
+                part for part in rec.performance_parts(dump.records[0]) if part.used
+            ]
+            assert used
+            assert {part.bank for part in used} == {banks.bank("RAM3").number}
+            assert {part.patch for part in used} == {0}, (
+                "two parts sharing one source patch keep one private slot"
+            )

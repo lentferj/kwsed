@@ -71,6 +71,8 @@ from textual.widgets import DataTable, Header, Input, Label, Static
 from kws import bankstore
 from kws import banks
 from kws import deps
+from kws import relations
+from kws import perfcopy
 from kws import records as rec
 from kws.multi import MULTISETS
 from kws import cards as _cards
@@ -212,6 +214,8 @@ KEY_HINTS = (
     "L label card",
     "X card sweep",
     "V rating filter",
+    "d deps",
+    "y copy perf",
     "z undo",
     "w write gate",
     "i device",
@@ -879,6 +883,150 @@ MULTI_BANK = -1
 MULTI_KIND = "multiset"
 
 
+class CopyPerformanceScreen(ModalScreen[Optional[Dict[str, Any]]]):
+    DEFAULT_CSS = """
+    CopyPerformanceScreen { align: center middle; }
+    CopyPerformanceScreen > Vertical {
+        width: 84; height: auto; border: thick $accent;
+        background: $surface; padding: 1 2;
+    }
+    """
+
+    BINDINGS = [
+        Binding("escape", "close", "Cancel", show=False),
+        Binding("q", "close", "Cancel", show=False),
+        Binding("b", "bank", "Bank", show=False),
+        Binding("m", "mode", "Mode", show=False),
+        Binding("a", "arm", "Arm", show=False),
+        Binding("w", "fire", "Write", show=False),
+    ]
+
+    def __init__(self, app: Any, perf: relations.PerfId, source_name: str) -> None:
+        super().__init__()
+        self._app = app
+        self.perf = perf
+        self.source_name = source_name
+        self._dest_index = 0
+        self._modes = ("append", "clean")
+        self._mode_index = 0
+        self._armed = False
+        self._destinations = banks.writable_banks()
+
+    def _destination(self) -> Any:
+        return self._destinations[self._dest_index]
+
+    def _mode(self) -> str:
+        return self._modes[self._mode_index]
+
+    def _skip_readonly_card(self) -> None:
+        dest = self._destination()
+        if (
+            dest.label == "Card" or dest.id == "CARD"
+        ) and self._app._active_card in range(0, 25):
+            # refuse and advance
+            self._app.notify_status(
+                "Card NN is a read-only HCard ROM bank; "
+                "select a user bank (25-39) or RAM 1-3",
+                refused=True,
+            )
+            self._dest_index = (self._dest_index + 1) % len(self._destinations)
+            self._skip_readonly_card()
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Label("Copy Performance", id="copy-perf-title")
+            yield Static("", id="copy-perf-state")
+            yield Static("[dim]b bank · m mode · a arm · w fire · esc cancel[/dim]")
+
+    def on_mount(self) -> None:
+        self._skip_readonly_card()
+        self._refresh()
+
+    def _plan_preview(self) -> List[str]:
+        """The dry-run plan lines for the current destination and mode."""
+        app = self._app
+        dest = self._destination()
+        try:
+            result = perfcopy.copy_into_bank(
+                app._sources,
+                dest.id,
+                [self.perf],
+                mode=self._mode(),
+                destination_bank=dest,
+            )
+        except Exception as exc:
+            return [f"plan error: {exc}"]
+        plan = result.plan
+        lines: List[str] = []
+        chosen = next(
+            (alloc for alloc in plan.allocations if alloc.source_perf == self.perf),
+            None,
+        )
+        if chosen is not None:
+            lines.append(f"target Performance slot {chosen.target_perf_slot:02d}")
+            slots = sorted(set(chosen.part_patch_slots.values()))
+            if slots:
+                lines.append(f"target Patch slots {slots[0]:02d}..{slots[-1]:02d}")
+        lines.append(
+            f"budget: Performances {len(plan.allocations)}/50, "
+            f"Patches {plan.patch_count}/35, "
+            f"Wave Seqs {len(plan.sequence_map)}/32, "
+            f"Steps {plan.steps_used}/501"
+        )
+        dest_src = app._sources.get(dest.id)
+        if dest_src is not None:
+            active = perfcopy.active_performances(dest_src)
+            if active:
+                lines.append(f"destination active performances: {active}")
+        if plan.rejected:
+            lines.append("rejected: " + "; ".join(plan.rejected))
+        return lines
+
+    def _refresh(self) -> None:
+        state_lines: List[str] = [
+            f"source: {self.source_name or self.perf.scope_id}:{self.perf.number:02d}"
+        ]
+        state_lines.extend(self._plan_preview())
+        if self._armed:
+            state_lines.append("ARMED — press w to write")
+        try:
+            self.query_one("#copy-perf-state", Static).update("\n".join(state_lines))
+        except Exception:  # noqa: S110
+            pass
+
+    def action_bank(self) -> None:
+        self._dest_index = (self._dest_index + 1) % len(self._destinations)
+        self._skip_readonly_card()
+        self._armed = False
+        self._refresh()
+
+    def action_mode(self) -> None:
+        self._mode_index = (self._mode_index + 1) % len(self._modes)
+        self._armed = False
+        self._refresh()
+
+    def action_arm(self) -> None:
+        self._armed = True
+        self._refresh()
+        self._app.notify_status("armed")
+
+    def action_fire(self) -> None:
+        if not self._armed:
+            self._app.notify_status("press a to arm first", refused=True)
+            return
+        dest = self._destination()
+        mode = self._mode()
+        self._app._copy_perf_write_worker(self.perf, dest, mode, self)
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+    def _write_failed(self, msg: str) -> None:
+        self._armed = False
+        self._refresh()
+        self._app.notify_status(msg, refused=True)
+
+
 class KwsedApp(App[None]):
     """The browser."""
 
@@ -928,6 +1076,8 @@ class KwsedApp(App[None]):
         Binding("L", "label_card", "Label card"),
         Binding("X", "card_sweep", "Card sweep", show=False),
         Binding("V", "rating_filter", "Rating filter"),
+        Binding("d", "show_deps", "Deps"),
+        Binding("y", "copy_performance", "Copy perf"),
         Binding("z", "undo", "Undo"),
         Binding("w", "toggle_write_gate", "Write gate"),
     ]
@@ -1591,6 +1741,160 @@ class KwsedApp(App[None]):
                 pass
         self.call_from_thread(self._undo_settle, results, failed)
 
+    def _read_source_offline(self, scope: str) -> deps.Source:
+        bank = self._bank_for_scope(scope)
+        perf_raw = self.device.read_raw(bank.sysex, m.Function.ALL_PERFORMANCE_DUMP)
+        patch_raw = self.device.read_raw(bank.sysex, m.Function.ALL_PATCH_DUMP)
+        ws_raw = self.device.read_raw(bank.sysex, m.Function.ALL_WAVESEQ_DUMP)
+        pp = m.parse(perf_raw)
+        pa = m.parse(patch_raw)
+        pw = m.parse(ws_raw)
+        pb = pp.data() if pp is not None else b""
+        qb = pa.data() if pa is not None else b""
+        wb = pw.data() if pw is not None else b""
+        if len(wb) > rec.WAVESEQ_BANK_SIZE:
+            wb = wb[: rec.WAVESEQ_BANK_SIZE]
+        perfs_list = [
+            pb[i * rec.PERFORMANCE_SIZE : (i + 1) * rec.PERFORMANCE_SIZE]
+            for i in range(len(pb) // rec.PERFORMANCE_SIZE)
+        ]
+        patches_list = [
+            qb[i * rec.PATCH_SIZE : (i + 1) * rec.PATCH_SIZE]
+            for i in range(len(qb) // rec.PATCH_SIZE)
+        ]
+        return deps.Source(
+            bank_id=scope, performances=perfs_list, patches=patches_list, waveseq=wb
+        )
+
+    @work(thread=True)
+    def _copy_perf_write_worker(
+        self, perf: Any, destination: Any, mode: str, screen: Any
+    ) -> None:
+        failure: BaseException | None = None
+        payload: Any = None
+        try:
+            if not self._exchange.acquire(blocking=False):
+                raise RuntimeError("busy")
+            try:
+                with self._busy_gate, self._lock:
+                    local_sources = dict(self._sources)
+                    src_scope = perf.scope_id
+                    if src_scope not in local_sources:
+                        local_sources[src_scope] = self._read_source_offline(src_scope)
+                    dest_scope = destination.id
+                    if dest_scope not in local_sources:
+                        local_sources[dest_scope] = self._read_source_offline(
+                            dest_scope
+                        )
+                    built = perfcopy.copy_into_bank(
+                        local_sources,
+                        dest_scope,
+                        [perf],
+                        mode=mode,
+                        destination_bank=destination,
+                    )
+                    if not built.plan.allocations:
+                        raise RuntimeError("no performance slot allocated")
+                    from kws import backup as _backup
+
+                    where = getattr(self, "_backup_dir", None) or _backup.default_dir()
+                    write_result = self.device.write_bank_bundle(
+                        destination.number,
+                        performances=built.performances,
+                        patches=built.patches,
+                        waveseq=built.waveseq,
+                        backup_dir=where,
+                    )
+                    if (
+                        not isinstance(write_result, dict)
+                        or write_result.get("verified") is not True
+                    ):
+                        raise RuntimeError(
+                            str(
+                                write_result.get("mismatch")
+                                if isinstance(write_result, dict)
+                                else write_result
+                            )
+                        )
+                payload = (
+                    perf,
+                    destination,
+                    mode,
+                    local_sources,
+                    built,
+                    write_result,
+                    screen,
+                )
+            finally:
+                try:
+                    self._exchange.release()
+                except RuntimeError:
+                    pass
+        except Exception as exc:
+            failure = exc
+        if failure is not None:
+            self.call_from_thread(screen._write_failed, str(failure))
+            self.call_from_thread(self.notify_status, f"copy: {failure}", refused=True)
+            return
+        self.call_from_thread(
+            self._copy_perf_finished,
+            payload[0],
+            payload[1],
+            payload[2],
+            payload[3],
+            payload[4],
+            payload[5],
+            payload[6],
+        )
+
+    def _copy_perf_finished(
+        self,
+        perf: Any,
+        destination: Any,
+        mode: str,
+        local_sources: Dict[str, deps.Source],
+        built: Any,
+        write_result: Any,
+        screen: Any,
+    ) -> None:
+        for sid, src in local_sources.items():
+            self._sources[sid] = src
+        if self._bankstore_dir is not None:
+            try:
+                bankstore.save(
+                    destination.id,
+                    performances=built.performances,
+                    patches=built.patches,
+                    waveseq=built.waveseq,
+                    directory=self._bankstore_dir,
+                )
+            except OSError:
+                pass
+        slot = (
+            built.plan.allocations[0].target_perf_slot if built.plan.allocations else 0
+        )
+        patch_slots = sorted(
+            {v for a in built.plan.allocations for v in a.part_patch_slots.values()}
+        )
+        try:
+            self._record_write(
+                write_result if isinstance(write_result, dict) else {"verified": True}
+            )
+        except Exception:  # noqa: S110
+            pass
+        self.notify_status(
+            f"copied {perf.scope_id}:{perf.number:02d} into "
+            f"{destination.label} perf {slot:02d}, verified"
+        )
+        screen.dismiss(
+            {
+                "ok": True,
+                "bank": destination.label,
+                "perf": slot,
+                "patches": patch_slots,
+            }
+        )
+
     def action_undo(self) -> None:
         if not self._write_gate.armed:
             self.notify_status("write gate is locked", refused=True)
@@ -2159,6 +2463,28 @@ class KwsedApp(App[None]):
         else:
             self.notify_status(f"{VIEW_LABELS[self.view_mode]} - {shown}")
 
+    def action_copy_performance(self) -> None:
+        entry = self._cursor_entry()
+        if entry is None:
+            self.notify_status("nothing under the cursor", refused=True)
+            return
+        if entry.kind == banks.Kind.PATCH:
+            self.notify_status(
+                "select a Performance to copy "
+                "(patches travel with the Performance that uses them)",
+                refused=True,
+            )
+            return
+        perf = relations.PerfId(self._scoped_bank_id(entry), entry.number)
+        source_name = ""
+        try:
+            source_name = self._scope_slot_name(
+                self._scoped_bank_id(entry), entry.kind, entry.number
+            )
+        except Exception:
+            source_name = ""
+        self.push_screen(CopyPerformanceScreen(self, perf, source_name))
+
     def action_rating_filter(self) -> None:
         if self.favorites is None:
             self.notify_status("no favourites database")
@@ -2180,6 +2506,341 @@ class KwsedApp(App[None]):
             self._refill_keeping_place()
 
         self.push_screen(RatingFilterScreen(current), apply)
+
+    def _deps_target(self) -> "tuple[Optional[int], Optional[SlotLike]]":
+        """The Multiset row under the bank cursor, or the slot under the list."""
+        try:
+            bank_table = self.query_one("#bank-table", DataTable)
+            if bank_table.has_focus:
+                row = bank_table.cursor_row
+                if 0 <= row < len(self._row_multis):
+                    chosen = self._row_multis[row]
+                    if chosen is not None:
+                        return chosen, None
+        except Exception:  # noqa: S110 - a table mid-refill has no cursor
+            pass
+        return None, self._cursor_entry()
+
+    def _sources_with_store(self) -> Dict[str, deps.Source]:
+        """``self._sources`` plus whatever the cache holds that it lacks."""
+        sources = dict(self._sources)
+        if self._bankstore_dir is not None:
+            try:
+                for sid, src in bankstore.load_all(self._bankstore_dir).items():
+                    if sid not in sources:
+                        sources[sid] = src
+            except Exception:  # noqa: S110 - a corrupt cache is not fatal
+                pass
+        return sources
+
+    def action_show_deps(self) -> None:
+        multiset, entry = self._deps_target()
+        if multiset is not None:
+            self._show_deps_multiset(multiset)
+            return
+        if entry is None:
+            self.notify_status("nothing under the cursor", refused=True)
+            return
+        scope = self._scoped_bank_id(entry)
+        sources = self._sources_with_store()
+        if scope not in sources:
+            if not self._exchange.acquire(blocking=False):
+                self.notify_status("busy", refused=True)
+                return
+            self._deps_worker(scope, entry.kind, entry.number, None)
+            return
+        self._show_deps(scope, entry.kind, entry.number, None, sources)
+
+    @work(thread=True)
+    def _deps_worker(
+        self, scope: str, kind: str, number: int, multiset: Optional[int]
+    ) -> None:
+        failure: BaseException | None = None
+        payload: Any = None
+        try:
+            with self._busy_gate, self._lock:
+                bank = self._bank_for_scope(scope)
+                perf_raw = self.device.read_raw(
+                    bank.sysex, m.Function.ALL_PERFORMANCE_DUMP
+                )
+                patch_raw = self.device.read_raw(bank.sysex, m.Function.ALL_PATCH_DUMP)
+                ws_raw = self.device.read_raw(bank.sysex, m.Function.ALL_WAVESEQ_DUMP)
+            pp = m.parse(perf_raw)
+            pa = m.parse(patch_raw)
+            pw = m.parse(ws_raw)
+            perf_bytes = pp.data() if pp is not None else b""
+            patch_bytes = pa.data() if pa is not None else b""
+            ws_bytes = pw.data() if pw is not None else b""
+            if len(ws_bytes) > rec.WAVESEQ_BANK_SIZE:
+                ws_bytes = ws_bytes[: rec.WAVESEQ_BANK_SIZE]
+            perfs_list = [
+                perf_bytes[i * rec.PERFORMANCE_SIZE : (i + 1) * rec.PERFORMANCE_SIZE]
+                for i in range(len(perf_bytes) // rec.PERFORMANCE_SIZE)
+            ]
+            patches_list = [
+                patch_bytes[i * rec.PATCH_SIZE : (i + 1) * rec.PATCH_SIZE]
+                for i in range(len(patch_bytes) // rec.PATCH_SIZE)
+            ]
+            source = deps.Source(
+                bank_id=scope,
+                performances=perfs_list,
+                patches=patches_list,
+                waveseq=ws_bytes,
+            )
+            payload = (scope, kind, number, multiset, source)
+        except Exception as exc:
+            failure = exc
+        finally:
+            try:
+                self._exchange.release()
+            except RuntimeError:
+                pass
+        if failure is not None:
+            self.call_from_thread(self.notify_status, f"deps: {failure}", refused=True)
+            return
+        self.call_from_thread(self._deps_loaded, payload)
+
+    def _deps_loaded(self, payload: Any) -> None:
+        scope, kind, number, multiset, source = payload
+        self._sources[scope] = source
+        if self._bankstore_dir is not None:
+            try:
+                bankstore.save(
+                    scope,
+                    performances=b"".join(source.performances),
+                    patches=b"".join(source.patches),
+                    waveseq=source.waveseq,
+                    directory=self._bankstore_dir,
+                )
+            except OSError:
+                pass
+        sources = dict(self._sources)
+        if self._bankstore_dir is not None:
+            try:
+                for sid, src in bankstore.load_all(self._bankstore_dir).items():
+                    if sid not in sources:
+                        sources[sid] = src
+            except Exception:  # noqa: S110
+                pass
+        if multiset is not None:
+            self._show_deps_multiset(multiset, sources)
+        else:
+            self._show_deps(scope, kind, number, multiset, sources)
+
+    def _bank_for_scope(self, scope: str) -> Any:
+        if scope.startswith("CARD") or scope == "CARD":
+            return banks.bank("CARD")
+        return banks.bank(scope)
+
+    def _show_deps(
+        self,
+        scope: str,
+        kind: str,
+        number: int,
+        multiset: Optional[int],
+        sources: Dict[str, deps.Source],
+    ) -> None:
+        if multiset is not None:
+            self._show_deps_multiset(multiset, sources)
+            return
+        graph = relations.RelationGraph(
+            sources, multisets=self._multisets, active_card_scope="CARD"
+        )
+        try:
+            if kind == banks.Kind.PERFORMANCE:
+                body_lines = self._deps_performance_lines(graph, sources, scope, number)
+            elif kind == banks.Kind.PATCH:
+                body_lines = self._deps_patch_lines(graph, sources, scope, number)
+            else:
+                body_lines = [f"{scope} {number} (unknown kind)"]
+        except Exception as exc:
+            body_lines = [f"(error: {exc})"]
+        self.push_screen(ReportScreen("Dependencies", "\n".join(body_lines)))
+
+    def _deps_performance_lines(
+        self, graph: Any, sources: Dict[str, deps.Source], scope: str, number: int
+    ) -> List[str]:
+        """A Performance's parts, wave sequences, ownership and Multisets."""
+        from kws import dumps as dumps_mod
+
+        lines: List[str] = []
+        pid = relations.PerfId(scope, number)
+        rel = graph.performance_relation(pid)
+        name = rel.name or ""
+        src = sources.get(scope)
+        if (
+            not name
+            and src is not None
+            and src.performances
+            and number < len(src.performances)
+        ):
+            try:
+                name = dumps_mod.record_name(src.performances[number])
+            except Exception:
+                name = ""
+        lines.append(f'{scope} {number:02d} "{name}"')
+        for mapping in rel.parts:
+            patch = mapping.source_patch
+            pname = ""
+            psrc = sources.get(patch.scope_id)
+            if psrc is not None and psrc.patches and patch.number < len(psrc.patches):
+                try:
+                    pname = dumps_mod.record_name(psrc.patches[patch.number])
+                except Exception:
+                    pname = ""
+            lines.append(
+                f"  {mapping.part_index} -> {patch.scope_id}:{patch.number:02d} {pname}"
+            )
+        lines.append(
+            "  unique patches: "
+            + (
+                ", ".join(f"{p.scope_id}:{p.number}" for p in rel.unique_patches)
+                or "none"
+            )
+        )
+        lines.append(f"  sequences: {len(rel.sequences)}")
+        for seq_scope, wave_bank, sequence in rel.sequences:
+            lines.append(f"    {seq_scope} {sequence} (wave bank {wave_bank})")
+        lines.append(f"  step cost: {rel.step_cost}")
+        shared = {
+            pnum: [other for other in perfs if other != number]
+            for pnum, perfs in graph.shared_patches_in_bank(scope).items()
+            if number in perfs
+        }
+        if shared:
+            lines.append("  patches: shared")
+            for pnum, others in sorted(shared.items()):
+                lines.append(
+                    f"  patch {pnum} also used by "
+                    f"{', '.join(str(other) for other in others)}"
+                )
+        else:
+            lines.append("  patches: atomic")
+        multisets = graph.multisets_using_performance(pid)
+        lines.append(
+            "  multisets: "
+            + (", ".join(f"{num}.{ch}" for num, ch in multisets) or "none")
+        )
+        return lines
+
+    def _deps_patch_lines(
+        self, graph: Any, sources: Dict[str, deps.Source], scope: str, number: int
+    ) -> List[str]:
+        """A Patch's four oscillators and every Performance that uses it."""
+        from kws import dumps as dumps_mod
+
+        lines: List[str] = []
+        src = sources.get(scope)
+        record = (
+            src.patches[number]
+            if (src is not None and src.patches and number < len(src.patches))
+            else None
+        )
+        pname = ""
+        if record is not None:
+            try:
+                pname = dumps_mod.record_name(record)
+            except Exception:
+                pname = ""
+        lines.append(f'{scope} {number:02d} "{pname}"')
+        if record is None:
+            lines.extend(f"  Osc {i} -> (not loaded)" for i in range(1, 5))
+        else:
+            for i, wave in enumerate(rec.patch_waves(record), start=1):
+                if wave.is_sequence:
+                    seq_scope = relations.resolve_part_scope(wave.bank, scope)
+                    lines.append(
+                        f"  Osc {i} -> wave sequence {wave.wave} in {seq_scope}"
+                    )
+                else:
+                    lines.append(f"  Osc {i} -> wave {wave.wave}")
+        lines.append("  Where used:")
+        for perf in graph.performances_using_patch(relations.PatchId(scope, number)):
+            pname2 = ""
+            psrc = sources.get(perf.scope_id)
+            if (
+                psrc is not None
+                and psrc.performances
+                and perf.number < len(psrc.performances)
+            ):
+                try:
+                    pname2 = dumps_mod.record_name(psrc.performances[perf.number])
+                except Exception:
+                    pname2 = ""
+            lines.append(f"    {perf.scope_id}:{perf.number:02d} {pname2}")
+        return lines
+
+    def _multiset_channel_line(
+        self, part: Any, sources: Dict[str, deps.Source], graph: Any
+    ) -> "tuple[str, str]":
+        """One ``Ch NN -> Bank PP Name patches a,b`` line and its scope."""
+        from kws import dumps as dumps_mod
+
+        try:
+            bank_obj = banks.by_sysex(part.bank)
+        except LookupError:
+            bank_obj = None
+        scope = bank_obj.id if bank_obj is not None else f"bank{part.bank}"
+        src = sources.get(scope)
+        name = ""
+        if (
+            src is not None
+            and src.performances
+            and part.performance < len(src.performances)
+        ):
+            try:
+                name = dumps_mod.record_name(src.performances[part.performance])
+            except Exception:
+                name = ""
+        patches: List[str] = []
+        if src is not None:
+            try:
+                rel = graph.performance_relation(
+                    relations.PerfId(scope, part.performance)
+                )
+                patches = [str(p.number) for p in rel.unique_patches]
+            except Exception:
+                patches = []
+        patch_text = " patches " + ",".join(patches) if patches else ""
+        line = (
+            f"  Ch {part.channel:02d} -> {scope} "
+            f"{part.performance:02d} {name}{patch_text}"
+        )
+        return line, scope
+
+    def _show_deps_multiset(
+        self, ms_number: int, sources: Optional[Dict[str, deps.Source]] = None
+    ) -> None:
+        if sources is None:
+            sources = dict(self._sources)
+        lines: List[str] = []
+        try:
+            ms = self._multisets[ms_number]
+        except Exception:
+            ms = None
+        if ms is None:
+            lines.append(f"Multiset {ms_number:02d}")
+            lines.append("(not loaded)")
+            self.push_screen(ReportScreen("Dependencies", "\n".join(lines)))
+            return
+        lines.append(f"Multiset {getattr(ms, 'number', ms_number):02d}")
+        graph = relations.RelationGraph(
+            sources, multisets=self._multisets, active_card_scope="CARD"
+        )
+        card_scopes: List[str] = []
+        for part in getattr(ms, "parts", []):
+            if getattr(part, "used", False):
+                line, scope = self._multiset_channel_line(part, sources, graph)
+                lines.append(line)
+                card_scopes.append(scope)
+            else:
+                lines.append(f"  Ch {part.channel:02d} -> (unused)")
+        distinct_card = {s for s in card_scopes if s.startswith("CARD/")}
+        if len(distinct_card) > 1:
+            lines.append("  card conflicts: " + ", ".join(sorted(distinct_card)))
+        else:
+            lines.append("  card conflicts: none")
+        self.push_screen(ReportScreen("Dependencies", "\n".join(lines)))
 
     def _refill_keeping_place(self) -> None:
         if self._current_physical is not None:
@@ -4012,6 +4673,8 @@ switch the HCard.
   t   tags; n   note (both hang off a favourite, so press f first)
   V   filter the list by favourite rating
   [ ] step the send channel; c set it by number
+  d   dependency inspector for a Performance, Patch or Multiset
+  y   copy a Performance (with its patches) into a writable bank
   z   undo the last write (the write gate must be armed)
   w   arm or lock the write gate (or start with --allow-write)
   i   device identity and the unit's global channel

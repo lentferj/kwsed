@@ -76,6 +76,8 @@ def test_the_legend_matches_the_family() -> None:
             "L label card",
             "X card sweep",
             "V rating filter",
+            "d deps",
+            "y copy perf",
             "z undo",
             "w write gate",
         ),
