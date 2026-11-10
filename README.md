@@ -10,8 +10,10 @@ A terminal browser for the **Korg Wavestation SR**.
 > **Prototype. Its read path works against a real WS SR; parts are still
 > unverified.** Discovery, the identity reply and bank dumps — including
 > from a fitted program card — were exercised on hardware on 2026-09-12.
-> What is *not* established is which of the twelve banks a Bank Select
-> actually reaches, and nothing inside a record past its name is decoded.
+> `select` now sends Bank Select (CC0 = 0, CC32 0–5) and a Program Change
+> per Player's Guide §4.8 and Reference Appendix 3 §1.3, but kwsed cannot
+> read whether the SR's Bank Select MIDI-receive parameter is ON; nothing
+> inside a record past its name is decoded.
 > **Read [DISCLAIMER.md](DISCLAIMER.md) first.**
 
 Two panes: bank-and-kind on the left, that bank's slots on the right.
@@ -197,13 +199,19 @@ bank and the kind out of the **reply** and files the names under that,
 rather than under what it asked for. A late answer filed under the wrong
 bank is a silent, permanent error in a name catalog.
 
-### Selecting is a best effort, and says so
+### Selecting sends Bank Select and a Program Change
 
-`select` sends Bank Select and a Program Change, but **which of the twelve
-banks a given Bank Select reaches has not been established** — the manuals
-to hand are scans with no text layer. kwsed sends the bank's own System
-Exclusive number and reports what it sent, rather than implying it knows
-where that lands. See [TODO.md](TODO.md).
+`select` addresses the SR's twelve banks as six MIDI banks: Bank Select MSB
+(CC0) = 0, Bank Select LSB (CC32) = 0–5, then Program Change
+`program_base + slot`. Each MIDI bank holds two internal banks of 50, so
+Program Change 0–49 selects the first and 50–99 the second (Player's Guide
+§4.8, Reference Appendix 3 §1.3). The SR's Bank Select MIDI-receive parameter
+must be ON; kwsed cannot read it.
+
+The SR has no patch mode: a Program Change selects a performance (or a
+Multiset in Multi mode), never a patch. `kwscli select` and the browser both
+refuse patch slots; a patch is heard through a performance that uses it. See
+[TODO.md](TODO.md).
 
 ## Install
 
@@ -255,7 +263,7 @@ kwscli ports                      # MIDI ports on this host
 kwscli status                     # who is there, and on which global channel
 kwscli dump CARD                  # read a bank's names (silent)
 kwscli multi                      # the 32 Multisets (silent)
-kwscli select RAM1 patch 12       # select a sound ON THE UNIT
+kwscli select RAM1 performance 12 # select a performance ON THE UNIT (patch refused)
 ```
 
 ## Building a favourites bank

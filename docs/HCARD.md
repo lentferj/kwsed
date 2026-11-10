@@ -44,9 +44,12 @@ by name, even though only one is physically present to the synth at a time.
 3. **Identity resolution** at read time — map the live card (name, first
    performance/patch names) to a bank number.
 
-The physical `CARD` slot stays `CARD` for writes, favourites and backups. The
-40 banks are a **browse/archive overlay** over it (Decision 8-B1), not a new
-address space.
+The physical `CARD` slot stays `CARD` for writes and backups. The 40 banks
+are a **browse/archive overlay** over it, not a new wire address space.
+Favourites and live names are scoped per HCard bank under `CARD/NN`
+(`cards` mode uses `CARD/cN` for physical cards); see
+[CARDS.md](CARDS.md). Decision 8-B1's shared `CARD` identity for
+favourites/livenames is **superseded**.
 
 ## 4. Decisions
 
@@ -59,9 +62,16 @@ address space.
   row becomes a group of 40 sub-banks, each 50 performances + 35 patches.
   Unread banks show the table's default name greyed as "not captured"; read
   banks show live names with the existing disagreement `*` marker.
-- **8-B1 — keep `CARD` as the identity key.** Favourites/livenames/catalog
-  keys stay kind-qualified `CARD:performance:NNN`; archive entries are
-  addressed by `(bank_number, kind, slot)`. No key migration.
+- **8-B1 — superseded: keep `CARD` as the identity key.** The original
+  decision kept favourites/livenames/catalog keys kind-qualified as
+  `CARD:performance:NNN`, with archive entries addressed by
+  `(bank_number, kind, slot)`. Replaced: writes and backups still target the
+  physical `CARD` slot, but favourites and live names are scoped per HCard
+  bank under `CARD/NN` (`kws.cards.scope_id`; `kwsed.app._scoped_bank_id`),
+  and `cards` mode scopes physical cards under `CARD/cN`
+  (`kws.physical.scope_id`). Archive entries remain `(bank_number, kind, slot)`
+  in `cards.json`; the HCard and physical-card archives are separate. See
+  [CARDS.md](CARDS.md).
 
 ## 5. Data model (`cards.json`)
 
@@ -130,7 +140,8 @@ the capture against the evidence:
 The last confirmed bank is remembered as the **active** bank and shown in the
 detail line ("active; last confirmed capture …"). Selecting a slot from a
 card row that is **not** the known-active bank is refused with a "select Card
-NN on the HCard first" prompt — the card cannot be switched remotely. The
+NN on the HCard first, then press C" prompt — the card cannot be switched
+remotely, and a capture is the only way to confirm the new bank. The
 sweep (`X`) walks the same path: it confirms each expected bank in turn and
 stops between banks when what answered is not the bank it was asked for, so
 the user can switch the HCard to the next bank.

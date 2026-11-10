@@ -35,6 +35,7 @@ from kwsed.app import (
     VIEW_ALL_FAVOURITES,
     VIEW_BANK_FAVOURITES,
     KwsedApp,
+    ViewSlot,
     favorite_bank_id,
 )
 from kwsed.demo import DemoDevice
@@ -191,6 +192,29 @@ class TestTheFavouritesViews:
             app._fill(app._current_pair)
             # two, and from two different bank-and-kind pairs
             assert slot_row(app) == 2
+
+    async def test_the_every_favourites_view_crosses_hcard_banks(self, app, store):
+        from kws import cards as kws_cards
+
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            store.add(
+                favorite_bank_id(kws_cards.scope_id(7), banks.Kind.PERFORMANCE),
+                1,
+                name="From Seven",
+            )
+            store.add(
+                favorite_bank_id(kws_cards.scope_id(8), banks.Kind.PERFORMANCE),
+                2,
+                name="From Eight",
+            )
+            app.view_mode = VIEW_ALL_FAVOURITES
+            app._fill(app._current_pair)
+            assert slot_row(app) == 2
+            table = app.query_one("#slot-table")
+            labels = [str(table.get_row_at(i)[1]) for i in range(2)]
+            assert any("Card 07" in label for label in labels)
+            assert any("Card 08" in label for label in labels)
 
     async def test_the_kinds_do_not_merge_in_either_view(self, app, store):
         """Performance 3 and patch 3 are two different favourites."""
@@ -585,6 +609,32 @@ class TestTheCardSubList:
             row = " ".join(str(cell) for cell in table.get_row("card:33:performance"))
             assert "(unnamed)" in row
 
+    async def test_a_named_user_bank_keeps_its_printed_name_after_capture(
+        self, tmp_path
+    ):
+        """A capture with no readable card name must not turn a bank whose
+        table entry is a real printed name into "(unnamed)"."""
+        app = self._app(tmp_path, card_name=None, seeded=False)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            table = app.query_one("#bank-table")
+            table.move_cursor(
+                row=app._pairs.index(
+                    (banks.bank("CARD").number, banks.Kind.PERFORMANCE)
+                )
+                + 25 * 2
+            )
+            await settle(pilot)
+            assert app._current_card == 25
+            app.action_capture_card()
+            await settle(pilot, 30)
+            assert 25 in app._archive
+            assert app._archive[25].name == ""
+            row = " ".join(str(cell) for cell in table.get_row("card:25:performance"))
+            # The bank column clips the long printed name on purpose.
+            assert "Pro-Rec WS1 Super WaveDan" in row
+            assert "(unnamed)" not in row
+
     @staticmethod
     def _demo_digest():
         """The digest of the demo device's fixed CARD content."""
@@ -721,6 +771,41 @@ class TestTheCardSubList:
             app.action_capture_card()
             await settle(pilot, 30)
             assert cards.load_active(app._cards_path) == 33
+
+    async def test_labelling_a_bank_without_a_path_stays_in_memory(
+        self, tmp_path, monkeypatch
+    ):
+        """A cards_path of None means memory only, as in ``--demo``.
+
+        ``kws.cards.set_label`` would fall back to the user's real archive
+        and write the label there instead of here.
+        """
+        from textual.widgets import Input
+
+        from kws import cards
+        from kwsed.app import PromptScreen
+
+        forbidden = tmp_path / "never-written" / "cards.json"
+        monkeypatch.setattr(cards, "default_path", lambda: str(forbidden))
+        app = KwsedApp(DemoDevice(), catalog=cat.Catalog(), cards_path=None)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._archive[7] = cards.capture(
+                7, "Invented Card", {0: "Opening"}, {0: "Bell"}
+            )
+            app._fill((banks.bank("CARD").number, banks.Kind.PERFORMANCE), 7)
+            await settle(pilot)
+            app.action_label_card()
+            await settle(pilot, 5)
+            assert isinstance(app.screen, PromptScreen)
+            app.screen.query_one("#value", Input).value = "Renamed"
+            await pilot.press("enter")
+            await settle(pilot, 5)
+            assert not forbidden.exists()
+            assert app._archive[7].label == "Renamed"
+            table = app.query_one("#bank-table", DataTable)
+            cells = " ".join(str(cell) for cell in table.get_row("card:07:performance"))
+            assert "Renamed" in cells
 
     async def test_inactive_card_rows_are_greyed_and_italic(self, tmp_path):
         app = self._app(tmp_path)
@@ -863,7 +948,7 @@ class TestTheCardSubList:
             await pilot.pause()
             app.notify_status(
                 "refused · the HCard is on Card 28 (last confirmed); select "
-                "Card 29 on the HCard first, or press C to re-check",
+                "Card 29 on the HCard first, then press C to re-check",
                 refused=True,
             )
             await settle(pilot)
@@ -1477,7 +1562,7 @@ class TestCardModes:
                     ]
                     assert cells[-1] == ""
 
-    async def test_all_favourites_uses_the_active_hcard_bank(self, tmp_path):
+    async def test_all_favourites_does_not_need_a_confirmed_hcard_bank(self, tmp_path):
         from kws import cards as kws_cards
 
         app, _ = self._app(tmp_path, "hcard", with_favourites=True)
@@ -1489,16 +1574,16 @@ class TestCardModes:
         )
         async with app.run_test() as pilot:
             await pilot.pause()
-            app._active_card = 7
+            # The favourites view is a catalogue of everything filed; it
+            # does not depend on which bank the HCard is currently showing.
+            app._active_card = None
             shown = app._all_favourites()
             assert any(
-                item.number == 0 and item.kind == banks.Kind.PERFORMANCE
+                item.bank_id == "CARD/07"
+                and item.number == 0
+                and item.kind == banks.Kind.PERFORMANCE
                 for item in shown
             )
-            # No confirmed bank: there is nothing to list for the Card slot,
-            # and asking must not raise.
-            app._active_card = None
-            assert app._all_favourites() == []
 
 
 class TestPhysicalCardCapture:
@@ -1570,6 +1655,89 @@ class TestPhysicalCardCapture:
                 )
             )
             assert "Orchestra" in row
+
+    async def test_a_capture_without_a_path_never_touches_the_disk(
+        self, tmp_path, monkeypatch
+    ):
+        """``--demo`` and the tests inject no physical path.
+
+        The kws helpers fall back to ``default_path()`` when handed None,
+        which would file the capture in the user's real archive while the
+        rows here still showed nothing. Nothing may be written, and the
+        card must exist in memory with the active marker set.
+        """
+        from textual.widgets import Input
+
+        from kws import physical
+        from kwsed.app import PromptScreen
+
+        forbidden = tmp_path / "never-written" / "physical-cards.json"
+        monkeypatch.setattr(physical, "default_path", lambda: str(forbidden))
+        app = KwsedApp(
+            DemoDevice(),
+            catalog=cat.Catalog(),
+            card_mode="cards",
+            physical_path=None,
+        )
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.action_capture_card()
+            await settle(pilot, 30)
+            assert isinstance(app.screen, PromptScreen)
+            app.screen.query_one("#value", Input).value = "Orchestra"
+            await pilot.press("enter")
+            await settle(pilot, 10)
+            assert not forbidden.exists()
+            assert len(app._physical) == 1
+            cid = next(iter(app._physical))
+            assert app._physical[cid].label == "Orchestra"
+            assert app._active_physical == cid
+            row = " ".join(
+                str(cell)
+                for cell in app.query_one("#bank-table", DataTable).get_row(
+                    f"physical:{cid}:performance"
+                )
+            )
+            assert "Orchestra" in row
+
+    async def test_a_capture_leaves_the_bank_cursor_on_the_new_card(self, tmp_path):
+        """C must not snap the browser back to the RAM row.
+
+        Re-modelling the table leaves the cursor at row 0 (RAM 1) and queues
+        a highlight for it. That message used to land after the capture had
+        filled the card's slots and replace them with RAM's.
+        """
+        from textual.widgets import Input
+
+        from kws import physical
+        from kwsed.app import PromptScreen
+
+        app, pp = self._app(tmp_path)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.action_capture_card()
+            await settle(pilot, 30)
+            assert isinstance(app.screen, PromptScreen)
+            app.screen.query_one("#value", Input).value = "Orchestra"
+            await pilot.press("enter")
+            await settle(pilot, 30)
+            cid = next(iter(physical.load(pp)))
+            table = app.query_one("#bank-table", DataTable)
+            expected = next(
+                index
+                for index, (pair, physical_id) in enumerate(
+                    zip(app._pairs, app._row_physical)
+                )
+                if physical_id == cid and pair[1] == banks.Kind.PERFORMANCE
+            )
+            assert expected != 0
+            assert table.cursor_row == expected
+            assert app._current_physical == cid
+            slots = app.query_one("#slot-table", DataTable)
+            card_number = banks.bank("CARD").number
+            card_slots = banks.slots(card_number, banks.Kind.PERFORMANCE)
+            assert slots.row_count == len(card_slots)
+            assert app._current == card_slots
 
     async def test_a_matching_digest_confirms_without_a_prompt(self, tmp_path):
         from kws import physical
@@ -1797,3 +1965,92 @@ class TestCardModesFollowUps:
             await settle(pilot)
             assert table.row_count >= 1
             assert "Opening" in " ".join(str(cell) for cell in table.get_row_at(0))
+
+    async def test_all_favourites_shows_internal_banks_with_no_card(self, tmp_path):
+        app, _ = self._app(tmp_path, mode="cards", favourites=True)
+        assert app.favorites is not None
+        app.favorites.add(favorite_bank_id("RAM1", banks.Kind.PERFORMANCE), 0)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            table = app.query_one("#slot-table")
+            app.view_mode = VIEW_ALL_FAVOURITES
+            app._fill_physical("", banks.Kind.PERFORMANCE)
+            await settle(pilot)
+            assert table.row_count == 1
+            row = " ".join(str(cell) for cell in table.get_row_at(0))
+            assert "RAM 1" in row
+            detail = panel_text(app, "#detail")
+            assert "insert a card" not in detail
+            assert "RAM 1" in detail
+
+    async def test_all_favourites_with_nothing_favourited_does_not_prompt_for_a_card(
+        self, tmp_path
+    ):
+        app, _ = self._app(tmp_path, mode="cards", favourites=True)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            table = app.query_one("#slot-table")
+            app.view_mode = VIEW_ALL_FAVOURITES
+            app._fill_physical("", banks.Kind.PERFORMANCE)
+            await settle(pilot)
+            assert table.row_count == 1
+            row = " ".join(str(cell) for cell in table.get_row_at(0))
+            assert "nothing favourited" in row
+            detail = panel_text(app, "#detail")
+            assert "insert a card" not in detail
+            assert "nothing favourited" in detail
+
+    async def test_an_all_favourites_card_row_says_whether_it_is_active(self, app):
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            slot = banks.slot(banks.bank("CARD").number, banks.Kind.PERFORMANCE, 1)
+            item = ViewSlot(slot, "CARD/07", "")
+            app._active_card = 7
+            app._detail_scoped(item, "CARD/07")
+            text = panel_text(app, "#detail")
+            assert "active card" in text
+            assert "another card" not in text
+            app._active_card = 8
+            app._detail_scoped(item, "CARD/07")
+            text = panel_text(app, "#detail")
+            assert "another card" in text
+            assert "active card" not in text
+
+    async def test_an_inactive_physical_row_keeps_the_refusal_wording(self, app):
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            slot = banks.slot(banks.bank("CARD").number, banks.Kind.PERFORMANCE, 1)
+            item = ViewSlot(slot, "CARD/c1", "")
+            app._active_physical = "c1"
+            app._detail_scoped(item, "CARD/c1")
+            assert "active card" in panel_text(app, "#detail")
+            app._active_physical = "c2"
+            app._detail_scoped(item, "CARD/c1")
+            text = panel_text(app, "#detail")
+            assert "another card" in text
+            assert "active card" not in text
+
+    async def test_toggle_favorite_on_physical_card_stores_scoped_name(self, tmp_path):
+        from kws import physical
+
+        app, _ = self._app(
+            tmp_path,
+            mode="cards",
+            cards=[self._card("c1", "Orchestra", "d1")],
+            favourites=True,
+        )
+        assert app.favorites is not None
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._fill_physical("c1", banks.Kind.PERFORMANCE)
+            await settle(pilot)
+            app.action_toggle_favorite()
+            await settle(pilot)
+            key = favorite_bank_id(physical.scope_id("c1"), banks.Kind.PERFORMANCE)
+            fav = app.favorites.get(key, 0)
+            assert fav is not None
+            assert fav.name == "Opening"
+            assert fav.name != "(unnamed)"
+            bank_table = app.query_one("#bank-table", DataTable)
+            row = bank_table.get_row("physical:c1:performance")
+            assert row[-1] == "1"

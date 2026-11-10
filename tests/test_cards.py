@@ -128,6 +128,13 @@ class TestTheArchive:
         assert set(loaded) == {7, 8}
         assert loaded[8].name == "User 01"
 
+    def test_an_old_user_placeholder_is_not_a_captured_name(self, tmp_path):
+        path = str(tmp_path / "cards.json")
+        cards.save(self._captured(25, "User 01"), path)
+        assert cards.load(path)[25].name == ""
+        cards.save(self._captured(25, "Pro-Rec WS1 Super WaveDance"), path)
+        assert cards.load(path)[25].name == "Pro-Rec WS1 Super WaveDance"
+
     def test_a_missing_archive_is_not_an_error(self, tmp_path):
         assert cards.load(str(tmp_path / "absent.json")) == {}
 
@@ -186,6 +193,19 @@ class TestTheArchive:
         assert cards.load_active(path) == 28
         assert set(cards.load(path)) == {7}
 
+    def test_the_active_bank_is_persisted_and_survives_a_label(self, tmp_path):
+        path = str(tmp_path / "cards.json")
+        cards.save(self._captured(7), path)
+        cards.set_active(28, path)
+        assert cards.load_active(path) == 28
+        # Relabelling a bank must not clear the active-bank hint.
+        updated = cards.set_label(7, "My Label", path)
+        assert updated.label == "My Label"
+        assert cards.load_active(path) == 28
+        raw = json.loads((tmp_path / "cards.json").read_text(encoding="utf-8"))
+        assert raw["active"] == 28
+        assert set(cards.load(path)) == {7}
+
     def test_an_invalid_active_value_is_ignored(self, tmp_path):
         path = tmp_path / "cards.json"
         path.write_text(
@@ -212,6 +232,42 @@ class TestTheArchive:
         assert bank.names(banks.Kind.PATCH) == {0: "First Patch"}
         with pytest.raises(LookupError):
             bank.names("waveseq")
+
+
+class TestCardTitles:
+    def _captured(self, number, name="", label=""):
+        return cards.capture(
+            number,
+            name,
+            {0: "First"},
+            {0: "Patch"},
+            label=label,
+            captured_at="2026-11-07T12:00:00+00:00",
+        )
+
+    def test_a_named_user_bank_falls_back_to_the_printed_name(self):
+        entry = cards.card(25)
+        assert (
+            cards.bank_title(self._captured(25), entry) == "Pro-Rec WS1 Super WaveDance"
+        )
+
+    def test_a_placeholder_user_bank_stays_unnamed(self):
+        entry = cards.card(30)
+        assert cards.bank_title(self._captured(30), entry) == "(unnamed)"
+
+    def test_a_read_name_wins_over_the_printed_name(self):
+        entry = cards.card(25)
+        assert (
+            cards.bank_title(self._captured(25, "Read From Card"), entry)
+            == "Read From Card"
+        )
+
+    def test_a_label_wins_over_everything(self):
+        entry = cards.card(25)
+        assert (
+            cards.bank_title(self._captured(25, "Read From Card", "My Label"), entry)
+            == "My Label"
+        )
 
 
 class TestResolution:

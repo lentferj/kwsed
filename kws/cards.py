@@ -132,9 +132,9 @@ class Card:
 #: The forty banks in HCard order, transcribed verbatim from the HCard-101
 #: manual's Wavestation-SR-mode sound-library table (see docs/HCARD.md
 #: section 2). Banks 00-04 and 19-24 are named by the manual exactly as
-#: written here, including the "Korg " prefix on 00-18. Banks 25-39 are
-#: user banks: the manual names NONE of them, so "User 01".."User 15" are
-#: kwsed placeholders; their real identity comes from capture/rename.
+#: written here, including the "Korg " prefix on 00-18. Banks 25-29 are
+#: named from the owner's printed soundbank headers; 30-39 have no known
+#: name and keep the "User 06".."User 15" placeholders.
 CARDS: Tuple[Card, ...] = (
     Card(0, "Korg WS Internal ROM", Category.FACTORY),
     Card(1, "Korg WPC-00PI RAM1 factory preload", Category.PRELOAD),
@@ -161,11 +161,11 @@ CARDS: Tuple[Card, ...] = (
     Card(22, 'MCR03-WS3 "Dancing Wavestation"', Category.ROM_CARD),
     Card(23, 'MCR03-WS4 "Vocoder Effects & External"', Category.ROM_CARD),
     Card(24, 'MCR03 "Vector World"', Category.ROM_CARD),
-    Card(25, "User 01", Category.USER),
-    Card(26, "User 02", Category.USER),
-    Card(27, "User 03", Category.USER),
-    Card(28, "User 04", Category.USER),
-    Card(29, "User 05", Category.USER),
+    Card(25, "Pro-Rec WS1 Super WaveDance", Category.USER),
+    Card(26, "Pro-Rec WS2 UltraTexture", Category.USER),
+    Card(27, "Metra Sound Modern Times", Category.USER),
+    Card(28, "Metra Sound Up To Date", Category.USER),
+    Card(29, "Pro-Rec WS4 Power WaveSynth", Category.USER),
     Card(30, "User 06", Category.USER),
     Card(31, "User 07", Category.USER),
     Card(32, "User 08", Category.USER),
@@ -359,11 +359,13 @@ def _bank_from_json(key: str, raw: object) -> Optional[CapturedBank]:
     entry = _BY_NUMBER.get(number)
     # An old archive stored the table's placeholder ("User 05") as the
     # card name for user banks. That was never a real read; treat it as
-    # unread so it does not masquerade as the bank's identity.
+    # unread so it does not masquerade as the bank's identity. Banks 25-29
+    # have since been given their real names, but archives written before
+    # that still carry the old placeholder.
     if (
         entry is not None
         and entry.category == Category.USER
-        and name.strip() == entry.name.strip()
+        and name.strip() == _user_placeholder(number)
     ):
         name = ""
     return CapturedBank(
@@ -618,8 +620,13 @@ def set_label(number: int, label: str, path: Optional[str] = None) -> CapturedBa
         verified=bank.verified,
     )
     banks[number] = updated
-    _write(banks, where)
+    _write(banks, where, active=load_active(where))
     return updated
+
+
+def _user_placeholder(number: int) -> str:
+    """The placeholder name for a user bank with no known card name."""
+    return f"User {number - 24:02d}"
 
 
 def bank_title(captured: Optional[CapturedBank], entry: Card) -> str:
@@ -627,8 +634,9 @@ def bank_title(captured: Optional[CapturedBank], entry: Card) -> str:
 
     A user label wins over everything (it is an explicit choice). Then the
     name the card actually reported. For factory/preload/rom-card banks the
-    manual's table name is the expected identity, so it is the fallback;
-    for user banks there is no expected name, so an unread one is
+    manual's table name is the expected identity, so it is the fallback.
+    The same is true for a user bank whose table entry is a real printed
+    card name; only a placeholder user bank ("User 06") falls back to
     "(unnamed)".
     """
     if captured is not None:
@@ -638,7 +646,9 @@ def bank_title(captured: Optional[CapturedBank], entry: Card) -> str:
             return captured.name.strip()
     if entry.category != Category.USER:
         return entry.name
-    return "(unnamed)"
+    if entry.name.strip() == _user_placeholder(entry.number):
+        return "(unnamed)"
+    return entry.name
 
 
 def _write(
