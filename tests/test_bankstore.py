@@ -168,7 +168,6 @@ class TestCorrupt:
         scope = "RAM1"
         path = os.path.join(d, "RAM1.json")
         os.makedirs(d, exist_ok=True)
-        import base64 as b64
 
         env = {
             "version": 1,

@@ -2051,6 +2051,26 @@ class KwsedApp(App[None]):
             payload[6],
         )
 
+    @staticmethod
+    def _source_from_built(scope: str, built: Any) -> deps.Source:
+        """A cache entry for a bank a copy just wrote, not the one it replaced."""
+        perfs = [
+            built.performances[
+                i * rec.PERFORMANCE_SIZE : (i + 1) * rec.PERFORMANCE_SIZE
+            ]
+            for i in range(len(built.performances) // rec.PERFORMANCE_SIZE)
+        ]
+        patches = [
+            built.patches[i * rec.PATCH_SIZE : (i + 1) * rec.PATCH_SIZE]
+            for i in range(len(built.patches) // rec.PATCH_SIZE)
+        ]
+        return deps.Source(
+            bank_id=scope,
+            performances=perfs,
+            patches=patches,
+            waveseq=built.waveseq,
+        )
+
     def _copy_perf_finished(
         self,
         perf: Any,
@@ -2063,6 +2083,9 @@ class KwsedApp(App[None]):
     ) -> None:
         for sid, src in local_sources.items():
             self._sources[sid] = src
+        # local_sources holds the destination as it was read *before* the
+        # write; the built bank is what the bank now holds.
+        self._sources[destination.id] = self._source_from_built(destination.id, built)
         if self._bankstore_dir is not None:
             try:
                 bankstore.save(
@@ -2737,6 +2760,30 @@ class KwsedApp(App[None]):
                 pass
         return sources
 
+    def _active_card_scope(self) -> str:
+        """The archived scope that the one physical card slot currently holds.
+
+        A Multiset part records the wire byte ``3`` for the card, which names
+        the slot rather than which archived bank is in it. The dependency
+        graph has to resolve that byte to the scope whose records are loaded
+        (``CARD/07``, ``CARD/c1``), or every card channel looks unloaded.
+        """
+        if self._active_physical:
+            try:
+                return _physical.scope_id(self._active_physical)
+            except Exception:  # noqa: S110 - fall back to the HCard
+                pass
+        if self._active_card is not None:
+            try:
+                return _cards.scope_id(self._active_card)
+            except Exception:  # noqa: S110 - fall back to the bare slot
+                pass
+        return "CARD"
+
+    def _resolve_card_scope(self, scope: str) -> str:
+        """``"CARD"`` is the slot; the loaded records are under the active scope."""
+        return self._active_card_scope() if scope == "CARD" else scope
+
     def action_show_deps(self) -> None:
         multiset, entry = self._deps_target()
         if multiset is not None:
@@ -2745,7 +2792,7 @@ class KwsedApp(App[None]):
         if entry is None:
             self.notify_status("nothing under the cursor", refused=True)
             return
-        scope = self._scoped_bank_id(entry)
+        scope = self._resolve_card_scope(self._scoped_bank_id(entry))
         sources = self._sources_with_store()
         if scope not in sources:
             if not self._exchange.acquire(blocking=False):
@@ -2848,7 +2895,9 @@ class KwsedApp(App[None]):
             self._show_deps_multiset(multiset, sources)
             return
         graph = relations.RelationGraph(
-            sources, multisets=self._multisets, active_card_scope="CARD"
+            sources,
+            multisets=self._multisets,
+            active_card_scope=self._active_card_scope(),
         )
         try:
             if kind == banks.Kind.PERFORMANCE:
@@ -2985,6 +3034,7 @@ class KwsedApp(App[None]):
         except LookupError:
             bank_obj = None
         scope = bank_obj.id if bank_obj is not None else f"bank{part.bank}"
+        scope = self._resolve_card_scope(scope)
         src = sources.get(scope)
         name = ""
         if (
@@ -3029,7 +3079,9 @@ class KwsedApp(App[None]):
             return
         lines.append(f"Multiset {getattr(ms, 'number', ms_number):02d}")
         graph = relations.RelationGraph(
-            sources, multisets=self._multisets, active_card_scope="CARD"
+            sources,
+            multisets=self._multisets,
+            active_card_scope=self._active_card_scope(),
         )
         card_scopes: List[str] = []
         for part in getattr(ms, "parts", []):
@@ -4849,26 +4901,8 @@ class KwsedApp(App[None]):
         screen: Any,
     ) -> None:
         """Main thread: merge the staged banks, record ONE undo step, dismiss."""
-        from kws import deps as _deps
-        from kws import records as _rec
-
         for bank_id, built in staged.built_banks.items():
-            perfs = [
-                built.performances[
-                    i * _rec.PERFORMANCE_SIZE : (i + 1) * _rec.PERFORMANCE_SIZE
-                ]
-                for i in range(len(built.performances) // _rec.PERFORMANCE_SIZE)
-            ]
-            patches = [
-                built.patches[i * _rec.PATCH_SIZE : (i + 1) * _rec.PATCH_SIZE]
-                for i in range(len(built.patches) // _rec.PATCH_SIZE)
-            ]
-            self._sources[bank_id] = _deps.Source(
-                bank_id=bank_id,
-                performances=perfs,
-                patches=patches,
-                waveseq=built.waveseq,
-            )
+            self._sources[bank_id] = self._source_from_built(bank_id, built)
         self._multi_sets = list(multisets)
         self._multisets = list(multisets)
         if hasattr(self, "_record_write"):

@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from cairosvg import svg2png
+    from cairosvg import svg2png  # deptry: ignore
 except ImportError:  # pragma: no cover - environment check
     svg2png = None
 

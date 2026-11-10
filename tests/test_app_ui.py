@@ -29,7 +29,7 @@ from typing import Any, Optional
 import pytest
 from textual.widgets import DataTable, Label, Static
 
-from kws import backup, banks, deps
+from kws import backup, banks, deps, dumps
 from kws import catalog as cat
 from kws import messages as m
 from kws import multi as multi_mod
@@ -2208,6 +2208,32 @@ class TestTheDependencyInspector:
             await pilot.press("escape")
             await settle(pilot)
 
+    async def test_d_on_a_multiset_resolves_the_active_card(self, app):
+        from dataclasses import replace
+
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._active_card = 7
+            app._sources["CARD/07"] = _copied_source("CARD/07")
+            sets = multi_mod.parse(
+                bytes(multi_mod.NAME_BASE + multi_mod.MULTISETS * multi_mod.NAME_SIZE)
+            )
+            card = banks.bank("CARD").sysex
+            first = replace(sets[0].parts[0], bank=card, performance=0)
+            parts = [first] + [
+                replace(part, performance=50) for part in sets[0].parts[1:]
+            ]
+            app._multisets = [replace(sets[0], parts=tuple(parts))] + list(sets[1:])
+            table = app.query_one("#bank-table", DataTable)
+            table.move_cursor(row=table.get_row_index("multi:00"))
+            table.focus()
+            await pilot.press("d")
+            await settle(pilot)
+            assert isinstance(app.screen, ReportScreen)
+            assert "CARD/07 00 Glass Meridian" in app.screen.body
+            await pilot.press("escape")
+            await settle(pilot)
+
 
 class TestCopyPerformance:
     """`y` copies a Performance and its private patches, arm then fire."""
@@ -2252,6 +2278,9 @@ class TestCopyPerformance:
 
             assert device.bundle_write_count == 1
             assert len(app._undo_log) == 1, "one copy is one undo step"
+            cached = app._sources["RAM3"]
+            assert dumps.record_name(cached.performances[0]) == "Glass Meridian"
+            assert dumps.record_name(cached.patches[0]) == "Kelp Forest"
             dump = device.read_bank("RAM3", banks.Kind.PERFORMANCE)
             used = [
                 part for part in rec.performance_parts(dump.records[0]) if part.used
