@@ -772,3 +772,8 @@ patches, compacted and remapped.
   SysEx are read.
 
 
+
+* **FAT12 disk images (`.img`) and `.zip` archives** are now supported
+  as import sources: their contained `.syx`/`.mid`/`.bnk` banks are
+  imported with disk/file/bank labels. KryoFlux `.7z` flux archives are
+  not decoded; the `.img` files in the same download are the decoded form.

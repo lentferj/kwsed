@@ -291,6 +291,8 @@ performance and the patches it depends on into an existing bank:
 ```sh
 kwscli import "card07.syx" --as CARD/07       # file a card bank in the cache
 kwscli import "factory.syx" --list             # what banks and performances?
+kwscli import "DANGER WORLD.img" --list       # banks inside a disk image
+kwscli import "set.zip" --label "..."          # pick one bank from a zip
 kwscli copy-perf RAM1:3 --to RAM3 --from-file "factory.syx" --out staged
 kwscli copy-perf RAM1:3 --to RAM3 --from-file "factory.syx" --yes
 ```
@@ -304,6 +306,8 @@ Read formats:
 | SoundQuest `.sqs` | banks carried as embedded Korg SysEx; MidiQuest-native bodies are refused |
 | Edisyn bank `.syx` | standard bank dumps |
 | SoundDiver `.LIB` | patches (1, 2 or 4 oscillators), performances and wave sequences are decoded into their `RAM1-NN` slots; multisets are not present in the example libraries and are not converted |
+| FAT12 floppy `.img` | a disk image; the `.syx`/`.mid`/`.bnk` files inside it (`.arr`, docs and images are skipped) |
+| `.zip` archive | disk images and loose `.syx`/`.mid`/`.bnk` files inside it; KryoFlux `.7z` flux archives are **not** decoded (use the `.img` files) |
 
 A bank keeps its own interior bank references, so `--as` may name the same
 internal bank (`RAM1`, `ROM6`, ...), or any `CARD/NN` slot for a card source.

@@ -311,3 +311,11 @@ built = bankbuild.build(
 
 The template comes from dumping a freshly formatted bank off the instrument
 -- on an Hcard, create an empty bank and dump it.
+
+## Disk images and zip archives
+
+`kws.importers.read_file` also accepts FAT12 floppy images (`.img`) and
+`.zip` archives. A disk image is unpacked file by file: its `.syx`,
+`.mid` and `.bnk` members become banks, labelled `disk.img / FILE.SYX
+[RAM1]`. A zip may contain disk images and loose bank files; KryoFlux
+`.7z` flux archives are skipped (use the `.img` files they decode to).
