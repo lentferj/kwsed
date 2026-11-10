@@ -1573,6 +1573,39 @@ class TestImportCommand:
         err = capsys.readouterr().err
         assert "RAM1" in err and "RAM2" in err
 
+    def test_an_internal_bank_keeps_its_own_scope(self, tmp_path, capsys):
+        args = self._args(
+            _perf_source(tmp_path),
+            "--as",
+            "CARD/07",
+            "--bankstore",
+            str(tmp_path / "banks"),
+        )
+        assert cli._cmd_import(None, args) == 2
+        assert "copy-perf" in capsys.readouterr().err
+
+    def test_a_card_bank_may_be_filed_under_a_card_slot(self, tmp_path, capsys):
+        from kws import bankstore
+        from tests.test_bankbuild import make_patch, make_performance
+
+        perf = make_performance("Kelp Forest", ((11, 0),))
+        perf_rows = b"".join([perf] + [bytes(rec.PERFORMANCE_SIZE)] * 49)
+        patch_rows = b"".join(
+            make_patch("Amber Drift") for _ in range(banks.PATCHES_PER_BANK)
+        )
+        path = tmp_path / "card.syx"
+        path.write_bytes(
+            m.frame_bulk(m.Function.ALL_PERFORMANCE_DUMP, 3, perf_rows)
+            + m.frame_bulk(m.Function.ALL_PATCH_DUMP, 3, patch_rows)
+        )
+        cache = str(tmp_path / "banks")
+        args = self._args(path, "--as", "CARD/07", "--bankstore", cache)
+        assert cli._cmd_import(None, args) == 0
+        loaded = bankstore.load("CARD/07", cache)
+        assert loaded is not None
+        assert m.decode_name(loaded.performances[0]) == "Kelp Forest"
+        assert "CARD/07" in capsys.readouterr().out
+
     def test_a_lib_lists_its_entries_but_is_not_imported(self, tmp_path, capsys):
         from tests.test_importers import _lib_entry, _lib_file
 

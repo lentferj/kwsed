@@ -1169,10 +1169,11 @@ def _cmd_import(_device: Any, args: argparse.Namespace) -> int:
         )
         return spec.EXIT_USAGE
 
+    source_scope = selected.scope
     dest = getattr(args, "as", None)
     if dest is None:
-        if _real_library_scope(selected.scope):
-            dest = selected.scope
+        if _real_library_scope(source_scope):
+            dest = source_scope
         else:
             print(
                 "error: this bank needs --as (its scope is not a real library scope)",
@@ -1180,13 +1181,35 @@ def _cmd_import(_device: Any, args: argparse.Namespace) -> int:
             )
             return spec.EXIT_USAGE
 
-    # validate dest
+    # A bank's interior PartRef/WaveRef banks point at the bank it came
+    # from; storing it under a different internal bank would leave those
+    # references aimed at the old one. A card source may be filed under any
+    # CARD/NN slot (all card banks share the same interior number), but an
+    # internal source may only keep its own scope. Relocating performances
+    # is copy-perf's job.
+    dest_is_card = bool(
+        re.match(r"^CARD/\d{1,2}$", dest) or re.match(r"^CARD/c\d+$", dest)
+    )
     try:
         banks.bank(dest)
     except LookupError:
-        if not (re.match(r"^CARD/\d{1,2}$", dest) or re.match(r"^CARD/c\d+$", dest)):
+        if not dest_is_card:
             print(f"error: {dest!r} is not a valid destination scope", file=sys.stderr)
             return spec.EXIT_USAGE
+    if source_scope.startswith("CARD/"):
+        if not dest_is_card:
+            print(
+                "error: a card bank can only be filed under CARD/NN or CARD/cN",
+                file=sys.stderr,
+            )
+            return spec.EXIT_USAGE
+    elif dest != source_scope:
+        print(
+            "error: a bank keeps its own interior bank references; use "
+            f"copy-perf to move performances into {dest}",
+            file=sys.stderr,
+        )
+        return spec.EXIT_USAGE
 
     performances = None
     if selected.source.performances:
