@@ -102,6 +102,15 @@ _BRIDGE_ERRORS: tuple[type[BaseException], ...] = (
     SystemError,
 )
 
+#: The plural block names a bank-bundle backup holds, with the singular kind
+#: each one is written and read as. In the send order -- wave sequences first
+#: and performances last, as the bridge sends them.
+_BUNDLE_BLOCKS: Tuple[Tuple[str, str], ...] = (
+    ("waveseq", "waveseq"),
+    ("patches", banks.Kind.PATCH),
+    ("performances", banks.Kind.PERFORMANCE),
+)
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from kws.favorites import Favorite, Favorites
 
@@ -1134,6 +1143,10 @@ class KwsedApp(App[None]):
         if kind is None and destination is None and original is None and len(args) == 1:
             payload = args[0]
             if isinstance(payload, dict):
+                if self._record_bundle_write(payload):
+                    return
+                if self._record_composite_write(payload):
+                    return
                 backup_path = payload.get("backup")
                 destination = payload.get("bank", payload.get("destination"))
                 kind = payload.get("kind")
@@ -1170,7 +1183,12 @@ class KwsedApp(App[None]):
                 pass
             return
         label = f"bank {destination}"
-        record = _undo.Record(label=label, payload=(kind, destination, original))
+        # A dict, not a tuple: a bank label ("Card") and a kind ("patch") are
+        # both strings, so a positional payload cannot say which is which.
+        record = _undo.Record(
+            label=label,
+            payload={"kind": kind, "bank": destination, "data": original},
+        )
         self._undo_log.push(record)
         if mode is not None:
             try:
@@ -1178,9 +1196,198 @@ class KwsedApp(App[None]):
             except Exception:  # noqa: S110
                 pass
 
+    @staticmethod
+    def _decoded_backup_block(raw: Any) -> bytes:
+        """A backup block as the plain bytes a write expects.
+
+        A fence backup holds the framed System Exclusive as it arrived; a
+        hand-saved envelope may hold the decoded records already. A frame
+        is decoded with the parser, anything else is taken as it stands.
+        Bytes that do not decode stay framed, and the write's own size
+        check rejects what would otherwise be sent twice nibble-encoded.
+        """
+        data = bytes(raw)
+        if not data.startswith(b"\xf0"):
+            return data
+        try:
+            packet = m.parse(data)
+        except Exception:
+            return data
+        if packet is None:
+            return data
+        try:
+            return bytes(packet.data())
+        except Exception:
+            return data
+
+    @staticmethod
+    def _undo_ok(result: Any) -> bool:
+        """A write's result as the undo log's success flag.
+
+        ``None`` or a result without a verdict means the device had no
+        read-back to offer; only an explicit ``verified: False`` keeps a
+        record, so the next ``z`` retries a write it could not confirm.
+        """
+        return not (isinstance(result, dict) and result.get("verified") is False)
+
+    @staticmethod
+    def _backup_dump(blocks: Any, *kinds: str) -> Any:
+        """The one dump a backup envelope holds, or ``None``.
+
+        The fence writes its blocks under ``dump``; a hand-saved envelope
+        may name the kind instead, or hold just one block of any name.
+        """
+        if not isinstance(blocks, dict):
+            return None
+        for name in ("dump", *kinds):
+            if blocks.get(name) is not None:
+                return blocks[name]
+        if len(blocks) == 1:
+            return next(iter(blocks.values()))
+        return None
+
+    @staticmethod
+    def _write_kwargs(*methods: Any) -> Dict[str, Any]:
+        """The keyword arguments every given write signature accepts.
+
+        A test double may take fewer than the bridge does; inspecting the
+        signature is what keeps one undo record working against both.
+        """
+        import inspect
+
+        kwargs: Dict[str, Any] = {}
+        for method in methods:
+            if method is None:
+                continue
+            try:
+                parameters = inspect.signature(method).parameters
+            except (TypeError, ValueError):
+                continue
+            if "backup_dir" in parameters:
+                from kws import backup as _backup
+
+                kwargs["backup_dir"] = _backup.default_dir()
+            if "verify" in parameters:
+                kwargs["verify"] = True
+        return kwargs
+
+    @staticmethod
+    def _normalize_backup_entry(entry: Any) -> Optional[Dict[str, Any]]:
+        """One composite entry as ``{"path": ...}`` or an inline envelope.
+
+        ``None`` when the entry names no backup at all -- a composite
+        record that cannot undo one of its entries would undo less than
+        was written, so such a result is never recorded.
+        """
+        if isinstance(entry, str):
+            return {"path": entry}
+        if not isinstance(entry, dict):
+            return None
+        path = entry.get("path", entry.get("backup"))
+        if isinstance(path, str) and path:
+            return {"path": path}
+        if isinstance(entry.get("blocks"), dict):
+            return {
+                "kind": str(entry.get("kind") or ""),
+                "slot": entry.get("slot"),
+                "blocks": dict(entry["blocks"]),
+            }
+        return None
+
+    def _record_bundle_write(self, payload: Any) -> bool:
+        """Record a bank-bundle write as **one** undo record.
+
+        A bundle result carries one backup envelope holding every kind the
+        write replaced, so one ``z`` must restore all of them together.
+        The record's payload is ``{"kind": "bank-bundle", "bank": ...,
+        "blocks": {kind: bytes}}`` with the pre-write blocks. ``False``
+        when the payload is not a bundle result -- the caller then tries
+        the plain shapes -- or when the backup cannot be read, in which
+        case the caller records nothing and says so.
+        """
+        from kws import backup as _backup
+
+        if not isinstance(payload, dict):
+            return False
+        backup_path = payload.get("backup")
+        if not isinstance(backup_path, str):
+            return False
+        try:
+            loaded = _backup.load(backup_path)
+        except Exception:
+            return False
+        blocks = getattr(loaded, "blocks", None)
+        bundle: Dict[str, bytes] = {}
+        for name, _kind in _BUNDLE_BLOCKS:
+            if isinstance(blocks, dict) and name in blocks:
+                bundle[name] = bytes(blocks[name])
+        if not bundle:
+            return False
+        destination = payload.get("bank", payload.get("destination")) or getattr(
+            loaded, "slot", None
+        )
+        if destination is None:
+            return False
+        label = f"bank {destination} bundle"
+        record = _undo.Record(
+            label=label,
+            payload={
+                "kind": "bank-bundle",
+                "bank": destination,
+                "blocks": bundle,
+            },
+        )
+        self._undo_log.push(record)
+        return True
+
+    def _record_composite_write(self, payload: Any) -> bool:
+        """Record a composite write as **one** undo record.
+
+        A composite result carries a list of backup paths -- the shape the
+        multi staging emits -- optional backups inline as envelopes, and
+        optionally a ``multi`` backup path of its own. The record's payload
+        is ``{"backups": [...], "multi": path}``, so one ``z`` restores
+        every entry of the write, in the order they were written.
+        """
+        if not isinstance(payload, dict):
+            return False
+        entries = payload.get("backups")
+        if not isinstance(entries, list) or not entries:
+            return False
+        backups: List[Dict[str, Any]] = []
+        for entry in entries:
+            normalized = self._normalize_backup_entry(entry)
+            if normalized is None:
+                return False
+            backups.append(normalized)
+        multi = payload.get("multi")
+        if multi is None:
+            multi_path = None
+        else:
+            normalized = self._normalize_backup_entry(multi)
+            if normalized is None or "path" not in normalized:
+                return False
+            multi_path = normalized["path"]
+        record = _undo.Record(
+            label=f"composite write ({len(backups)} backup"
+            f"{'s' if len(backups) != 1 else ''})",
+            payload={"backups": backups, "multi": multi_path},
+        )
+        self._undo_log.push(record)
+        return True
+
     def _undo_apply(self, record: _undo.Record) -> bool:  # noqa: C901
         try:
             payload = record.payload
+            if isinstance(payload, dict):
+                if str(payload.get("kind", "")).lower() == "bank-bundle":
+                    bundle_bank = payload.get("bank", payload.get("destination"))
+                    blocks = payload.get("blocks")
+                    if not isinstance(blocks, dict) or bundle_bank is None:
+                        raise ValueError("incomplete undo payload")
+                    return self._undo_ok(self._write_bundle_undo(bundle_bank, blocks))
+                if isinstance(payload.get("backups"), list):
+                    return self._undo_composite(payload)
             backup_path: Any = None
             bank: Any = None
             kind: Any = None
@@ -1218,48 +1425,146 @@ class KwsedApp(App[None]):
             if bank is None or kind is None or data is None:
                 raise ValueError("incomplete undo payload")
 
-            import inspect
-
             is_multi = str(kind).lower() == "multi" or (
                 isinstance(bank, str) and bank.lower() == "multi"
             )
-            kwargs: dict[str, Any] = {}
             if is_multi:
-                try:
-                    sig = inspect.signature(self.device.write_multi)
-                    if "backup_dir" in sig.parameters:
-                        from kws import backup as _backup
-
-                        kwargs["backup_dir"] = _backup.default_dir()
-                    if "verify" in sig.parameters:
-                        kwargs["verify"] = True
-                    if "timeout" in sig.parameters:
-                        pass
-                except (TypeError, ValueError, AttributeError):
-                    pass
-                result = self.device.write_multi(bytes(data), **kwargs)
+                result = self._undo_write_multi(data)
             else:
-                kwargs = {}
-                try:
-                    sig = inspect.signature(self.device.write_bank)
-                    if "backup_dir" in sig.parameters:
-                        from kws import backup as _backup
-
-                        kwargs["backup_dir"] = _backup.default_dir()
-                    if "verify" in sig.parameters:
-                        kwargs["verify"] = True
-                except (TypeError, ValueError):
-                    pass
-                result = self.device.write_bank(bank, kind, bytes(data), **kwargs)
-            if isinstance(result, dict):
-                verified = result.get("verified", True)
-                if verified is False:
-                    return False
-            return True
+                result = self._undo_write_bank(bank, kind, data)
+            return self._undo_ok(result)
         except Exception as exc:
             if threading.current_thread() is threading.main_thread():
                 self.notify_status(f"undo failed: {exc}", refused=True)
             return False
+
+    def _undo_composite(self, payload: Dict[str, Any]) -> bool:
+        """Restore every backup of one composite write, atomically.
+
+        Each entry names a backup envelope: a bank-bundle one restores its
+        bundle, a ``multi`` one goes through ``write_multi``, and a plain
+        bank one is written back as its kind. Any entry that fails to
+        verify keeps the whole record, so the next ``z`` retries it all --
+        a restore that only half happened is not one reported as done.
+        """
+        backups = payload.get("backups")
+        if not isinstance(backups, list) or not backups:
+            raise ValueError("incomplete undo payload")
+        for entry in backups:
+            if not self._undo_ok(self._undo_backup_entry(entry)):
+                return False
+        multi = payload.get("multi")
+        if multi is not None:
+            return self._undo_ok(self._undo_backup_entry(multi))
+        return True
+
+    def _undo_entry_parts(self, entry: Any) -> Tuple[str, Any, Any]:
+        """``(kind, slot, blocks)`` for one composite entry, or ValueError.
+
+        An entry names a backup by path, or is one -- either the write
+        result that carries its path or an inline envelope holding
+        ``kind``/``slot``/``blocks``.
+        """
+        from kws import backup as _backup
+
+        path: Any = None
+        if isinstance(entry, str):
+            path = entry
+        elif isinstance(entry, dict):
+            path = entry.get("path", entry.get("backup"))
+        if isinstance(path, str) and path:
+            record = _backup.load(path)
+            return (
+                str(getattr(record, "kind", "") or ""),
+                getattr(record, "slot", None),
+                getattr(record, "blocks", None) or {},
+            )
+        if isinstance(entry, dict) and isinstance(entry.get("blocks"), dict):
+            return (str(entry.get("kind") or ""), entry.get("slot"), entry["blocks"])
+        raise ValueError("a composite entry names no backup")
+
+    def _undo_backup_entry(self, entry: Any) -> Dict[str, Any]:
+        """Restore one entry of a composite undo payload.
+
+        What the named envelope holds decides how it goes back: the bundle
+        whole, the Multisets through ``write_multi``, anything else as one
+        whole bank. The plain dump is decoded first -- the envelope holds
+        the framed message that arrived, and the write expects records.
+        """
+        kind, slot, blocks = self._undo_entry_parts(entry)
+        if kind == "bank-bundle":
+            if not slot:
+                raise ValueError("the bank-bundle backup names no bank")
+            return self._write_bundle_undo(slot, blocks)
+        if not kind:
+            raise ValueError("the backup names no kind")
+        if not isinstance(blocks, dict):
+            raise ValueError("the backup holds no dump")
+        dump = self._backup_dump(blocks, kind)
+        if dump is None:
+            raise ValueError("the backup holds no dump")
+        if not slot:
+            raise ValueError("the backup names no bank")
+        if kind == "multi":
+            return self._undo_write_multi(dump)
+        return self._undo_write_bank(slot, kind, self._decoded_backup_block(dump))
+
+    def _write_bundle_undo(self, bank: Any, blocks: Dict[str, Any]) -> Dict[str, Any]:
+        """Write one bank-bundle back on behalf of an undo.
+
+        The device that has the bundle write takes the bundle whole --
+        falling back to one plain write per kind would restore the same
+        bytes but give up each kind's own read-back. The blocks are
+        decoded first: the record holds the framed messages the backup
+        did, and this is where they become the plain bytes the write
+        expects.
+        """
+        payloads: Dict[str, bytes] = {}
+        for name, _kind in _BUNDLE_BLOCKS:
+            if name in blocks:
+                payloads[name] = self._decoded_backup_block(blocks[name])
+        if not payloads:
+            raise ValueError("the bank-bundle backup holds no whole bank")
+        kwargs: Dict[str, Any] = {}
+        for name, _kind in _BUNDLE_BLOCKS:
+            if name in payloads:
+                kwargs[name] = payloads[name]
+        bundle = getattr(self.device, "write_bank_bundle", None)
+        if callable(bundle):
+            kwargs.update(self._write_kwargs(bundle))
+            result: Dict[str, Any] = bundle(bank, **kwargs)
+            return result
+        method = self.device.write_bank
+        bundle_kwargs = {**kwargs, **self._write_kwargs(method)}
+        found: Optional[Dict[str, Any]] = None
+        for name, kind in _BUNDLE_BLOCKS:
+            if name in payloads:
+                written: Dict[str, Any] = method(
+                    bank, kind, payloads[name], **bundle_kwargs
+                )
+                found = written
+        if found is None:
+            raise ValueError("the bank-bundle backup holds no whole bank")
+        return found
+
+    def _undo_write_bank(self, bank: Any, kind: Any, data: Any) -> Dict[str, Any]:
+        """One whole-bank write on behalf of an undo.
+
+        The backup holds the framed message that arrived, so it is decoded
+        here before it is written back -- exactly as the bundle path does.
+        A payload that is already decoded passes through untouched.
+        """
+        method = self.device.write_bank
+        result: Dict[str, Any] = method(
+            bank, kind, self._decoded_backup_block(data), **self._write_kwargs(method)
+        )
+        return result
+
+    def _undo_write_multi(self, data: Any) -> Dict[str, Any]:
+        """One Multi Mode Setup write on behalf of an undo."""
+        method = self.device.write_multi
+        result: Dict[str, Any] = method(bytes(data), **self._write_kwargs(method))
+        return result
 
     def _undo_settle(
         self, results: list[bool], failed: list[Any] | None = None

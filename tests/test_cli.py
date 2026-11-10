@@ -24,6 +24,7 @@ against a stand-in that stores what it is sent.
 import argparse
 import json
 import os
+import pathlib
 
 import pytest
 
@@ -673,6 +674,150 @@ class TestBackupRestore:
         assert cli._cmd_backup(unit.bridge, self._args(path, tmp_path)) == 1
         out = capsys.readouterr().out
         assert "does NOT match" in out
+
+
+def _bundle_payloads() -> dict[str, bytes]:
+    """Full-bank payloads with markers, as a staged copy would carry."""
+    from tests.test_write import PATCH_BANK, PERFORMANCE_BANK, WAVESEQ_BANK
+
+    tags = {"performances": b"Amber D", "patches": b"Kelp F", "waveseq": b"Steps 0"}
+    staged = {
+        "performances": PERFORMANCE_BANK,
+        "patches": PATCH_BANK,
+        "waveseq": WAVESEQ_BANK,
+    }
+    payloads: dict[str, bytes] = {}
+    for name, data in staged.items():
+        marked = bytearray(data)
+        tag = tags[name]
+        marked[0 : len(tag)] = tag
+        payloads[name] = bytes(marked)
+    return payloads
+
+
+class TestRestoringABundle:
+    """A bank-bundle envelope is one destination, three kinds, one write."""
+
+    def _args(self, path, tmp_path, *extra):
+        return cli.build_parser().parse_args(
+            [
+                "backup",
+                "restore",
+                str(path),
+                "--yes",
+                "--backup-dir",
+                str(tmp_path / "pre-write"),
+                *extra,
+            ]
+        )
+
+    def _bundle_envelope(
+        self,
+        tmp_path: pathlib.Path,
+        *,
+        bank: str = "Card",
+        payloads: "dict[str, bytes] | None" = None,
+    ) -> str:
+        from kws import backup
+        from kws import records as r
+
+        entry = banks.bank(bank)
+        if payloads is None:
+            payloads = {
+                "performances": bytes(banks.PERFORMANCES_PER_BANK * r.PERFORMANCE_SIZE),
+                "patches": bytes(banks.PATCHES_PER_BANK * r.PATCH_SIZE),
+                "waveseq": bytes(r.WAVESEQ_BANK_SIZE),
+            }
+        functions = {
+            "performances": m.Function.ALL_PERFORMANCE_DUMP,
+            "patches": m.Function.ALL_PATCH_DUMP,
+            "waveseq": m.Function.ALL_WAVESEQ_DUMP,
+        }
+        blocks = {
+            name: bytes(m.frame_bulk(functions[name], entry.sysex, data, channel=0))
+            for name, data in payloads.items()
+        }
+        return backup.save(
+            str(tmp_path / "store"),
+            kind="bank-bundle",
+            slot=entry.label,
+            name=entry.label,
+            device_id="0",
+            source="kwsed",
+            blocks=blocks,
+        )
+
+    def test_a_bundle_envelope_writes_through_write_bank_bundle_and_verifies(
+        self, tmp_path, capsys
+    ):
+        from kws import backup
+        from tests.test_write import Unit
+
+        unit = Unit()
+        payloads = _bundle_payloads()
+        path = self._bundle_envelope(tmp_path, payloads=payloads)
+        assert cli._cmd_backup(unit.bridge, self._args(path, tmp_path)) == 0
+
+        functions = {
+            "performances": m.Function.ALL_PERFORMANCE_DUMP,
+            "patches": m.Function.ALL_PATCH_DUMP,
+            "waveseq": m.Function.ALL_WAVESEQ_DUMP,
+        }
+        # wave sequences first and performances last, as the bundle sends
+        frames = unit.dump_frames_sent()
+        assert [f[4] for f in frames] == [
+            m.Function.ALL_WAVESEQ_DUMP,
+            m.Function.ALL_PATCH_DUMP,
+            m.Function.ALL_PERFORMANCE_DUMP,
+        ]
+        for name, function in functions.items():
+            sent = unit.sent_by_function(function)
+            assert len(sent) == 1, f"exactly one {name} dump must go out"
+            packet = m.parse(sent[0])
+            assert packet is not None
+            assert bytes(packet.data()) == payloads[name]
+        # the fence backed the destination up before anything went out
+        assert len(backup.list_backups(str(tmp_path / "pre-write"))) == 1
+        out = capsys.readouterr().out
+        assert (
+            "about to replace: Card, all performances, patches and wave sequences"
+            in out
+        )
+        assert "nothing is sent" in out
+        assert "written and verified" in out
+
+    def test_no_yes_sends_nothing_for_a_bundle_envelope(self, tmp_path, capsys):
+        from tests.test_write import Unit
+
+        unit = Unit()
+        path = self._bundle_envelope(tmp_path)
+        args = cli.build_parser().parse_args(
+            [
+                "backup",
+                "restore",
+                str(path),
+                "--backup-dir",
+                str(tmp_path / "pre-write"),
+            ]
+        )
+        assert cli._cmd_backup(unit.bridge, args) == 2
+        assert unit.midi_out.sent == []
+        err = capsys.readouterr().err
+        assert "--yes" in err
+        assert "Nothing was done" in err
+
+    def test_a_rom_bundle_envelope_is_refused_and_nothing_is_sent(
+        self, tmp_path, capsys
+    ):
+        from tests.test_write import Unit
+
+        unit = Unit()
+        path = self._bundle_envelope(tmp_path, bank="ROM4")
+        assert cli._cmd_backup(unit.bridge, self._args(path, tmp_path)) == 2
+        assert unit.midi_out.sent == [], "a refused restore must send nothing"
+        out = capsys.readouterr().out
+        assert "ROM and cannot be written" in out
+        assert "RAM 1" in out, "it should say which banks can be restored"
 
 
 class TestTheChannelArguments:

@@ -789,13 +789,97 @@ def _restore_plan(record: Any) -> "tuple[banks.Bank, str, bytes]":
     return destination, kind, bytes(data[:size])
 
 
+_BUNDLE_BLOCK_KINDS: "tuple[tuple[str, str], ...]" = (
+    ("performances", banks.Kind.PERFORMANCE),
+    ("patches", banks.Kind.PATCH),
+    ("waveseq", "waveseq"),
+)
+
+
+def _word_list(words: "list[str]") -> str:
+    """Three kinds read ``a, b and c``; two read ``a and b``."""
+    if len(words) <= 1:
+        return "".join(words)
+    return ", ".join(words[:-1]) + " and " + words[-1]
+
+
+def _restore_bundle_plan(record: Any) -> "tuple[banks.Bank, Dict[str, bytes]]":
+    """``(destination, {block name: decoded bytes})`` from a bundle envelope.
+
+    The fence backups of :meth:`WavestationBridge.write_bank_bundle` hold
+    one framed dump per kind, wave sequences through performances, exactly
+    as they arrived. A hand-saved envelope may hold the decoded records
+    instead; both are accepted, and every block is checked against the
+    whole-bank size its kind claims -- and, when its frame carries one,
+    against the bank it says it is for -- before anything is sent.
+    """
+    from kws import messages as m
+
+    if record.kind != "bank-bundle":
+        raise ValueError(f"it holds a {record.kind!r} backup, not a bank-bundle one")
+    blocks = getattr(record, "blocks", None)
+    if not isinstance(blocks, dict) or not blocks:
+        raise ValueError("it holds no blocks")
+    kinds = dict(_BUNDLE_BLOCK_KINDS)
+    held = [name for name, _kind in _BUNDLE_BLOCK_KINDS if name in blocks]
+    if not held:
+        raise ValueError(
+            f"it holds blocks {', '.join(sorted(blocks))} and no whole bank"
+        )
+    slot = (record.slot or "").strip()
+    named = None
+    if slot:
+        try:
+            named = banks.bank(slot)
+        except LookupError:
+            named = None
+    destination: Optional[banks.Bank] = named
+    payloads: Dict[str, bytes] = {}
+    for name in held:
+        kind = kinds[name]
+        raw = bytes(blocks[name])
+        packet = m.parse(raw) if raw.startswith(b"\xf0") else None
+        data = raw
+        if packet is not None:
+            if packet.function != _function_for_kind(kind):
+                raise ValueError(
+                    f"its {name} block is a {packet.function_name}, not a "
+                    f"{_plural(kind)} bank"
+                )
+            data = packet.data()
+            if packet.bank is not None:
+                packet_bank = banks.by_sysex(packet.bank)
+                if destination is None:
+                    destination = packet_bank
+                elif destination.number != packet_bank.number:
+                    raise ValueError(
+                        f"its {name} dump was for {packet_bank.label} but "
+                        f"the restore said {destination.label}"
+                    )
+        size = _bank_size(kind)
+        if len(data) < size:
+            raise ValueError(
+                f"its {name} block decodes to {len(data)} bytes; a {kind} "
+                f"bank is {size}"
+            )
+        payloads[name] = bytes(data[:size])
+    if destination is None:
+        raise ValueError(
+            f"it does not name a bank (slot {record.slot!r}) and no dump "
+            f"carries a bank byte"
+        )
+    return destination, payloads
+
+
 def _cmd_backup_restore(device: Any, args: argparse.Namespace) -> int:
     """Load an envelope and write its bank back. **This destroys a bank.**
 
-    The write goes through :meth:`WavestationBridge.write_bank`, not around
-    it: the destination is read in full first, the pre-write snapshot is
-    saved, the dump is sent at the ALSA pace and the result is read back
-    and compared. The gate here only decides whether to ask it to.
+    The write goes through :meth:`WavestationBridge.write_bank` -- or, for
+    a bank-bundle envelope, :meth:`WavestationBridge.write_bank_bundle` --
+    not around it: the destination is read in full first, the pre-write
+    snapshot is saved, the dump is sent at the ALSA pace and the result is
+    read back and compared. The gate here only decides whether to ask it
+    to.
     """
     from kws import backup
 
@@ -806,8 +890,12 @@ def _cmd_backup_restore(device: Any, args: argparse.Namespace) -> int:
     except (backup.BackupError, ValueError) as exc:
         print(f"{args.file} is not a backup kwsed can read ({exc})")
         return spec.EXIT_USAGE
+    bundle = str(record.kind) == "bank-bundle"
     try:
-        destination, kind, payload = _restore_plan(record)
+        if bundle:
+            destination, payloads = _restore_bundle_plan(record)
+        else:
+            destination, kind, payload = _restore_plan(record)
     except (LookupError, ValueError) as exc:
         print(f"{args.file} cannot be restored: {exc}")
         return spec.EXIT_USAGE
@@ -818,6 +906,9 @@ def _cmd_backup_restore(device: Any, args: argparse.Namespace) -> int:
             f"{', '.join(b.label for b in banks.writable_banks())}."
         )
         return spec.EXIT_USAGE
+    where = getattr(args, "backup_dir", None) or backup.default_dir()
+    if bundle:
+        return _restore_bundle_run(device, args, destination, payloads, where)
 
     plural = _plural(kind)
     print(f"about to replace: {destination.label}, all {plural}")
@@ -830,8 +921,54 @@ def _cmd_backup_restore(device: Any, args: argparse.Namespace) -> int:
         return spec.EXIT_ERROR
     print(f"     it now holds: {held}")
 
-    where = getattr(args, "backup_dir", None) or backup.default_dir()
     result = device.write_bank(destination.number, kind, payload, backup_dir=where)
+    print(f"\nbacked up to: {result['backup']}")
+    if result["verified"] is True:
+        print("written and verified by reading it back")
+        return spec.EXIT_OK
+    print(f"written, but the read-back does NOT match: {result['mismatch']}")
+    print("The backup above holds what was there before.")
+    return spec.EXIT_ERROR
+
+
+def _restore_bundle_run(
+    device: Any,
+    args: argparse.Namespace,
+    destination: banks.Bank,
+    payloads: Dict[str, bytes],
+    where: str,
+) -> int:
+    """Write every kind of a bank-bundle envelope back, as **one** write.
+
+    The gate and the ROM check have already passed. Every kind is named
+    and read before anything is sent: a bundle that cannot read what it
+    is about to replace is not written, so a failed read below leaves the
+    unit exactly as it was.
+    """
+    kinds = dict(_BUNDLE_BLOCK_KINDS)
+    replaced = [
+        _plural(kinds[name]) for name, _kind in _BUNDLE_BLOCK_KINDS if name in payloads
+    ]
+    print(f"about to replace: {destination.label}, all {_word_list(replaced)}")
+    print(f"          source: {args.file}")
+    print("if any read below fails, nothing is sent")
+    for name, kind in _BUNDLE_BLOCK_KINDS:
+        if name not in payloads:
+            continue
+        try:
+            held = _destination_names(device, destination, kind)
+        except Exception as exc:
+            print(f"     it now holds: could not be read ({exc})")
+            print("Refusing to write a bank that cannot first be read and backed up.")
+            return spec.EXIT_ERROR
+        print(f"     it now holds ({_plural(kind)}): {held}")
+    result = device.write_bank_bundle(
+        destination.number,
+        performances=payloads.get("performances"),
+        patches=payloads.get("patches"),
+        waveseq=payloads.get("waveseq"),
+        backup_dir=where,
+    )
     print(f"\nbacked up to: {result['backup']}")
     if result["verified"] is True:
         print("written and verified by reading it back")
