@@ -10,7 +10,12 @@ import os
 
 import pytest
 
-from kws import banks, cards
+from kws import banks, bankstore, cards
+from kws import catalog as cat
+from kws import messages as m
+from kws import records as rec
+from kwsed.app import KwsedApp
+from kwsed.demo import DemoDevice
 
 
 class TestTheTable:
@@ -367,3 +372,40 @@ class TestCardWords:
     def test_a_pcm_dependency_is_always_spoken(self):
         assert cards.card_words(False, "WSC-01") == "not captured; needs WSC-01"
         assert cards.card_words(True, "WSC-03") == "captured; needs WSC-03"
+
+
+def test_demo_read_raw_waveseq():
+    dev = DemoDevice()
+    raw = dev.read_raw(banks.bank("CARD").sysex, m.Function.ALL_WAVESEQ_DUMP)
+    packet = m.parse(raw)
+    assert packet is not None
+    assert packet.function == m.Function.ALL_WAVESEQ_DUMP
+    data = packet.data()
+    assert len(data) >= rec.WAVESEQ_BANK_SIZE
+
+
+@pytest.mark.asyncio
+async def test_capture_caches_bankstore(tmp_path):
+    app = KwsedApp(
+        DemoDevice(card_name='Korg WPC-13 "Performance 3"'),
+        catalog=cat.Catalog(),
+        cards_path=str(tmp_path / "cards.json"),
+        bankstore_dir=str(tmp_path / "banks"),
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.action_capture_card()
+        for _ in range(30):
+            await pilot.pause()
+        assert 7 in app._archive
+        src = app._sources["CARD/07"]
+        assert len(src.performances) == 50
+        assert len(src.patches) == 35
+        assert src.waveseq is not None and len(src.waveseq) == rec.WAVESEQ_BANK_SIZE
+        loaded = bankstore.load("CARD/07", directory=str(tmp_path / "banks"))
+        assert loaded is not None
+        assert len(loaded.performances) == 50
+        assert len(loaded.patches) == 35
+        assert loaded.waveseq is not None
+        assert len(loaded.waveseq) == rec.WAVESEQ_BANK_SIZE
+        assert loaded.waveseq == src.waveseq

@@ -193,6 +193,7 @@ def _dump_card_syx(
     bank: _cards.CapturedBank | None,
 ) -> int:
     """Write one captured bank as a ``.syx`` frame, names and zeros."""
+    from kws import bankstore
     from kws import messages as msg, records as rec
 
     kind = getattr(args, "kind", None)
@@ -217,14 +218,35 @@ def _dump_card_syx(
         size, count = rec.PATCH_SIZE, banks.PATCHES_PER_BANK
         function = msg.Function.ALL_PATCH_DUMP
 
-    raw = bytearray(size * count)
-    for slot, name in bank.names(kind).items():
-        if not 0 <= slot < count:
-            continue
-        at = slot * size
-        encoded = bytes(msg.encode_name(name))
-        raw[at : at + len(encoded)] = encoded
-    frame = msg.frame_bulk(function, banks.bank("CARD").sysex, bytes(raw), channel=0)
+    real_records = None
+    source = bankstore.load(_cards.scope_id(entry.number))
+    if source is not None:
+        if (
+            kind == banks.Kind.PERFORMANCE
+            and len(source.performances) == count
+            and all(len(r) == size for r in source.performances)
+        ):
+            real_records = source.performances
+        elif (
+            kind == banks.Kind.PATCH
+            and len(source.patches) == count
+            and all(len(r) == size for r in source.patches)
+        ):
+            real_records = source.patches
+
+    used_real = real_records is not None
+    if real_records is not None:
+        raw = b"".join(real_records)
+    else:
+        buf = bytearray(size * count)
+        for slot, name in bank.names(kind).items():
+            if not 0 <= slot < count:
+                continue
+            at = slot * size
+            encoded = bytes(msg.encode_name(name))
+            buf[at : at + len(encoded)] = encoded
+        raw = bytes(buf)
+    frame = msg.frame_bulk(function, banks.bank("CARD").sysex, raw, channel=0)
 
     destination = args.syx
     try:
@@ -242,11 +264,17 @@ def _dump_card_syx(
         f"{msg.Function.name(function)}",
         file=sys.stderr,
     )
-    print(
-        "names only: the archive stores no parameter data, so every other "
-        "byte in the frame is zero.",
-        file=sys.stderr,
-    )
+    if used_real:
+        print(
+            "full record data was written",
+            file=sys.stderr,
+        )
+    else:
+        print(
+            "names only: the archive stores no parameter data, so every other "
+            "byte in the frame is zero.",
+            file=sys.stderr,
+        )
     return spec.EXIT_OK
 
 

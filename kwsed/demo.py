@@ -32,6 +32,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from kws import banks
 from kws import dumps
 from kws import messages as m
+from kws import records
 
 __all__ = ["DemoDevice", "demo_name"]
 
@@ -126,6 +127,8 @@ class DemoDevice:
         packet = m.parse(data)
         if packet is None or packet.channel != self.channel:
             return None
+        if packet.function == m.Function.WAVESEQ_BANK_REQUEST and packet.payload:
+            return self.read_raw(packet.payload[0], m.Function.ALL_WAVESEQ_DUMP)
         kinds = {
             m.Function.BULK_REQUEST: banks.Kind.PATCH,
             m.Function.PERFORMANCE_BANK_REQUEST: banks.Kind.PERFORMANCE,
@@ -152,6 +155,33 @@ class DemoDevice:
             raw.extend(record)
         payload = [entry.sysex] + list(m.to_nibbles(bytes(raw)))
         return m.frame(function, payload, channel=self.channel)
+
+    def read_raw(
+        self,
+        bank_number: int,
+        function: int,
+        *,
+        timeout: Optional[float] = None,
+    ) -> bytes:
+        entry = banks.by_sysex(bank_number)
+        if function in (m.Function.ALL_PERFORMANCE_DUMP, m.Function.ALL_PATCH_DUMP):
+            kind = (
+                banks.Kind.PERFORMANCE
+                if function == m.Function.ALL_PERFORMANCE_DUMP
+                else banks.Kind.PATCH
+            )
+            return self._bank_dump(bank_number, kind)
+        if function == m.Function.ALL_WAVESEQ_DUMP:
+            data = bytearray(records.WAVESEQ_BANK_SIZE)
+            for i in range(records.SEQUENCES_PER_BANK):
+                name = f"Demo {i:02d}"
+                at = records.SEQNAME_BASE + i * records.SEQNAME_SIZE
+                encoded = name.encode("ascii")
+                data[at : at + len(encoded)] = encoded
+            return bytes(
+                m.frame_bulk(function, entry.sysex, bytes(data), channel=self.channel)
+            )
+        raise ValueError(f"unsupported function {function:#04x}")
 
     # --- the operations kwsed uses -------------------------------------------
 

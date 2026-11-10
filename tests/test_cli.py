@@ -792,7 +792,10 @@ class TestCardsVerb:
         assert "needs WSC-01" in out
         assert "not captured" in out
 
-    def test_it_dumps_one_bank_as_syx(self, tmp_path):
+    def test_it_dumps_one_bank_as_syx(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "kws.bankstore.default_dir", lambda: str(tmp_path / "emptybanks")
+        )
         path = self._archive(tmp_path)
         out = tmp_path / "bank07.syx"
         code = cli.main(
@@ -816,6 +819,44 @@ class TestCardsVerb:
         dump = dumps.parse_bulk(packet)
         assert dump.kind == banks.Kind.PATCH
         assert dump.names()[0] == "Bell"
+
+    def test_syx_uses_real_records_when_cached(self, tmp_path, monkeypatch, capsys):
+        from kws import banks, bankstore
+        from kws import records as rec
+
+        path = self._archive(tmp_path)
+        banks_dir = tmp_path / "banks"
+        marker = b"RealData"
+        blob = (
+            marker
+            + b"\x00" * (rec.PATCH_SIZE - len(marker))
+            + b"\x00" * (rec.PATCH_SIZE * (banks.PATCHES_PER_BANK - 1))
+        )
+        # ensure exact size
+        assert len(blob) == rec.PATCH_SIZE * banks.PATCHES_PER_BANK
+        bankstore.save("CARD/07", patches=blob, directory=str(banks_dir))
+        monkeypatch.setattr("kws.bankstore.default_dir", lambda: str(banks_dir))
+
+        out = tmp_path / "real.syx"
+        code = cli.main(
+            [
+                "--cards",
+                path,
+                "cards",
+                "07",
+                "--kind",
+                "patch",
+                "--syx",
+                str(out),
+            ]
+        )
+        assert code == 0
+        err = capsys.readouterr().err
+        assert "full record data" in err
+        packets = dumps.read_syx_file(str(out))
+        packet = packets[0]
+        dump = dumps.parse_bulk(packet)
+        assert bytes(dump.records[0][:8]) == marker
 
     def test_syx_without_a_kind_is_a_usage_error(self, tmp_path, capsys):
         path = self._archive(tmp_path)

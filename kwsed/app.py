@@ -68,7 +68,10 @@ from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import DataTable, Header, Input, Label, Static
 
+from kws import bankstore
 from kws import banks
+from kws import deps
+from kws import records as rec
 from kws.multi import MULTISETS
 from kws import cards as _cards
 from kws import physical as _physical
@@ -934,6 +937,7 @@ class KwsedApp(App[None]):
         card_mode: str = "hcard",
         show_card_defaults: bool = False,
         physical_path: Optional[str] = None,
+        bankstore_dir: Optional[str] = None,
     ) -> None:
         super().__init__()
         self.device = device
@@ -970,6 +974,8 @@ class KwsedApp(App[None]):
         self._show_card_defaults = show_card_defaults
         self._physical_path = physical_path
         self._physical = _physical.load(physical_path) if physical_path else {}
+        self._bankstore_dir = bankstore_dir
+        self._sources: Dict[str, deps.Source] = {}
         self._active_physical = (
             _physical.active(physical_path) if physical_path else None
         )
@@ -1024,6 +1030,70 @@ class KwsedApp(App[None]):
             gate_hook=self._undo_gate,
             status_hook=self.notify_status,
         )
+
+    def _remember_bank(
+        self,
+        scope_id: str,
+        *,
+        performances: Optional[bytes] = None,
+        patches: Optional[bytes] = None,
+        waveseq: Optional[bytes] = None,
+    ) -> None:
+        existing = self._sources.get(scope_id)
+        perfs_list: List[bytes] = []
+        patches_list: List[bytes] = []
+        ws: Optional[bytes] = None
+        if existing is not None:
+            perfs_list = list(existing.performances)
+            patches_list = list(existing.patches)
+            ws = existing.waveseq
+        if performances is not None:
+            perfs_list = [
+                performances[i * rec.PERFORMANCE_SIZE : (i + 1) * rec.PERFORMANCE_SIZE]
+                for i in range(len(performances) // rec.PERFORMANCE_SIZE)
+            ]
+        if patches is not None:
+            patches_list = [
+                patches[i * rec.PATCH_SIZE : (i + 1) * rec.PATCH_SIZE]
+                for i in range(len(patches) // rec.PATCH_SIZE)
+            ]
+        if waveseq is not None:
+            ws = waveseq
+        self._sources[scope_id] = deps.Source(
+            bank_id=scope_id,
+            performances=perfs_list,
+            patches=patches_list,
+            waveseq=ws,
+        )
+        if self._bankstore_dir is not None:
+            try:
+                bankstore.save(
+                    scope_id,
+                    performances=performances,
+                    patches=patches,
+                    waveseq=waveseq,
+                    directory=self._bankstore_dir,
+                )
+            except OSError:
+                pass
+
+    @staticmethod
+    def _waveseq_bytes(raw: bytes) -> Optional[bytes]:
+        try:
+            packet = m.parse(raw)
+        except Exception:
+            return None
+        if packet is None:
+            return None
+        if getattr(packet, "function", None) != m.Function.ALL_WAVESEQ_DUMP:
+            return None
+        try:
+            data = packet.data()
+        except Exception:
+            return None
+        if data is None or len(data) < rec.WAVESEQ_BANK_SIZE:
+            return None
+        return bytes(data[: rec.WAVESEQ_BANK_SIZE])
 
     @property
     def _busy(self) -> bool:
@@ -2726,7 +2796,27 @@ class KwsedApp(App[None]):
                 performances = perf_dump.names()
                 patches = patch_dump.names()
                 digest = _cards.content_digest(perf_dump.records, patch_dump.records)
-            payload = (name, performances, patches, digest)
+                waveseq_raw = None
+                reader = getattr(self.device, "read_raw", None)
+                if callable(reader):
+                    try:
+                        waveseq_raw = reader(
+                            banks.bank("CARD").sysex, m.Function.ALL_WAVESEQ_DUMP
+                        )
+                    except _BRIDGE_ERRORS:
+                        waveseq_raw = None
+                decoded_waveseq = (
+                    self._waveseq_bytes(waveseq_raw)
+                    if waveseq_raw is not None
+                    else None
+                )
+                bundle = {
+                    "performances": b"".join(perf_dump.records),
+                    "patches": b"".join(patch_dump.records),
+                }
+                if decoded_waveseq is not None:
+                    bundle["waveseq"] = decoded_waveseq
+            payload = (name, performances, patches, digest, bundle)
         except _BRIDGE_ERRORS as exc:
             failure = exc
         finally:
@@ -2763,7 +2853,7 @@ class KwsedApp(App[None]):
         filed: int = 0,
         startup: bool = False,
     ) -> bool:
-        name, performances, patches, digest = payload
+        name, performances, patches, digest, bundle = payload
         by_digest = _cards.resolve_by_digest(digest, self._archive)
         resolved = (
             by_digest
@@ -2864,6 +2954,7 @@ class KwsedApp(App[None]):
                 "MIDI, press L to label it)"
             )
         message += message_suffix
+        self._remember_bank(_cards.scope_id(number), **bundle)
         self.notify_status(message)
         if next_index is not None:
             self._card_sweep_next(next_index, filed + 1)
@@ -2881,7 +2972,27 @@ class KwsedApp(App[None]):
                 perf_names = perf_dump.names()
                 patch_names = patch_dump.names()
                 digest = _cards.content_digest(perf_dump.records, patch_dump.records)
-            payload = (perf_names, patch_names, digest)
+                waveseq_raw = None
+                reader = getattr(self.device, "read_raw", None)
+                if callable(reader):
+                    try:
+                        waveseq_raw = reader(
+                            banks.bank("CARD").sysex, m.Function.ALL_WAVESEQ_DUMP
+                        )
+                    except _BRIDGE_ERRORS:
+                        waveseq_raw = None
+                decoded_waveseq = (
+                    self._waveseq_bytes(waveseq_raw)
+                    if waveseq_raw is not None
+                    else None
+                )
+                bundle = {
+                    "performances": b"".join(perf_dump.records),
+                    "patches": b"".join(patch_dump.records),
+                }
+                if decoded_waveseq is not None:
+                    bundle["waveseq"] = decoded_waveseq
+            payload = (perf_names, patch_names, digest, bundle)
         except _BRIDGE_ERRORS as exc:
             failure = exc
         finally:
@@ -2919,7 +3030,7 @@ class KwsedApp(App[None]):
         self._physical = _physical.load(self._physical_path)
 
     def _file_physical_capture(self, payload: Any, startup: bool = False) -> None:
-        perf_names, patch_names, digest = payload
+        perf_names, patch_names, digest, bundle = payload
         from datetime import UTC, datetime
 
         now = datetime.now(UTC).isoformat()
@@ -2942,6 +3053,7 @@ class KwsedApp(App[None]):
             )
             # save and mark active: with no path this stays in memory only
             self._remember_physical(updated, updated.id)
+            self._remember_bank(_physical.scope_id(updated.id), **bundle)
             self._build_row_model()
             self._apply_row_model()
             self._show_physical_row(updated.id)
@@ -2969,6 +3081,7 @@ class KwsedApp(App[None]):
                     verified=False,
                 )
                 self._remember_physical(card, card.id)
+                self._remember_bank(_physical.scope_id(card.id), **bundle)
                 self._build_row_model()
                 self._apply_row_model()
                 self._show_physical_row(card.id)
@@ -3009,6 +3122,7 @@ class KwsedApp(App[None]):
                         verified=False,
                     )
                     self._remember_physical(card, card.id)
+                    self._remember_bank(_physical.scope_id(card.id), **bundle)
                     self._build_row_model()
                     self._apply_row_model()
                     self._show_physical_row(card.id)
@@ -3036,6 +3150,7 @@ class KwsedApp(App[None]):
                 verified=False,
             )
             self._remember_physical(updated, updated.id)
+            self._remember_bank(_physical.scope_id(updated.id), **bundle)
             self._build_row_model()
             self._apply_row_model()
             self._show_physical_row(updated.id)
@@ -3086,13 +3201,21 @@ class KwsedApp(App[None]):
         failure: BaseException | None = None
         result_kind = kind
         result_names: Any = None
+        bundle: Optional[Dict[str, bytes]] = None
         try:
             self.call_from_thread(
                 self.notify_status,
                 f"asking for bank {bank_id} {kind}s in one message (silent)...",
             )
             with self._busy_gate, self._lock:
-                result_kind, result_names = self.device.read_bank_names(bank_id, kind)
+                dump = self.device.read_bank(bank_id, kind)
+                result_kind = dump.kind
+                result_names = dump.names()
+                blob = b"".join(dump.records)
+                if kind == banks.Kind.PERFORMANCE:
+                    bundle = {"performances": blob}
+                else:
+                    bundle = {"patches": blob}
         except _BRIDGE_ERRORS as exc:
             failure = exc
         finally:
@@ -3100,12 +3223,20 @@ class KwsedApp(App[None]):
         if failure is not None:
             self.call_from_thread(self.notify_status, f"read: {failure}", refused=True)
             return
-        self.call_from_thread(self._adopt, bank_id, result_kind, result_names)
+        self.call_from_thread(self._adopt, bank_id, result_kind, result_names, bundle)
 
-    def _adopt(self, bank_id: int, kind: str, names: Dict[int, str]) -> None:
+    def _adopt(
+        self,
+        bank_id: int,
+        kind: str,
+        names: Dict[int, str],
+        bundle: Optional[Dict[str, bytes]] = None,
+    ) -> None:
         entry = banks.bank(bank_id)
         for number, name in names.items():
             self.catalog.set_live_name(entry.id, number, name, kind)
+        if bundle is not None:
+            self._remember_bank(entry.id, **bundle)
         differing = sum(1 for n in names if self.catalog.differs(entry.id, n, kind))
         if self._current_pair == (entry.number, kind):
             self._fill(self._current_pair, self._current_card)
@@ -3160,13 +3291,20 @@ class KwsedApp(App[None]):
                     break
                 try:
                     with self._busy_gate, self._lock:
-                        result_kind, names = self.device.read_bank_names(number, kind)
+                        dump = self.device.read_bank(number, kind)
+                        result_kind = dump.kind
+                        names = dump.names()
+                        blob = b"".join(dump.records)
+                        if kind == banks.Kind.PERFORMANCE:
+                            bundle = {"performances": blob}
+                        else:
+                            bundle = {"patches": blob}
                 except Exception as exc:
                     self.call_from_thread(
                         self.notify_status, f"scan {number}: {exc}", refused=True
                     )
                     continue
-                self.call_from_thread(self._adopt, number, result_kind, names)
+                self.call_from_thread(self._adopt, number, result_kind, names, bundle)
                 self.call_from_thread(
                     self._scan_progress, f"scanned {banks.bank(number).id} {kind}"
                 )
@@ -3728,6 +3866,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         card_mode=card_mode,
         show_card_defaults=show_card_defaults,
         physical_path=physical_path,
+        bankstore_dir=None if args.demo else bankstore.default_dir(),
     )
     try:
         app.run()
