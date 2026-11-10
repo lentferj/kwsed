@@ -731,8 +731,7 @@ already backs up and verifies.
 
 ## 27. Import formats: SoundDiver wave sequences and multisets
 
-**Status:** open, two LIB object types remain; patches and performances
-decode.
+**Status:** open; wave sequences decode, multisets remain.
 
 `kws/importers.py` reads whole banks and single objects from raw SysEx,
 Standard MIDI files, SoundQuest `.sqs` (embedded Korg SysEx) and Edisyn bank
@@ -756,13 +755,15 @@ patches, compacted and remapped.
   288 performance entries have their used parts match a source performance
   (141 also have an identical common). The rest are edited versions, so
   the LIB is a favourites/merge library, not a byte-identical bank dump.
-* **Wave sequences** (the `16 + 16*n` LIB entries) and **multisets** are
-  not assembled into banks. A patch that points at a wave sequence makes
-  `copy-perf` refuse the performance ("wave sequence bank is not loaded"),
-  so a complete LIB-only import still needs those two decoders. The LIB
-  entries carry the sequence steps and names; the remaining work is
-  relocating the relative step links into the shared 501-step pool and
-  assigning the 32 sequence slots.
+* **Wave sequences** (the `16 + 16*n` LIB entries) are now assembled
+  into the bank's wave-sequence bank: the last entry per `RAM1-NN` slot
+  wins, relative step links are rewritten into the shared 501-step pool,
+  loop bytes and names are copied. `copy-perf` therefore works for
+  performances whose sequences are in the LIB's RAM1 bank; references to
+  another sequence bank still need that bank supplied.
+* **Multisets** are not present in the example libraries and are not
+  converted; if a LIB with multiset entries appears, a sample is needed
+  before decoding them.
 * **All Data dumps** (`0x50`) are decoded into the two RAM banks the
   documented structure carries. The six bank blocks are fixed size, so
   the prefix is derived from the payload length and checked (the example's
@@ -770,5 +771,4 @@ patches, compacted and remapped.
 * **MidiQuest-native `.sqs` bodies** are skipped; bodies that carry Korg
   SysEx are read.
 
-**Blocked on:** the LIB wave-sequence step-relocation layout and multiset
-layout.
+
