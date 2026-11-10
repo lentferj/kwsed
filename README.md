@@ -147,7 +147,8 @@ unit or emulator **before** connecting irreplaceable equipment.
   are both supported.
 - **Imports whole banks and single performances** from SysEx, Standard MIDI,
   SoundDiver `.LIB`, SoundQuest/MidiQuest `.sqs`, FAT12 floppy images, `.zip`
-  archives and `.bnk` bundles. See [Importing banks and
+  archives and `.bnk` bundles, in the browser with `I` or via `kwscli import`.
+  See [Importing banks and
   performances](#importing-banks-and-performances).
 - **Caches whole bank records locally**, not just names. The browser,
   `deps` and `copy-perf` all use the same per-bank cache.
@@ -303,6 +304,7 @@ kwsed --port "U6MIDI Pro:U6MIDI Pro MIDI 1 44:0" --device-channel 5
 | `d` / `D` | show the selection's dependencies / show-hide the dependency pane — silent, remembered |
 | `p` | show/hide the patch rows in the bank list — remembered (they can be inspected, not selected) |
 | `y` | copy this performance, with private copies of its patches, into RAM 1–3 or the Card — silent until armed |
+| `I` | import a file/disk: whole bank into the cache, or one performance into a bank |
 | `z` / `w` | undo the last write / toggle the write gate |
 | `C` / `L` / `X` | capture the inserted card / label it / sweep HCard banks — read-only on the unit |
 | `i` / `?` / `q` | device identity / help / quit |
@@ -404,16 +406,19 @@ show_patches = true
 deps_pane = true
 [scan]
 offer_dismissed = false
+[import]
+folder = "/path/to/start"
 ```
 
 Older builds wrote these into `config.toml`; kwsed migrates them
-automatically. Both files are safe to delete. `--favorites`, `--live-names`
-and `--cards` point at the other state files.
+automatically. Both files are safe to delete, and so is the remembered import
+folder. `--favorites`, `--live-names` and `--cards` point at the other state
+files.
 
 | path | contents |
 |---|---|
 | `~/.config/kwsed/config.toml` | port, channel, card mode, HCard defaults |
-| `~/.config/kwsed/ui-state.toml` | pane visibility and scan-offer state |
+| `~/.config/kwsed/ui-state.toml` | pane visibility, scan-offer state and the remembered import folder |
 | `~/.local/share/kwsed/favorites.db` | favourites, tags, notes, ratings |
 | `~/.local/share/kwsed/live-names.json` | names read from the unit |
 | `~/.local/share/kwsed/cards.json` | HCard bank archive |
@@ -491,6 +496,29 @@ bank scan), `--device-channel`, `--demo`, `--catalog`, `--live-names`.
 `copy-perf` then use it. `kwscli copy-perf --from-file` reads a file, disk or
 archive as the source of one performance and its dependencies. Both use the
 same readers; `--list` before choosing is cheap and needs no unit.
+
+#### From the browser
+
+`I` opens a `ChoiceScreen` — `Whole bank into cache` or `Performance into a
+bank` — then a `FilePickerScreen`: one directory at a time, `..` to go up,
+import files sorted first, `enter` opens a directory or file, `r` refreshes,
+`esc`/`q` cancels. The start folder is remembered in `ui-state.toml` under
+`[import] folder`. The chosen file is read with `importers.read_file` and a
+`BankImportScreen` previews the banks (label/scope/active performance
+count/patch count/waveseq yes/no); `ctrl+s`/`enter` selects one.
+
+- **Whole bank into cache** writes to the local bank cache only; nothing is
+  sent to the unit. Multisets are not cached.
+- **Performance into a bank** saves the bank to the cache, then lists the
+  active performances; choosing one opens the existing fenced
+  `CopyPerformanceScreen` (`a` arm, `w` write, `b` bank, `m` mode,
+  backup/undo), which writes with the normal `a`/`w` fence.
+
+Flow: `I` → Whole bank into cache / Performance into a bank → file picker →
+preview → `ctrl+s`/`enter`.
+
+The CLI remains the scriptable path; the browser `I` uses the same readers and
+cache.
 
 ```sh
 kwscli import "card07.syx" --as CARD/07
