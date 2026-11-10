@@ -69,6 +69,7 @@ from textual.screen import ModalScreen
 from textual.widgets import DataTable, Header, Input, Label, Static
 
 from kws import bankstore
+from kws import importers
 from kws import banks
 from kws import deps
 from kws import relations
@@ -83,6 +84,8 @@ from kws import livenames as _livenames
 from kws import scan as _scan
 from kws import undo as _undo
 from kwsed.gate import EditGate
+from kwsed.file_picker import FilePickerScreen
+from kwsed.import_screen import BankImportScreen
 
 # The legend's wrapping and the widget that draws it are the family's; see
 # src/vinsynlib/keys.py and src/vinsynlib/ui/hints.py, which carry the
@@ -217,6 +220,7 @@ KEY_HINTS = (
     "d deps",
     "D deps pane",
     "y copy perf",
+    "I import",
     "z undo",
     "w write gate",
     "i device",
@@ -1342,6 +1346,7 @@ class KwsedApp(App[None]):
         Binding("D", "toggle_deps_pane", "Deps pane"),
         Binding("p", "toggle_patches", "Patches"),
         Binding("y", "copy_performance", "Copy perf"),
+        Binding("I", "import", "Import"),
         Binding("z", "undo", "Undo"),
         Binding("w", "toggle_write_gate", "Write gate"),
     ]
@@ -1398,6 +1403,8 @@ class KwsedApp(App[None]):
         self._physical_path = physical_path
         self._physical = _physical.load(physical_path) if physical_path else {}
         self._bankstore_dir = bankstore_dir
+        self._import_folder = ""
+        self._import_cursor = 0
         self._sources: Dict[str, deps.Source] = {}
         self._active_physical = (
             _physical.active(physical_path) if physical_path else None
@@ -1415,6 +1422,7 @@ class KwsedApp(App[None]):
             _ui_cfg.migrate_ui_state(config_path)
             self._show_patches = _ui_cfg.load_show_patches(config_path)
             self._deps_pane_visible = _ui_cfg.load_deps_pane(config_path)
+            self._import_folder = _ui_cfg.load_import_folder(config_path)
         else:
             self._show_patches = True
             self._deps_pane_visible = True
@@ -2800,6 +2808,119 @@ class KwsedApp(App[None]):
         except Exception:
             source_name = ""
         self.push_screen(CopyPerformanceScreen(self, perf, source_name))
+
+    def action_import(self) -> None:
+        self.push_screen(
+            ChoiceScreen(
+                "Import", ["Whole bank into cache", "Performance into a bank"]
+            ),
+            self._import_kind_chosen,
+        )
+
+    def _import_kind_chosen(self, kind: Optional[int]) -> None:
+        if kind is None:
+            return
+        picker = FilePickerScreen(
+            start=self._import_folder or "",
+            start_row=self._import_cursor,
+        )
+
+        def done(path: Optional[str]) -> None:
+            self._import_folder = str(picker.folder)
+            from kws import config as _cfg
+
+            if self._config_path is not None:
+                try:
+                    _cfg.save_import_folder(str(picker.folder), self._config_path)
+                except OSError:
+                    pass
+            self._import_cursor = picker.last_row
+            if path:
+                self._import_path_chosen(kind, path)
+
+        self.push_screen(picker, done)
+
+    def _import_path_chosen(self, kind: int, path: str) -> None:
+        try:
+            banks_list = importers.read_file(path)
+        except (importers.UnsupportedFormat, ValueError, OSError) as exc:
+            self.notify_status(f"import: {exc}", refused=True)
+            return
+        if not banks_list:
+            self.notify_status("import: no banks found")
+            return
+        self.push_screen(
+            BankImportScreen(path=path, banks=banks_list),
+            lambda index: self._import_bank_chosen(kind, banks_list, index),
+        )
+
+    def _import_bank_chosen(
+        self, kind: int, banks_list: Sequence[Any], index: Optional[int]
+    ) -> None:
+        if index is None:
+            return
+        try:
+            bank = banks_list[index]
+        except (IndexError, TypeError):
+            return
+        if bank is None:
+            return
+        self._sources[bank.scope] = bank.source
+        if self._bankstore_dir is not None:
+            try:
+                bankstore.save(
+                    bank.scope,
+                    performances=b"".join(bank.source.performances) or None,
+                    patches=b"".join(bank.source.patches) or None,
+                    waveseq=bank.source.waveseq,
+                    directory=self._bankstore_dir,
+                )
+            except OSError as exc:
+                self.notify_status(f"import: {exc}", refused=True)
+                return
+        perfs = bank.source.performances
+        patches = bank.source.patches
+        n_perf = sum(1 for r in perfs if r and any(r))
+        n_patch = sum(1 for r in patches if r and any(r))
+        has_ws = bool(bank.source.waveseq)
+        if kind == 0:
+            msg = (
+                f"imported {bank.label} into cache {bank.scope}: "
+                f"{n_perf} performances, {n_patch} patches, "
+                f"waveseq={'yes' if has_ws else 'no'}"
+            )
+            if getattr(bank, "multisets", ()):
+                msg += "; multisets not cached"
+            self.notify_status(msg)
+            return
+        # kind == 1
+        active = list(perfcopy.active_performances(bank.source))
+        if not active:
+            self.notify_status("import: no performances in this bank")
+            return
+        choices = []
+        for slot in active:
+            rec_bytes = bank.source.performances[slot]
+            name = m.decode_name(rec_bytes)
+            choices.append(f"{slot:02d} {name}")
+        self.push_screen(
+            ChoiceScreen("Import performance", choices),
+            lambda sel: self._import_perf_chosen(bank, active, sel),
+        )
+
+    def _import_perf_chosen(
+        self, bank: Any, active: Sequence[int], sel: Optional[int]
+    ) -> None:
+        if sel is None:
+            return
+        try:
+            slot = active[sel]
+        except (IndexError, TypeError):
+            return
+        name = m.decode_name(bank.source.performances[slot])
+        self.push_screen(
+            CopyPerformanceScreen(self, relations.PerfId(bank.scope, slot), name)
+        )
 
     def action_rating_filter(self) -> None:
         if self.favorites is None:
@@ -5364,6 +5485,9 @@ switch the HCard.
   D   show or hide the dependency pane that follows the selection
       (remembered between runs)
   y   copy a Performance (with its patches) into a writable bank
+  I   import a file, disk image or zip; whole bank into the local cache,
+      or one performance into a writable bank (a/w fence). Cache import
+      sends nothing to the unit.
   z   undo the last write (the write gate must be armed)
   w   arm or lock the write gate (or start with --allow-write)
   i   device identity and the unit's global channel

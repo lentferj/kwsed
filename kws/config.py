@@ -60,7 +60,7 @@ DEFAULT_CARD_MODE = "cards"
 UI_STATE_FILENAME = "ui-state.toml"
 
 #: The namespaces whose keys are UI state rather than connection settings.
-UI_NAMESPACES = ("browser", "scan")
+UI_NAMESPACES = ("browser", "import", "scan")
 
 __all__ = [
     "CARD_MODES",
@@ -82,6 +82,7 @@ __all__ = [
     "load_show_card_defaults",
     "load_show_patches",
     "load_deps_pane",
+    "load_import_folder",
     "migrate_legacy_config",
     "save_card_mode",
     "save_channel",
@@ -93,6 +94,7 @@ __all__ = [
     "save_show_card_defaults",
     "save_show_patches",
     "save_deps_pane",
+    "save_import_folder",
 ]
 
 _settings = bind("kwsed", DEFAULT_PATH)
@@ -211,6 +213,17 @@ def load_deps_pane(path: str | None = None) -> bool:
 def save_deps_pane(value: bool, path: str | None = None) -> None:
     """Remember whether the browser's dependency pane is visible."""
     _settings.save_ui_state("browser.deps_pane", bool(value), ui_state_path(path))
+
+
+def load_import_folder(path: str | None = None) -> str:
+    """The last folder used by the import file picker, or ''."""
+    value = _settings.load_ui_str("import.folder", ui_state_path(path), default="")
+    return value if isinstance(value, str) else ""
+
+
+def save_import_folder(value: str, path: str | None = None) -> None:
+    """Remember the last folder used by the import file picker."""
+    _settings.save_ui_state("import.folder", value, ui_state_path(path))
 
 
 def _toml_scalar(value: object) -> str | None:

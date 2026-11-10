@@ -80,6 +80,7 @@ def test_the_legend_matches_the_family() -> None:
             "d deps",
             "D deps pane",
             "y copy perf",
+            "I import",
             "z undo",
             "w write gate",
         ),
