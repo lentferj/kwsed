@@ -271,10 +271,11 @@ A SoundDiver `.LIB` is read for its **entry names**; the Wavestation
 adaptation's data block is not the raw bank record (a patch entry carries
 410 bytes whose common section matches but whose oscillator section is
 reordered), so it is listed rather than guessed at. Export the bank as
-`.syx` from SoundDiver in the meantime. A `0x50` All Data dump is refused
-for the same reason of not guessing a structure this project has not
-decoded; the same sounds usually arrive as separate `0x4C`/`0x4D`/`0x54`
-dumps in every other file.
+`.syx` from SoundDiver in the meantime. A `0x50` All Data dump is decoded
+into its two RAM banks: the six fixed bank blocks (`RAM1`/`RAM2`
+performances, patches and wave sequences) sit at the end of the payload,
+so the prefix before them is derived from the length and checked; a
+payload with any other shape is refused rather than guessed at.
 
 ## Using it
 

@@ -729,9 +729,9 @@ Also confirm the editor's write round trip on hardware when the separate
 write session happens: the `0x62` dump is sent by `write_multi`, which
 already backs up and verifies.
 
-## 27. Import formats: the SoundDiver Wavestation payload and All Data dumps
+## 27. Import formats: the SoundDiver Wavestation payload
 
-**Status:** open, two decode gaps; the containers and the other formats work.
+**Status:** open, one decode gap; the containers and the other formats work.
 
 `kws/importers.py` reads whole banks and single objects from raw SysEx,
 Standard MIDI files, SoundQuest `.sqs` (embedded Korg SysEx) and Edisyn bank
@@ -748,14 +748,15 @@ patches, compacted and remapped.
   No entry matched any raw record body exactly across the example library.
   Converting needs the adaptation layout, so `read_file` refuses a `.LIB`
   with an instruction to export the bank as `.syx` from SoundDiver.
-* **All Data dumps** (`0x50`) are refused. The structure is documented
-  (Reference Appendix 4 §5.11: system, multiset, micro-tune, performance
-  map, performance RAM1/2, patch RAM1/2, wave-sequence RAM1/2), but this
-  project has not modelled it. The same banks normally arrive as separate
-  `0x4C`/`0x4D`/`0x54` dumps.
+* **All Data dumps** (`0x50`) are decoded into the two RAM banks the
+  documented structure carries (system, multiset, micro-tune and
+  performance map, then RAM1/RAM2 performances, patches and wave
+  sequences). The six bank blocks are fixed size, so the prefix is
+  derived from the payload length and checked against a small range
+  (the example's is 1813 bytes). A payload with a different shape -- for
+  example a three-bank variant -- is refused rather than guessed at.
 * **MidiQuest-native `.sqs` bodies** are skipped; bodies that carry Korg
   SysEx are read. No Wavestation `.sqs` example was available to test a
   native body against.
 
-**Blocked on:** the Wavestation SoundDiver adaptation's parameter layout,
-and an All Data example source layout that has been checked against a dump.
+**Blocked on:** the Wavestation SoundDiver adaptation's parameter layout.

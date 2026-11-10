@@ -299,7 +299,7 @@ Read formats:
 
 | format | what is read |
 |---|---|
-| SysEx `.syx` / `.sysex` | one type per file, all three in one file, single performance/patch dumps, and multi-bank files |
+| SysEx `.syx` / `.sysex` | one type per file, all three in one file, single performance/patch dumps, multi-bank files, and All Data (`0x50`; its RAM1/RAM2 banks) |
 | Standard MIDI `.mid` / `.midi` | the SysEx the file carries, including the Korg header without its leading `F0` |
 | SoundQuest `.sqs` | banks carried as embedded Korg SysEx; MidiQuest-native bodies are refused |
 | Edisyn bank `.syx` | standard bank dumps |
