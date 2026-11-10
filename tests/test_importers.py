@@ -320,7 +320,7 @@ def test_lib_entries_are_listed_and_conversion_refused(tmp_path):
     assert entries[1].comment == "RAM1-01"
     assert len(entries[0].data) == 8
 
-    with pytest.raises(importers.UnsupportedFormat, match="not converted"):
+    with pytest.raises(importers.UnsupportedFormat, match="no decodable"):
         importers.read_file(str(path))
 
     described = importers.describe_file(str(path))
@@ -372,22 +372,47 @@ def test_all_data_with_an_unknown_layout_is_refused(tmp_path):
         importers.read_file(str(path))
 
 
-def _lib_patch_data(raw: bytes) -> bytes:
+def _lib_patch_data(raw: bytes, oscs: tuple[int, ...] = (0, 1, 2, 3)) -> bytes:
     """Encode a bank patch the way the SoundDiver adaptation does."""
     from kws import sounddiver
 
-    data = bytearray(410)
+    data = bytearray(74 + 84 * len(oscs))
     data[2:72] = raw[16:86]
     data[0:2] = raw[86:88]
     data[72:74] = raw[88:90]
-    for osc in range(4):
+    for stored, raw_osc in enumerate(oscs):
         for raw_offset, lib_offset in enumerate(sounddiver._OSC_PERMUTATION):
-            data[74 + osc * 84 + lib_offset] = raw[90 + osc * 84 + raw_offset]
+            data[74 + stored * 84 + lib_offset] = raw[90 + raw_osc * 84 + raw_offset]
+    return bytes(data)
+
+
+def _lib_performance_data(raw: bytes, used: int) -> bytes:
+    """Encode a bank performance: common, used parts, unused placeholders."""
+    common = raw[16:37]
+    data = bytearray(37 + 16 * used)
+    data[0] = common[2]
+    data[1] = common[3]
+    data[2] = common[4]
+    data[3] = common[0]
+    data[4] = common[5]
+    data[5:12] = common[6:13]
+    data[12] = common[1]
+    data[13:21] = common[13:21]
+    pos = 21
+    for part in range(8):
+        at = 37 + part * 18
+        if part < used:
+            data[pos : pos + 18] = raw[at : at + 18]
+            pos += 18
+        else:
+            data[pos : pos + 2] = raw[at : at + 2]
+            pos += 2
     return bytes(data)
 
 
 def test_lib_patch_decodes_into_its_comment_slot(tmp_path):
     raw = make_patch("Kelp Forest")
+    perf = make_performance("Glass Meridian", ((0, 3), (0, 4)))
     path = tmp_path / "patches.lib"
     path.write_bytes(
         _lib_file(
@@ -400,8 +425,8 @@ def test_lib_patch_decodes_into_its_comment_slot(tmp_path):
             + _lib_entry(
                 1,
                 "Glass Meridian",
-                data=bytes(158),
-                comment="RAM1-00",
+                data=_lib_performance_data(perf, 2),
+                comment="RAM1-04",
             )
         )
     )
@@ -413,4 +438,63 @@ def test_lib_patch_decodes_into_its_comment_slot(tmp_path):
     assert m.decode_name(bank.source.patches[3]) == "Kelp Forest"
     assert bank.source.patches[3][16:426] == raw[16:426]
     assert bank.source.patches[0] == bytes(r.PATCH_SIZE)
-    assert "performance entry was not decoded" in bank.notes
+    assert m.decode_name(bank.source.performances[4]) == "Glass Meridian"
+    assert "1 patch and 1 performance decoded" in bank.notes
+
+
+def test_lib_one_and_two_oscillator_patches(tmp_path):
+    one = make_patch("Kelp Forest")
+    two = make_patch("Amber Drift")
+    path = tmp_path / "oscillators.lib"
+    path.write_bytes(
+        _lib_file(
+            _lib_entry(
+                0, "Kelp Forest", data=_lib_patch_data(one, (0,)), comment="RAM1-00"
+            )
+            + _lib_entry(
+                1,
+                "Amber Drift",
+                data=_lib_patch_data(two, (0, 2)),
+                comment="RAM1-01",
+            )
+        )
+    )
+
+    bank = importers.read_file(str(path))[0]
+    first = bank.source.patches[0]
+    second = bank.source.patches[1]
+    assert first[16:90] == one[16:90]
+    assert first[90:174] == one[90:174]
+    assert not any(first[174:])
+    assert second[16:90] == two[16:90]
+    assert second[90:174] == two[90:174]
+    assert second[258:342] == two[258:342]
+    assert not any(second[174:258])
+    assert not any(second[342:])
+
+
+def test_lib_performance_decodes_used_parts_and_placeholders(tmp_path):
+    raw = bytearray(make_performance("Glass Meridian", ((0, 3), (0, 4))))
+    raw[16:37] = bytes(range(21))
+    path = tmp_path / "performances.lib"
+    path.write_bytes(
+        _lib_file(
+            _lib_entry(
+                0,
+                "Glass Meridian",
+                data=_lib_performance_data(bytes(raw), 2),
+                comment="RAM1-07",
+            )
+        )
+    )
+
+    bank = importers.read_file(str(path))[0]
+    decoded = bank.source.performances[7]
+    assert m.decode_name(decoded) == "Glass Meridian"
+    assert decoded[16:37] == raw[16:37]
+    assert decoded[37:55] == raw[37:55]
+    assert decoded[55:73] == raw[55:73]
+    for part in range(2, 8):
+        at = 37 + part * 18
+        assert decoded[at : at + 2] == raw[at : at + 2]
+        assert not any(decoded[at + 2 : at + 18])

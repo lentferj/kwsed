@@ -1640,7 +1640,7 @@ class TestImportCommand:
         assert "Glass Meridian" in capsys.readouterr().out
 
         assert cli._cmd_import(None, self._args(path, "--as", "RAM1")) == 2
-        assert "not converted" in capsys.readouterr().err
+        assert "no decodable" in capsys.readouterr().err
 
 
 class TestCopyPerfFromAFile:

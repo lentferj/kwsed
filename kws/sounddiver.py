@@ -13,21 +13,26 @@
 # FOR A PARTICULAR PURPOSE. See the GNU General Public License for more
 # details.
 
-"""Container and patch decoder for SoundDiver ``.LIB`` files.
+"""Container, patch and performance decoder for SoundDiver ``.LIB`` files.
 
-The IFF container, the ``LENT`` blocks and the Wavestation **patch**
-data block are decoded.  A patch entry carries 410 bytes: a two-byte
-split-off piece of the common section, the other 70 common bytes, the
-remaining two common bytes, and four 84-byte oscillator blocks whose
-bytes are stored in the adaptation's order.  The oscillator order below
-was derived by matching 42 real library patches against bank records;
-the few positions that are constant in every example decode as zero,
-which is what the adaptation itself stores there.
+The IFF container, the ``LENT`` blocks, the Wavestation **patch** and
+**performance** data blocks are decoded.
 
-A performance entry is 158 bytes, but it is SoundDiver's normalized
-representation of the part values, not the raw 181-byte performance
-record (the values do not even share a byte multiset), so performances
-are listed but not converted.
+A patch entry carries ``74 + 84 * n`` bytes, where ``n`` is 1, 2 or 4
+oscillators (158, 242 or 410 bytes).  The common section is split around
+a two-byte piece, and each oscillator block is stored in the adaptation's
+byte order.  The order below was derived from real library/source pairs;
+the few positions that are constant zero in every example decode as zero,
+which is what the adaptation itself stores there.  A 2-oscillator patch's
+two stored blocks are raw oscillators 0 and 2.
+
+A performance entry carries ``37 + 16 * n`` bytes (53..165), where ``n``
+is the number of used parts.  The first 21 bytes are the performance
+common in a fixed byte order, then the ``n`` used parts as full 18-byte
+raw part records, then ``8 - n`` two-byte placeholders for the unused
+parts (their bank/patch).  The remaining 16 bytes of an unused part are
+not stored; they decode as zero, which is safe because the part's patch
+is unused.
 """
 
 from __future__ import annotations
@@ -44,6 +49,7 @@ __all__ = [
     "LibEntry",
     "SoundDiverError",
     "decode_patch",
+    "decode_performance",
     "read_banks",
     "read_entries",
 ]
@@ -137,8 +143,19 @@ _OSC_PERMUTATION: Tuple[int, ...] = (
     83,
 )
 
-_PATCH_DATA_SIZE = 410
-_PERFORMANCE_DATA_SIZE = 158
+#: data length -> number of stored oscillator blocks.
+_PATCH_OSCILLATORS: Dict[int, int] = {158: 1, 242: 2, 410: 4}
+
+#: raw oscillator slots used by a patch with 1, 2 or 4 oscillators.
+_OSC_SLOTS: Dict[int, Tuple[int, ...]] = {
+    1: (0,),
+    2: (0, 2),
+    4: (0, 1, 2, 3),
+}
+
+#: data length -> number of used parts, for a performance entry.
+_PERFORMANCE_PARTS: Dict[int, int] = {37 + 16 * n: n for n in range(1, 9)}
+
 _SLOT_COMMENT = re.compile(r"^(RAM[123]|CARD)[-/](\d{1,2})$")
 
 
@@ -148,9 +165,10 @@ class SoundDiverError(ValueError):
 
 @dataclass(frozen=True)
 class LibBank:
-    """The decodable patches of one ``RAM1``/``RAM2``/``RAM3`` bank."""
+    """The decodable patches and performances of one bank."""
 
     scope: str
+    performances: List[bytes]
     patches: List[bytes]
     note: str
 
@@ -279,10 +297,11 @@ def read_entries(path: str) -> List[LibEntry]:
 
 
 def decode_patch(entry: LibEntry) -> bytes:
-    """Turn one 410-byte library patch into a 426-byte bank patch."""
-    if len(entry.data) != _PATCH_DATA_SIZE:
+    """Turn a 1-, 2- or 4-oscillator library patch into a bank patch."""
+    count = _PATCH_OSCILLATORS.get(len(entry.data))
+    if count is None:
         raise SoundDiverError(
-            f"a SoundDiver patch entry carries {_PATCH_DATA_SIZE} bytes; "
+            "a SoundDiver patch entry carries 158, 242 or 410 bytes; "
             f"this one has {len(entry.data)}"
         )
     data = entry.data
@@ -291,63 +310,134 @@ def decode_patch(entry: LibEntry) -> bytes:
     record[16:86] = data[2:72]
     record[86:88] = data[0:2]
     record[88:90] = data[72:74]
-    for osc in range(4):
-        lib_base = 74 + osc * 84
-        raw_base = rec.OSC_BASE + osc * rec.OSC_SIZE
+    for stored, raw_osc in enumerate(_OSC_SLOTS[count]):
+        lib_base = 74 + stored * rec.OSC_SIZE
+        raw_base = rec.OSC_BASE + raw_osc * rec.OSC_SIZE
         for raw_offset, lib_offset in enumerate(_OSC_PERMUTATION):
             record[raw_base + raw_offset] = data[lib_base + lib_offset]
     return bytes(record)
 
 
-def _decode_patch_banks(
+def _decode_performance_common(data: bytes) -> bytes:
+    common = bytearray(21)
+    common[0] = data[3]
+    common[1] = data[12]
+    common[2] = data[0]
+    common[3] = data[1]
+    common[4] = data[2]
+    common[5] = data[4]
+    common[6:13] = data[5:12]
+    common[13:21] = data[13:21]
+    return bytes(common)
+
+
+def decode_performance(entry: LibEntry) -> bytes:
+    """Turn a 53..165-byte library performance into a bank performance."""
+    count = _PERFORMANCE_PARTS.get(len(entry.data))
+    if count is None:
+        raise SoundDiverError(
+            "a SoundDiver performance entry carries 37 + 16*n bytes "
+            f"(53..165); this one has {len(entry.data)}"
+        )
+    data = entry.data
+    record = bytearray(rec.PERFORMANCE_SIZE)
+    name = entry.name.encode("latin-1", "replace")[:15]
+    record[: len(name)] = name
+    record[16:37] = _decode_performance_common(data)
+    pos = 21
+    for part in range(rec.PARTS_PER_PERFORMANCE):
+        at = rec.PART_BASE + part * rec.PART_SIZE
+        if part < count:
+            record[at : at + rec.PART_SIZE] = data[pos : pos + rec.PART_SIZE]
+            pos += rec.PART_SIZE
+        else:
+            record[at : at + 2] = data[pos : pos + 2]
+            pos += 2
+    if pos != len(data):
+        raise SoundDiverError("performance entry length and part count disagree")
+    return bytes(record)
+
+
+def _decode_banks(
     entries: List[LibEntry],
-) -> Tuple[Dict[str, Dict[int, bytes]], int]:
-    banks: Dict[str, Dict[int, bytes]] = {}
-    duplicates = 0
+) -> Tuple[
+    Dict[str, Dict[int, bytes]],
+    Dict[str, Dict[int, bytes]],
+    int,
+    int,
+]:
+    patches: Dict[str, Dict[int, bytes]] = {}
+    performances: Dict[str, Dict[int, bytes]] = {}
+    duplicate_patches = 0
+    duplicate_performances = 0
     for entry in entries:
-        if len(entry.data) != _PATCH_DATA_SIZE:
-            continue
         match = _SLOT_COMMENT.match(entry.comment.strip())
         if match is None:
             continue
         scope = match.group(1)
         slot = int(match.group(2))
-        if not 0 <= slot < 35:
-            continue
-        slots = banks.setdefault(scope, {})
-        if slot in slots:
-            duplicates += 1
-        slots[slot] = decode_patch(entry)
-    return banks, duplicates
+        if len(entry.data) in _PATCH_OSCILLATORS:
+            if not 0 <= slot < 35:
+                continue
+            slots = patches.setdefault(scope, {})
+            if slot in slots:
+                duplicate_patches += 1
+            slots[slot] = decode_patch(entry)
+        elif len(entry.data) in _PERFORMANCE_PARTS:
+            if not 0 <= slot < 50:
+                continue
+            slots = performances.setdefault(scope, {})
+            if slot in slots:
+                duplicate_performances += 1
+            slots[slot] = decode_performance(entry)
+    return patches, performances, duplicate_patches, duplicate_performances
 
 
 def read_banks(path: str) -> List[LibBank]:
-    """Decode a ``.LIB``'s patches into per-bank slot lists.
-
-    Only the patches are converted.  The performance entries are counted
-    in the bank's note so the caller can say what stayed behind.
-    """
+    """Decode a ``.LIB``'s patches and performances into per-bank lists."""
     entries = read_entries(path)
-    banks, duplicates = _decode_patch_banks(entries)
-    performances = sum(
-        1 for entry in entries if len(entry.data) == _PERFORMANCE_DATA_SIZE
-    )
-    if not banks:
+    patches, performances, dup_patches, dup_performances = _decode_banks(entries)
+    scopes = sorted(set(patches) | set(performances))
+    if not scopes:
         raise SoundDiverError(
-            "no decodable Wavestation patches in this .LIB; performances use "
-            "SoundDiver's normalized part values and are not converted yet"
+            "no decodable Wavestation patches or performances in this .LIB"
         )
-    notes: List[str] = []
-    if performances:
-        notes.append(
-            f"{performances} performance entr"
-            f"{'y was' if performances == 1 else 'ies were'} not decoded"
-        )
+    patch_count = sum(len(slots) for slots in patches.values())
+    performance_count = sum(len(slots) for slots in performances.values())
+    recognised = set(_PATCH_OSCILLATORS) | set(_PERFORMANCE_PARTS)
+    other = sum(
+        1 for entry in entries if entry.data and len(entry.data) not in recognised
+    )
+    notes: List[str] = [
+        f"{patch_count} patch{'' if patch_count == 1 else 'es'} and "
+        f"{performance_count} performance"
+        f"{'' if performance_count == 1 else 's'} decoded"
+    ]
+    duplicates = dup_patches + dup_performances
     if duplicates:
         notes.append(f"{duplicates} duplicate slot(s) kept the last entry")
+    if other:
+        notes.append(
+            f"{other} other entr{'y' if other == 1 else 'ies'} "
+            "(wave sequences, multisets, ...) not converted"
+        )
     note = "; ".join(notes)
     result: List[LibBank] = []
-    for scope, slots in sorted(banks.items()):
-        patches = [slots.get(number, bytes(rec.PATCH_SIZE)) for number in range(35)]
-        result.append(LibBank(scope=scope, patches=patches, note=note))
+    for scope in scopes:
+        patch_slots = patches.get(scope, {})
+        performance_slots = performances.get(scope, {})
+        result.append(
+            LibBank(
+                scope=scope,
+                performances=[
+                    performance_slots.get(number, bytes(rec.PERFORMANCE_SIZE))
+                    for number in range(50)
+                ],
+                patches=[
+                    patch_slots.get(number, bytes(rec.PATCH_SIZE))
+                    for number in range(35)
+                ],
+                note=note,
+            )
+        )
     return result
