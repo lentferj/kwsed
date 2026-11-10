@@ -141,11 +141,14 @@ print(len(made.patch_map), "patches;", len(made.performances), "performances")
 for why in made.rejected:
     print("left out:", why)
 
-built = bankbuild.build(sources, made,
-                        template_patches=empty.patches_bytes,
-                        template_performances=empty.performances_bytes,
-                        template_waveseq=empty.waveseq_bytes,
-                        destination_bank=11)
+built = bankbuild.build(
+    sources,
+    made,
+    template_patches=empty.patches_bytes,
+    template_performances=empty.performances_bytes,
+    template_waveseq=empty.waveseq_bytes,
+    destination_bank=11,
+)
 ```
 
 The template comes from dumping a freshly formatted bank off the instrument
