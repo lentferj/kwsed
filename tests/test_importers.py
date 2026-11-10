@@ -232,23 +232,35 @@ def _lib_file(chunks: bytes) -> bytes:
     return b"MROF" + struct.pack("<I", len(content)) + content
 
 
+def _lib_length(length: int) -> bytes:
+    if length < 0x80:
+        return bytes([length])
+    return bytes([0x80 | (length >> 7), length & 0x7F])
+
+
 def _lib_entry(
-    index: int, name: str, location: str = "1", data: bytes = b"\x00" * 8
+    index: int,
+    name: str,
+    location: str = "1",
+    data: bytes = b"\x00" * 8,
+    comment: str | None = None,
 ) -> bytes:
-    comment = f"RAM1-{index:02d}".encode()
+    if comment is None:
+        comment = f"RAM1-{index:02d}"
+    encoded_comment = comment.encode("ascii")
     blocks = (
         b"\x01"
-        + bytes([len(name)])
+        + _lib_length(len(name))
         + name.encode("ascii")
         + b"\x02"
-        + bytes([len(location)])
+        + _lib_length(len(location))
         + location.encode("ascii")
         + b"\x03"
-        + bytes([len(data)])
+        + _lib_length(len(data))
         + data
         + b"\x06"
-        + bytes([len(comment)])
-        + comment
+        + _lib_length(len(encoded_comment))
+        + encoded_comment
         + b"\x00\x00"
     )
     body = bytes(12) + blocks
@@ -308,7 +320,7 @@ def test_lib_entries_are_listed_and_conversion_refused(tmp_path):
     assert entries[1].comment == "RAM1-01"
     assert len(entries[0].data) == 8
 
-    with pytest.raises(importers.UnsupportedFormat, match="not decoded"):
+    with pytest.raises(importers.UnsupportedFormat, match="not converted"):
         importers.read_file(str(path))
 
     described = importers.describe_file(str(path))
@@ -358,3 +370,47 @@ def test_all_data_with_an_unknown_layout_is_refused(tmp_path):
     path.write_bytes(m.frame(m.Function.ALL_DATA_DUMP, nibbles + [m.checksum(nibbles)]))
     with pytest.raises(importers.UnsupportedFormat, match="all-data"):
         importers.read_file(str(path))
+
+
+def _lib_patch_data(raw: bytes) -> bytes:
+    """Encode a bank patch the way the SoundDiver adaptation does."""
+    from kws import sounddiver
+
+    data = bytearray(410)
+    data[2:72] = raw[16:86]
+    data[0:2] = raw[86:88]
+    data[72:74] = raw[88:90]
+    for osc in range(4):
+        for raw_offset, lib_offset in enumerate(sounddiver._OSC_PERMUTATION):
+            data[74 + osc * 84 + lib_offset] = raw[90 + osc * 84 + raw_offset]
+    return bytes(data)
+
+
+def test_lib_patch_decodes_into_its_comment_slot(tmp_path):
+    raw = make_patch("Kelp Forest")
+    path = tmp_path / "patches.lib"
+    path.write_bytes(
+        _lib_file(
+            _lib_entry(
+                0,
+                "Kelp Forest",
+                data=_lib_patch_data(raw),
+                comment="RAM1-03",
+            )
+            + _lib_entry(
+                1,
+                "Glass Meridian",
+                data=bytes(158),
+                comment="RAM1-00",
+            )
+        )
+    )
+
+    out = importers.read_file(str(path))
+    assert len(out) == 1
+    bank = out[0]
+    assert bank.scope == "RAM1"
+    assert m.decode_name(bank.source.patches[3]) == "Kelp Forest"
+    assert bank.source.patches[3][16:426] == raw[16:426]
+    assert bank.source.patches[0] == bytes(r.PATCH_SIZE)
+    assert "performance entry was not decoded" in bank.notes

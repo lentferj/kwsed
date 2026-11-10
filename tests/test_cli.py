@@ -1606,6 +1606,30 @@ class TestImportCommand:
         assert m.decode_name(loaded.performances[0]) == "Kelp Forest"
         assert "CARD/07" in capsys.readouterr().out
 
+    def test_a_patch_lib_imports_into_the_cache(self, tmp_path, capsys):
+        from kws import bankstore
+        from tests.test_bankbuild import make_patch
+        from tests.test_importers import _lib_entry, _lib_file, _lib_patch_data
+
+        raw = make_patch("Kelp Forest")
+        path = tmp_path / "patches.lib"
+        path.write_bytes(
+            _lib_file(
+                _lib_entry(
+                    0,
+                    "Kelp Forest",
+                    data=_lib_patch_data(raw),
+                    comment="RAM1-03",
+                )
+            )
+        )
+        cache = str(tmp_path / "banks")
+        args = self._args(path, "--as", "RAM1", "--bankstore", cache)
+        assert cli._cmd_import(None, args) == 0
+        loaded = bankstore.load("RAM1", cache)
+        assert loaded is not None
+        assert m.decode_name(loaded.patches[3]) == "Kelp Forest"
+
     def test_a_lib_lists_its_entries_but_is_not_imported(self, tmp_path, capsys):
         from tests.test_importers import _lib_entry, _lib_file
 
@@ -1616,7 +1640,7 @@ class TestImportCommand:
         assert "Glass Meridian" in capsys.readouterr().out
 
         assert cli._cmd_import(None, self._args(path, "--as", "RAM1")) == 2
-        assert "not decoded" in capsys.readouterr().err
+        assert "not converted" in capsys.readouterr().err
 
 
 class TestCopyPerfFromAFile:

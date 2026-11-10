@@ -47,6 +47,7 @@ class ImportedBank:
     format: str
     source: deps.Source
     multisets: Tuple[multi.Multiset, ...] = ()
+    notes: str = ""
 
 
 class UnsupportedFormat(ValueError):
@@ -439,10 +440,6 @@ def _load_packets(path: str, ext: str) -> Tuple[List[m.Packet], str]:
         return dumps.read_syx_file(path), "sysex"
     if ext in (".mid", ".midi"):
         return read_midi_file(path), "midi"
-    if ext == ".lib":
-        from kws import sounddiver
-
-        sounddiver.read_lib(path)
     if ext == ".sqs":
         return _read_sqs_packets(path)
     with open(path, "rb") as handle:
@@ -450,10 +447,6 @@ def _load_packets(path: str, ext: str) -> Tuple[List[m.Packet], str]:
     if not raw:
         raise UnsupportedFormat("empty file")
     sniffed = _sniff_format(raw)
-    if sniffed == "lib":
-        from kws import sounddiver
-
-        sounddiver.read_lib(path)
     if sniffed == "sqs":
         return _read_sqs_packets(path)
     if sniffed == "midi":
@@ -465,6 +458,33 @@ def _load_packets(path: str, ext: str) -> Tuple[List[m.Packet], str]:
 
 def read_file(path: str) -> List[ImportedBank]:
     ext = os.path.splitext(path)[1].lower()
+    try:
+        with open(path, "rb") as handle:
+            head = handle.read(4)
+    except OSError:
+        head = b""
+    if ext == ".lib" or head == b"MROF":
+        from kws import sounddiver
+
+        try:
+            lib_banks = sounddiver.read_banks(path)
+        except (sounddiver.SoundDiverError, ValueError) as exc:
+            raise UnsupportedFormat(str(exc)) from exc
+        return [
+            ImportedBank(
+                label=f"{os.path.basename(path)} [{bank.scope}]",
+                scope=bank.scope,
+                format="lib",
+                source=deps.Source(
+                    bank_id=bank.scope,
+                    performances=[],
+                    patches=list(bank.patches),
+                    waveseq=None,
+                ),
+                notes=bank.note,
+            )
+            for bank in lib_banks
+        ]
     packets, fmt = _load_packets(path, ext)
     if not packets:
         raise UnsupportedFormat("no Wavestation messages found")
@@ -492,12 +512,19 @@ def describe_file(path: str) -> str:
                 f"{entry.index}\t{entry.name}\t{entry.location}\t"
                 f"{entry.comment}\t{len(entry.data)} bytes"
             )
+        lines.append("")
+        lines.append(
+            "410-byte entries are decoded patches; 158-byte entries are "
+            "performances and are not converted"
+        )
         return "\n".join(lines)
 
     banks_list = read_file(path)
     lines = []
     for ib in banks_list:
         lines.append(ib.label)
+        if ib.notes:
+            lines.append(f"  note: {ib.notes}")
         perfs = ib.source.performances
         for slot, perf in enumerate(perfs):
             if not perf:

@@ -1170,6 +1170,8 @@ def _cmd_import(_device: Any, args: argparse.Namespace) -> int:
         return spec.EXIT_USAGE
 
     source_scope = selected.scope
+    if selected.notes:
+        print(f"note: {selected.notes}")
     dest = getattr(args, "as", None)
     if dest is None:
         if _real_library_scope(source_scope):

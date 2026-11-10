@@ -13,18 +13,146 @@
 # FOR A PARTICULAR PURPOSE. See the GNU General Public License for more
 # details.
 
-"""Container reader for SoundDiver ``.LIB`` files.
+"""Container and patch decoder for SoundDiver ``.LIB`` files.
 
-Only the IFF container and the ``LENT`` block layout are interpreted
-here.  The Wavestation adaptation of the data block is not decoded.
+The IFF container, the ``LENT`` blocks and the Wavestation **patch**
+data block are decoded.  A patch entry carries 410 bytes: a two-byte
+split-off piece of the common section, the other 70 common bytes, the
+remaining two common bytes, and four 84-byte oscillator blocks whose
+bytes are stored in the adaptation's order.  The oscillator order below
+was derived by matching 42 real library patches against bank records;
+the few positions that are constant in every example decode as zero,
+which is what the adaptation itself stores there.
+
+A performance entry is 158 bytes, but it is SoundDiver's normalized
+representation of the part values, not the raw 181-byte performance
+record (the values do not even share a byte multiset), so performances
+are listed but not converted.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
-from typing import List, NoReturn, cast
+from typing import Dict, List, Tuple, cast
 
-__all__ = ["LibEntry", "read_entries", "read_lib"]
+from kws import messages as m
+from kws import records as rec
+
+__all__ = [
+    "LibBank",
+    "LibEntry",
+    "SoundDiverError",
+    "decode_patch",
+    "read_banks",
+    "read_entries",
+]
+
+#: raw oscillator byte -> position inside the 84-byte block in the LIB.
+#: Derived from 42 real patch pairs; the four blocks all use this order.
+_OSC_PERMUTATION: Tuple[int, ...] = (
+    1,
+    2,
+    4,
+    5,
+    6,
+    3,
+    8,
+    9,
+    11,
+    12,
+    10,
+    17,
+    18,
+    19,
+    20,
+    21,
+    22,
+    13,
+    25,
+    23,
+    30,
+    31,
+    32,
+    33,
+    35,
+    36,
+    37,
+    38,
+    39,
+    40,
+    41,
+    42,
+    43,
+    45,
+    65,
+    66,
+    67,
+    68,
+    69,
+    70,
+    71,
+    72,
+    47,
+    56,
+    64,
+    80,
+    34,
+    48,
+    52,
+    53,
+    54,
+    55,
+    58,
+    60,
+    61,
+    62,
+    63,
+    73,
+    78,
+    79,
+    74,
+    75,
+    76,
+    77,
+    82,
+    81,
+    57,
+    59,
+    44,
+    24,
+    49,
+    50,
+    51,
+    0,
+    26,
+    14,
+    15,
+    16,
+    46,
+    27,
+    28,
+    29,
+    7,
+    83,
+)
+
+_PATCH_DATA_SIZE = 410
+_PERFORMANCE_DATA_SIZE = 158
+_SLOT_COMMENT = re.compile(r"^(RAM[123]|CARD)[-/](\d{1,2})$")
+
+
+class SoundDiverError(ValueError):
+    """A ``.LIB`` object this module cannot turn into a bank record."""
+
+
+@dataclass(frozen=True)
+class LibBank:
+    """The decodable patches of one ``RAM1``/``RAM2``/``RAM3`` bank."""
+
+    scope: str
+    patches: List[bytes]
+    note: str
 
 
 @dataclass(frozen=True)
@@ -150,15 +278,76 @@ def read_entries(path: str) -> List[LibEntry]:
     return entries
 
 
-def read_lib(path: str) -> NoReturn:
-    try:
-        read_entries(path)
-    except (ValueError, OSError):
-        pass
-    from kws.importers import UnsupportedFormat
+def decode_patch(entry: LibEntry) -> bytes:
+    """Turn one 410-byte library patch into a 426-byte bank patch."""
+    if len(entry.data) != _PATCH_DATA_SIZE:
+        raise SoundDiverError(
+            f"a SoundDiver patch entry carries {_PATCH_DATA_SIZE} bytes; "
+            f"this one has {len(entry.data)}"
+        )
+    data = entry.data
+    record = bytearray(rec.PATCH_SIZE)
+    record[:16] = bytes(m.encode_name(entry.name))
+    record[16:86] = data[2:72]
+    record[86:88] = data[0:2]
+    record[88:90] = data[72:74]
+    for osc in range(4):
+        lib_base = 74 + osc * 84
+        raw_base = rec.OSC_BASE + osc * rec.OSC_SIZE
+        for raw_offset, lib_offset in enumerate(_OSC_PERMUTATION):
+            record[raw_base + raw_offset] = data[lib_base + lib_offset]
+    return bytes(record)
 
-    raise UnsupportedFormat(
-        "SoundDiver .LIB entries are read by name, but the Wavestation "
-        "data block is not decoded; export the bank as .syx from "
-        "SoundDiver, or provide the adaptation layout"
+
+def _decode_patch_banks(
+    entries: List[LibEntry],
+) -> Tuple[Dict[str, Dict[int, bytes]], int]:
+    banks: Dict[str, Dict[int, bytes]] = {}
+    duplicates = 0
+    for entry in entries:
+        if len(entry.data) != _PATCH_DATA_SIZE:
+            continue
+        match = _SLOT_COMMENT.match(entry.comment.strip())
+        if match is None:
+            continue
+        scope = match.group(1)
+        slot = int(match.group(2))
+        if not 0 <= slot < 35:
+            continue
+        slots = banks.setdefault(scope, {})
+        if slot in slots:
+            duplicates += 1
+        slots[slot] = decode_patch(entry)
+    return banks, duplicates
+
+
+def read_banks(path: str) -> List[LibBank]:
+    """Decode a ``.LIB``'s patches into per-bank slot lists.
+
+    Only the patches are converted.  The performance entries are counted
+    in the bank's note so the caller can say what stayed behind.
+    """
+    entries = read_entries(path)
+    banks, duplicates = _decode_patch_banks(entries)
+    performances = sum(
+        1 for entry in entries if len(entry.data) == _PERFORMANCE_DATA_SIZE
     )
+    if not banks:
+        raise SoundDiverError(
+            "no decodable Wavestation patches in this .LIB; performances use "
+            "SoundDiver's normalized part values and are not converted yet"
+        )
+    notes: List[str] = []
+    if performances:
+        notes.append(
+            f"{performances} performance entr"
+            f"{'y was' if performances == 1 else 'ies were'} not decoded"
+        )
+    if duplicates:
+        notes.append(f"{duplicates} duplicate slot(s) kept the last entry")
+    note = "; ".join(notes)
+    result: List[LibBank] = []
+    for scope, slots in sorted(banks.items()):
+        patches = [slots.get(number, bytes(rec.PATCH_SIZE)) for number in range(35)]
+        result.append(LibBank(scope=scope, patches=patches, note=note))
+    return result
