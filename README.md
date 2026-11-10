@@ -318,11 +318,13 @@ nothing when `card_mode = "none"`; `X` is HCard-only. `c`, `[` and `]` set the
 MIDI channel used for selection and audition; the unit's own SysEx base
 channel is the separate `--device-channel`.
 
-On the **copy-performance** screen (`y`), `a` arms and `w` writes; `esc`/`q`
-cancels. In the **Multi editor** (`m`, then `e`), `b` chooses a bank (including
-`CARD/07` and `CARD/c1`), `s` stages card performances into RAM, `space`
-toggles a channel's used flag, `+`/`-` nudges its level, `n` renames it, and
-`a`/`w` arm and write the staged bundle.
+On the **copy-performance** screen (`y`), `b` chooses the destination bank,
+`t` opens the target slot list, `m` chooses append/clean, `a` arms, `w` writes,
+`?` opens the screen help, and `esc`/`q` cancels. In the **Multi editor**
+(`m`, then `e`), `b` chooses a bank (including `CARD/07` and `CARD/c1`), `s`
+stages card performances into RAM, `space` toggles a channel's used flag,
+`+`/`-` nudges its level, `n` renames it, and `a`/`w` arm and write the staged
+bundle.
 
 ### Writes, backups and undo
 
@@ -372,11 +374,29 @@ patches are deduplicated structurally, not by name.
 - every part is rewritten to the new patch slot, and the patch/sequence/step
   budgets are checked before anything is sent.
 
-`--out PREFIX` writes the three `.syx` files and touches no unit; `--yes`
-writes the destination through the fence. `--source ID=GLOB` and
-`--from-file FILE` supply the source; the latter also accepts every import
-format below except the undecoded KryoFlux flux. Use `--backup-dir` to choose
-the destination backup directory.
+The copy screen names the **destination bank** and **copy mode**. `b` opens a
+bank list (RAM 1, RAM 2, RAM 3, Card), `t` opens the target slot list (all 50
+slots, with `free`, `Init`, or `used` state), and `m` chooses:
+
+- **append** — keep the destination's performances and add this one to the
+  first free performance slot; the destination must still have room for the
+  performance and its private patches. Factory `Init` slots count as free, so
+  a not-yet-used bank does not look full.
+- **clean** — replace the whole destination bank with this performance.
+- **overwrite slot NN** — `t` selects one occupied slot and replaces that
+  performance; the preview says `copy mode: overwrite slot NN`.
+- **free/Init slot** — selecting the first free slot uses append; selecting a
+  later free slot is refused with the first free slot named, because append
+  has no destination-specific placement there. `Init` is recognised as free,
+  not as a used performance.
+
+The preview says `cannot copy` when the plan does not fit, and `a`/`w` refuse
+to write it; switch the mode with `m`, choose another target with `t`, or
+choose another bank with `b`. `?` on the copy screen opens its own help. `--out PREFIX` writes the three `.syx`
+files and touches no unit; `--yes` writes the destination through the fence.
+`--source ID=GLOB` and `--from-file FILE` supply the source; the latter also
+accepts every import format below except the undecoded KryoFlux flux. Use
+`--backup-dir` to choose the destination backup directory.
 
 ### Local bank cache
 

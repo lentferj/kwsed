@@ -16,7 +16,7 @@ import pytest
 
 from kws import bankstore, config, deps, importers, perfcopy, relations
 from kws import messages as m
-from kwsed.app import KEY_HINTS, CopyPerformanceScreen, KwsedApp
+from kwsed.app import _HELP, KEY_HINTS, CopyPerformanceScreen, KwsedApp
 from kwsed.demo import DemoDevice
 from kwsed.file_picker import FilePickerScreen
 from kwsed.import_screen import BankImportScreen
@@ -65,12 +65,14 @@ def _make_app(tmp_path: Any, bankstore_dir: Optional[str] = None) -> KwsedApp:
 
 
 @pytest.mark.asyncio
-async def test_i_binding_and_hint() -> None:
+async def test_i_binding_hint_and_help() -> None:
     assert any(
         getattr(b, "key", None) == "I" and getattr(b, "action", None) == "import"
         for b in KwsedApp.BINDINGS
     )
     assert "I import" in KEY_HINTS
+    assert "Shortcuts: I import" in _HELP
+    assert "I   import a file" in _HELP
 
 
 @pytest.mark.asyncio

@@ -1333,6 +1333,13 @@ def _cmd_copy_perf(device: Any, args: argparse.Namespace) -> int:
         mode=args.mode,
         destination_bank=destination,
     )
+    if built.plan.rejected:
+        print(
+            "error: the copy does not fit the destination: "
+            + "; ".join(built.plan.rejected),
+            file=sys.stderr,
+        )
+        return spec.EXIT_ERROR
     _print_atomic_remap(built.plan)
     _print_atomic_usage(built.plan)
 

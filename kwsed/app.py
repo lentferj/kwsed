@@ -86,6 +86,7 @@ from kws import undo as _undo
 from kwsed.gate import EditGate
 from kwsed.file_picker import FilePickerScreen
 from kwsed.import_screen import BankImportScreen
+from kwsed.target_screen import TargetSlotScreen
 
 # The legend's wrapping and the widget that draws it are the family's; see
 # src/vinsynlib/keys.py and src/vinsynlib/ui/hints.py, which carry the
@@ -1095,6 +1096,26 @@ class PromptScreen(ModalScreen[Optional[str]]):
 MULTI_BANK = -1
 MULTI_KIND = "multiset"
 
+_COPY_HELP = """\
+Copy a Performance and the patches it uses into a writable bank.
+
+  b   choose the destination bank: RAM 1, RAM 2, RAM 3 or the Card.
+  t   choose an occupied destination slot to overwrite.
+  m   choose the copy mode:
+        append  keep the destination's performances and add this one;
+                the destination must still fit the performance and its patches.
+        clean   replace the whole destination bank with this performance.
+  a   arm the copy; nothing is written yet.
+  w   write the armed copy through the read, backup and verify fence.
+  z   after a write, the browser's undo restores the destination.
+  esc / q   cancel without writing.
+
+The preview below shows the destination, the mode, the planned performance
+slot and patch slots, and the reasons a copy cannot fit. In append mode a
+destination that is already full can refuse the new performance; switch to
+clean or choose another bank.
+"""
+
 
 class CopyPerformanceScreen(ModalScreen[Optional[Dict[str, Any]]]):
     DEFAULT_CSS = """
@@ -1109,9 +1130,11 @@ class CopyPerformanceScreen(ModalScreen[Optional[Dict[str, Any]]]):
         Binding("escape", "close", "Cancel", show=False),
         Binding("q", "close", "Cancel", show=False),
         Binding("b", "bank", "Bank", show=False),
+        Binding("t", "target", "Target", show=False),
         Binding("m", "mode", "Mode", show=False),
         Binding("a", "arm", "Arm", show=False),
         Binding("w", "fire", "Write", show=False),
+        Binding("question_mark", "help", "Help", show=False),
     ]
 
     def __init__(self, app: Any, perf: relations.PerfId, source_name: str) -> None:
@@ -1122,6 +1145,7 @@ class CopyPerformanceScreen(ModalScreen[Optional[Dict[str, Any]]]):
         self._dest_index = 0
         self._modes = ("append", "clean")
         self._mode_index = 0
+        self._target_slot: Optional[int] = None
         self._armed = False
         self._destinations = banks.writable_banks()
         self._loading: set[str] = set()
@@ -1131,6 +1155,8 @@ class CopyPerformanceScreen(ModalScreen[Optional[Dict[str, Any]]]):
         return self._destinations[self._dest_index]
 
     def _mode(self) -> str:
+        if self._target_slot is not None:
+            return "replace"
         return self._modes[self._mode_index]
 
     def _skip_readonly_card(self) -> None:
@@ -1151,7 +1177,10 @@ class CopyPerformanceScreen(ModalScreen[Optional[Dict[str, Any]]]):
         with Vertical():
             yield Label("Copy Performance", id="copy-perf-title")
             yield Static("", id="copy-perf-state")
-            yield Static("[dim]b bank · m mode · a arm · w fire · esc cancel[/dim]")
+            yield Static(
+                "[dim]b destination · t target · m mode · a arm · w write · "
+                "? help · esc cancel[/dim]"
+            )
 
     def on_mount(self) -> None:
         self._skip_readonly_card()
@@ -1187,29 +1216,65 @@ class CopyPerformanceScreen(ModalScreen[Optional[Dict[str, Any]]]):
         self._app.notify_status(message, refused=True)
 
     def _plan_preview(self) -> List[str]:
-        """The dry-run plan lines for the current destination and mode."""
+        """The destination, mode, and dry-run plan lines."""
         app = self._app
         dest = self._destination()
+        mode = self._mode()
+        mode_text = (
+            f"overwrite slot {self._target_slot:02d}"
+            if self._target_slot is not None
+            else mode
+        )
+        lines: List[str] = [
+            f"destination bank: {dest.label}",
+            f"copy mode: {mode_text}",
+            "b bank · t target slot · m append/clean",
+        ]
         if self._load_error is not None:
-            return [f"cannot plan: {self._load_error}"]
+            return lines + [f"cannot plan: {self._load_error}"]
         missing = self._missing_scopes()
         if missing:
-            return [f"waiting for {', '.join(sorted(missing))}..."]
+            return lines + [f"waiting for {', '.join(sorted(missing))}..."]
         merged = app._sources_with_store()
+        dest_src = merged.get(dest.id)
+        if dest_src is not None:
+            active = perfcopy.active_performances(dest_src)
+            used_patches = sum(1 for patch in dest_src.patches if any(patch))
+            lines.append(
+                f"destination active performances: {len(active)}; "
+                f"free performance slots: {50 - len(active)}; "
+                f"patches used: {used_patches}/35"
+            )
         try:
             result = perfcopy.copy_into_bank(
                 merged,
                 dest.id,
                 [self.perf],
-                mode=self._mode(),
+                mode=mode,
+                replace_slot=self._target_slot,
                 destination_bank=dest,
             )
         except Exception as exc:
-            return [f"plan error: {exc}"]
+            return lines + [f"cannot copy: {exc}"]
         plan = result.plan
-        lines: List[str] = []
+        if plan.rejected:
+            reasons = "; ".join(plan.rejected)
+            if len(plan.rejected) > 2:
+                reasons = "; ".join(plan.rejected[:2]) + (
+                    f"; ... ({len(plan.rejected) - 2} more)"
+                )
+            lines.append(f"cannot copy: {reasons}")
+            return lines
+        # In append mode the plan also contains the destination's existing
+        # performances. The requested copy is the *last* allocation for this
+        # source, not the first one, which may be the same performance already
+        # sitting in the destination.
         chosen = next(
-            (alloc for alloc in plan.allocations if alloc.source_perf == self.perf),
+            (
+                alloc
+                for alloc in reversed(plan.allocations)
+                if alloc.source_perf == self.perf
+            ),
             None,
         )
         if chosen is not None:
@@ -1223,38 +1288,129 @@ class CopyPerformanceScreen(ModalScreen[Optional[Dict[str, Any]]]):
             f"Wave Seqs {len(plan.sequence_map)}/32, "
             f"Steps {plan.steps_used}/501"
         )
-        dest_src = merged.get(dest.id)
-        if dest_src is not None:
-            active = perfcopy.active_performances(dest_src)
-            if active:
-                lines.append(f"destination active performances: {active}")
-        if plan.rejected:
-            lines.append("rejected: " + "; ".join(plan.rejected))
         return lines
 
     def _refresh(self) -> None:
+        dest = self._destination()
+        mode = self._mode()
         state_lines: List[str] = [
-            f"source: {self.source_name or self.perf.scope_id}:{self.perf.number:02d}"
+            f"source: {self.source_name or self.perf.scope_id}:{self.perf.number:02d}",
         ]
         state_lines.extend(self._plan_preview())
         if self._armed:
             state_lines.append("ARMED — press w to write")
         try:
             self.query_one("#copy-perf-state", Static).update("\n".join(state_lines))
+            label_mode = (
+                f"overwrite {self._target_slot:02d}"
+                if self._target_slot is not None
+                else mode
+            )
+            self.query_one("#copy-perf-title", Label).update(
+                f"Copy Performance → {dest.label} ({label_mode})"
+            )
         except Exception:  # noqa: S110
             pass
 
     def action_bank(self) -> None:
-        self._dest_index = (self._dest_index + 1) % len(self._destinations)
-        self._skip_readonly_card()
+        choices = [bank.label for bank in self._destinations]
+        self._app.push_screen(
+            ChoiceScreen(
+                "Destination bank",
+                choices,
+                self._dest_index,
+                status_message=(
+                    "The copy writes one whole bank. RAM 1-3 are writable; "
+                    "the Card is writable only when it is a user card."
+                ),
+            ),
+            self._bank_chosen,
+        )
+
+    def _bank_chosen(self, index: Optional[int]) -> None:
+        if index is None:
+            return
+        self._dest_index = index
+        self._target_slot = None
         self._armed = False
         self._load_error = None
+        self._skip_readonly_card()
         self._ensure_context()
 
     def action_mode(self) -> None:
-        self._mode_index = (self._mode_index + 1) % len(self._modes)
+        self._app.push_screen(
+            ChoiceScreen(
+                "Copy mode",
+                [
+                    "append — keep destination performances, add this one",
+                    "clean — replace the whole destination bank",
+                ],
+                self._mode_index,
+            ),
+            self._mode_chosen,
+        )
+
+    def _mode_chosen(self, index: Optional[int]) -> None:
+        if index is None:
+            return
+        self._mode_index = index
+        self._target_slot = None
         self._armed = False
         self._refresh()
+
+    def action_target(self) -> None:
+        dest = self._destination()
+        merged = self._app._sources_with_store()
+        dest_src = merged.get(dest.id)
+        if dest_src is None or self._loading or self._missing_scopes():
+            self._app.notify_status(
+                "still reading the destination bank; try again in a moment",
+                refused=True,
+            )
+            return
+        self._app.push_screen(
+            TargetSlotScreen(
+                scope=dest.id,
+                records=dest_src.performances,
+                current=self._target_slot or 0,
+            ),
+            self._target_chosen,
+        )
+
+    def _target_chosen(self, slot: Optional[int]) -> None:
+        if slot is None:
+            return
+        dest = self._destination()
+        dest_src = self._app._sources_with_store().get(dest.id)
+        if dest_src is None or not 0 <= slot < len(dest_src.performances):
+            return
+        record = dest_src.performances[slot]
+        self._armed = False
+        if perfcopy.is_empty_performance(record):
+            first_free = next(
+                (
+                    index
+                    for index, candidate in enumerate(dest_src.performances)
+                    if perfcopy.is_empty_performance(candidate)
+                ),
+                None,
+            )
+            if first_free != slot:
+                self._app.notify_status(
+                    f"append uses the first free slot "
+                    f"{first_free:02d}; choose that slot or use overwrite",
+                    refused=True,
+                )
+                return
+            self._target_slot = None
+            self._mode_index = self._modes.index("append")
+            self._app.notify_status(f"target slot {slot:02d} is free (append)")
+        else:
+            self._target_slot = slot
+        self._refresh()
+
+    def action_help(self) -> None:
+        self._app.push_screen(ReportScreen("Copy Performance", _COPY_HELP))
 
     def action_arm(self) -> None:
         self._armed = True
@@ -1275,7 +1431,9 @@ class CopyPerformanceScreen(ModalScreen[Optional[Dict[str, Any]]]):
             return
         dest = self._destination()
         mode = self._mode()
-        self._app._copy_perf_write_worker(self.perf, dest, mode, self)
+        self._app._copy_perf_write_worker(
+            self.perf, dest, mode, self, replace_slot=self._target_slot
+        )
 
     def action_close(self) -> None:
         self.dismiss(None)
@@ -2060,7 +2218,13 @@ class KwsedApp(App[None]):
 
     @work(thread=True)
     def _copy_perf_write_worker(
-        self, perf: Any, destination: Any, mode: str, screen: Any
+        self,
+        perf: Any,
+        destination: Any,
+        mode: str,
+        screen: Any,
+        *,
+        replace_slot: Optional[int] = None,
     ) -> None:
         failure: BaseException | None = None
         payload: Any = None
@@ -2083,10 +2247,15 @@ class KwsedApp(App[None]):
                         dest_scope,
                         [perf],
                         mode=mode,
+                        replace_slot=replace_slot,
                         destination_bank=destination,
                     )
                     if not built.plan.allocations:
                         raise RuntimeError("no performance slot allocated")
+                    if built.plan.rejected:
+                        raise RuntimeError(
+                            "copy does not fit: " + "; ".join(built.plan.rejected)
+                        )
                     from kws import backup as _backup
 
                     where = getattr(self, "_backup_dir", None) or _backup.default_dir()
@@ -5421,6 +5590,9 @@ Two tables and a detail pane. Left: the banks, each listed once per kind --
 once for its 50 performances, once for its 35 patches (`p` hides the patch
 rows). Right: that bank-and-kind's slots. The third pane on the right
 repeats the `d` report for the current selection; `D` hides it.
+
+Shortcuts: I import · y copy performance · d dependencies · D dependency
+pane · z undo · w write gate · ? this help.
 
   RAM 1-3   writable; somebody's own work lives here.
   ROM 4-11  read-only.

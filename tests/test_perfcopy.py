@@ -62,6 +62,14 @@ class TestIsEmptyPerformance:
         rec = make_performance("Real", ((0, 0),))
         assert not perfcopy.is_empty_performance(rec)
 
+    def test_factory_init_is_empty(self):
+        rec = make_performance("Init", ((0, 0),))
+        assert perfcopy.is_empty_performance(rec)
+
+    def test_init_named_real_part_is_not_empty(self):
+        rec = make_performance("Init", ((0, 5),))
+        assert not perfcopy.is_empty_performance(rec)
+
 
 class TestCrossBankLocalization:
     def test_cross_bank(self):

@@ -50,14 +50,19 @@ __all__ = [
 
 
 def is_empty_performance(record: Sequence[int]) -> bool:
-    """True when a performance slot is an unused/init placeholder."""
+    """True when a performance slot is an unused/init placeholder.
+
+    The factory ``Init`` performance is not all zeroes: it has a common
+    block and one part switched on at bank 0 / patch 0.  Treat that shape
+    as empty, so a bank of INIT slots is seen as available.  A non-init
+    name, or an init-named slot that points anywhere else, is real work
+    and is not overwritten.
+    """
     parts = rec.performance_parts(record)
     if not any(p.used for p in parts):
         return True
     name = dumps.record_name(record).strip().lower()
-    if name not in ("", "init perf", "unnamed"):
-        return False
-    if bytes(record[16 : rec.PART_BASE]) != bytes(rec.PART_BASE - 16):
+    if name not in ("", "init", "init perf", "unnamed"):
         return False
     for part in parts:
         if part.used and (part.bank != 0 or part.patch != 0):
