@@ -355,3 +355,34 @@ async def test_multi_edit_stage_write(tmp_path: Path) -> None:
         assert written[0].parts[1].bank == ram3.sysex
         assert written[0].parts[0].performance == 0
         assert written[0].parts[1].performance == 1
+
+
+@pytest.mark.asyncio
+async def test_stage_with_an_unloaded_card_reports_instead_of_crashing(
+    tmp_path: Path,
+) -> None:
+    sets = _make_sets()
+    device = _RecordingDemo(str(tmp_path / "backups"))
+    app = KwsedApp(device, catalog=cat.Catalog([]))
+    screen = MultiEditScreen(
+        multisets=sets,
+        selected=0,
+        device=app.device,
+        backup_dir=str(tmp_path / "backups"),
+        sources={},
+        archive={},
+        physical={},
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.push_screen(screen)
+        await pilot.pause()
+        screen._desired_scopes[0] = "CARD/07"
+        screen._desired_scopes[1] = "CARD/13"
+        screen.action_stage()
+        await pilot.pause()
+        assert screen._staged_plan is None
+        from textual.widgets import Static
+
+        text = str(screen.query_one("#multi-edit-state", Static).content)
+        assert "not loaded" in text or "staging:" in text

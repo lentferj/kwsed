@@ -269,3 +269,35 @@ def test_rom_target_raises():
     desired: list[multistage.DesiredChannel] = []
     with pytest.raises(ValueError):
         multistage.plan_multi_staging(base_ms, desired, sources, target_banks=("ROM4",))
+
+
+def test_needs_staging_unloaded_card_true():
+    """A card bank that was never captured cannot be left pointed at."""
+    sources = {"RAM3": _src("RAM3")}
+    assert multistage.needs_staging(relations.PerfId("CARD/07", 0), sources) is True
+
+
+def test_needs_staging_unloaded_internal_false():
+    """An internal scope resolves through banks.bank() even without records."""
+    sources = {"RAM3": _src("RAM3")}
+    assert multistage.needs_staging(relations.PerfId("ROM6", 0), sources) is False
+
+
+def test_an_unloaded_card_channel_is_rejected_not_crashed():
+    """Before the fix this raised LookupError from banks.bank('CARD/07')."""
+    base = _make_base_multiset()
+    parts = list(base.parts)
+    parts[0] = dataclasses.replace(
+        parts[0], bank=banks.bank("CARD").sysex, performance=0
+    )
+    base = dataclasses.replace(base, parts=tuple(parts))
+    sources = {"RAM3": _src("RAM3")}
+    desired = [
+        multistage.DesiredChannel(channel=1, perf=relations.PerfId("CARD/07", 0))
+    ]
+    plan = multistage.plan_multi_staging(base, desired, sources, target_banks=("RAM3",))
+    assert plan.fits is False
+    assert plan.built_banks == {}
+    assert any("not loaded" in reason for reason in plan.rejected)
+    assert plan.updated_multiset.parts[0].bank == banks.bank("CARD").sysex
+    assert plan.updated_multiset.parts[0].performance == 0

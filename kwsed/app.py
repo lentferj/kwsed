@@ -764,27 +764,31 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
                     flag=getattr(part, "flag", 1),
                 )
             )
-        plan = _ms_mod.plan_multi_staging(
-            ms,
-            desired,
-            self._sources,
-            target_banks=("RAM3",),
-            mode="append",
-            resident_card_scope=self._resident_scope(),
-            stage_all_cards=True,
-        )
-        if not plan.fits:
-            plan2 = _ms_mod.plan_multi_staging(
+        try:
+            plan = _ms_mod.plan_multi_staging(
                 ms,
                 desired,
                 self._sources,
-                target_banks=("RAM1", "RAM2", "RAM3"),
+                target_banks=("RAM3",),
                 mode="append",
                 resident_card_scope=self._resident_scope(),
                 stage_all_cards=True,
             )
-            if plan2.fits:
-                plan = plan2
+            if not plan.fits:
+                plan2 = _ms_mod.plan_multi_staging(
+                    ms,
+                    desired,
+                    self._sources,
+                    target_banks=("RAM1", "RAM2", "RAM3"),
+                    mode="append",
+                    resident_card_scope=self._resident_scope(),
+                    stage_all_cards=True,
+                )
+                if plan2.fits:
+                    plan = plan2
+        except (LookupError, ValueError) as exc:
+            self._status(f"staging: {exc}", refused=True)
+            return
         if not plan.fits:
             reasons = "; ".join(plan.rejected) if plan.rejected else "does not fit"
             self._status(f"staging: {reasons}", refused=True)

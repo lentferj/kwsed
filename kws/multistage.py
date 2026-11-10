@@ -109,7 +109,7 @@ def needs_staging(
 
     source = sources.get(perf.scope_id)
     if source is None or perf.number >= len(source.performances):
-        return False
+        return _is_card_scope(perf.scope_id)
 
     scope = perf.scope_id
     if _is_card_scope(scope) and (stage_all_cards or scope != resident_card_scope):
@@ -212,7 +212,24 @@ def plan_multi_staging(  # noqa: C901
             ):
                 target_bank = banks.bank("CARD")
             else:
-                target_bank = banks.bank(perf.scope_id)
+                try:
+                    target_bank = banks.bank(perf.scope_id)
+                except LookupError:
+                    rejected.append(
+                        f"channel {channel}: could not keep "
+                        f"{perf.scope_id}:{perf.number:02d}: no such bank"
+                    )
+                    res = ChannelStageResult(
+                        channel=channel,
+                        source_perf=perf,
+                        staged=False,
+                        target_bank=None,
+                        target_perf_slot=perf.number,
+                        target_patch_slots=(),
+                    )
+                    results.append(res)
+                    result_by_channel[channel] = res
+                    continue
             res = ChannelStageResult(
                 channel=channel,
                 source_perf=perf,
