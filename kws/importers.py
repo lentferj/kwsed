@@ -479,7 +479,7 @@ def read_file(path: str) -> List[ImportedBank]:
                     bank_id=bank.scope,
                     performances=list(bank.performances),
                     patches=list(bank.patches),
-                    waveseq=None,
+                    waveseq=bank.waveseq,
                 ),
                 notes=bank.note,
             )
@@ -514,9 +514,9 @@ def describe_file(path: str) -> str:
             )
         lines.append("")
         lines.append(
-            "patch entries (158/242/410 bytes) and performance entries "
-            "(53..165 bytes) are decoded; wave sequences and multisets are "
-            "not converted"
+            "patch entries (158/242/410 bytes), performance entries "
+            "(53..165 bytes) and wave-sequence entries are decoded; "
+            "multiset entries are not converted"
         )
         return "\n".join(lines)
 

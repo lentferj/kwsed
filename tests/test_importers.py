@@ -22,9 +22,10 @@ import struct
 
 import pytest
 
-from kws import banks, deps, dumps, importers, multi
+from kws import banks, deps, dumps, importers, multi, records
 from kws import messages as m
 from kws import records as r
+from kws import sounddiver as sounddiver_mod
 from tests.test_bankbuild import make_patch, make_performance, make_waveseq
 
 
@@ -498,3 +499,161 @@ def test_lib_performance_decodes_used_parts_and_placeholders(tmp_path):
         at = 37 + part * 18
         assert decoded[at : at + 2] == raw[at : at + 2]
         assert not any(decoded[at + 2 : at + 18])
+
+
+def _lib_sequence_data(raw_bank: bytes, slot: int) -> bytes:
+    """Encode one raw sequence the way the LIB stores it (relative links)."""
+    header = bytearray(
+        raw_bank[records.SEQ_BASE + slot * 16 : records.SEQ_BASE + (slot + 1) * 16]
+    )
+    start = records.sequence_header(raw_bank, slot)["link"]
+    chain = []
+    step = start
+    seen = set()
+    while 0 < step < records.STEPS_PER_BANK and step not in seen:
+        seen.add(step)
+        content = raw_bank[
+            records.STEP_BASE + step * 16 : records.STEP_BASE + (step + 1) * 16
+        ]
+        chain.append(bytearray(content))
+        step = (content[0] << 8) | content[1]
+    data = bytearray(16 + 16 * len(chain))
+    data[:16] = header
+    data[0:2] = len(chain).to_bytes(2, "big")
+    for index, step_bytes in enumerate(chain):
+        forward = index + 1 if index + 1 < len(chain) else 0
+        back = index if index else 0
+        offset = 16 + index * 16
+        data[offset : offset + 16] = step_bytes
+        data[offset : offset + 2] = forward.to_bytes(2, "big")
+        data[offset + 2 : offset + 4] = back.to_bytes(2, "big")
+    return bytes(data)
+
+
+def test_lib_wave_sequences_are_assembled(tmp_path):
+    raw, starts = make_waveseq({0: [40, 41], 1: [50, 51, 52], 2: [60]})
+    path = tmp_path / "sequences.lib"
+    path.write_bytes(
+        _lib_file(
+            b"".join(
+                _lib_entry(
+                    slot,
+                    records.sequence_names(raw)[slot] or f"Seq{slot}",
+                    data=_lib_sequence_data(raw, slot),
+                    comment=f"RAM1-{slot:02d}",
+                )
+                for slot in range(3)
+            )
+        )
+    )
+    entries = sounddiver_mod.read_entries(str(path))
+    bank = sounddiver_mod.build_waveseq(entries, "RAM1")
+    assert bank is not None
+    assert records.sequence_names(bank)[:3] == records.sequence_names(raw)[:3]
+    for slot in range(3):
+        header = records.sequence_header(bank, slot)
+        step = header["link"]
+        chain = []
+        seen = set()
+        while 0 < step < records.STEPS_PER_BANK and step not in seen:
+            seen.add(step)
+            data = bank[
+                records.STEP_BASE + step * 16 : records.STEP_BASE + (step + 1) * 16
+            ]
+            chain.append(data[6:16])
+            step = (data[0] << 8) | data[1]
+        raw_start = starts[slot]
+        raw_chain = []
+        seen = set()
+        while 0 < raw_start < records.STEPS_PER_BANK and raw_start not in seen:
+            seen.add(raw_start)
+            data = raw[
+                records.STEP_BASE + raw_start * 16 : records.STEP_BASE
+                + (raw_start + 1) * 16
+            ]
+            raw_chain.append(data[6:16])
+            raw_start = (data[0] << 8) | data[1]
+        assert chain == raw_chain
+        assert header["loop_start"] == records.sequence_header(raw, slot)["loop_start"]
+        assert header["loop_end"] == records.sequence_header(raw, slot)["loop_end"]
+        assert header["loop_count"] == records.sequence_header(raw, slot)["loop_count"]
+
+
+def test_lib_wave_sequences_absent_for_a_scope(tmp_path):
+    raw, _ = make_waveseq({0: [40]})
+    path = tmp_path / "sequences.lib"
+    path.write_bytes(
+        _lib_file(
+            _lib_entry(
+                0,
+                records.sequence_names(raw)[0] or "Seq0",
+                data=_lib_sequence_data(raw, 0),
+                comment="RAM1-00",
+            )
+        )
+    )
+    entries = sounddiver_mod.read_entries(str(path))
+    assert sounddiver_mod.build_waveseq(entries, "RAM2") is None
+
+
+def test_lib_wave_sequence_step_budget_is_enforced():
+    entry = sounddiver_mod.LibEntry(
+        index=0,
+        name="Too Many",
+        location="",
+        comment="RAM1-00",
+        header=bytes(12),
+        data=bytes(16 + 16 * 16),
+        uses=b"",
+    )
+    entries = [
+        sounddiver_mod.LibEntry(
+            index=index,
+            name=entry.name,
+            location=entry.location,
+            comment=f"RAM1-{index:02d}",
+            header=entry.header,
+            data=entry.data,
+            uses=entry.uses,
+        )
+        for index in range(32)
+    ]
+    with pytest.raises(sounddiver_mod.SoundDiverError, match="budget"):
+        sounddiver_mod.build_waveseq(entries, "RAM1")
+
+
+def test_lib_patch_performance_and_sequence_end_to_end(tmp_path):
+    from tests.test_bankbuild import make_patch, make_performance, make_waveseq
+
+    raw_patch = make_patch("Kelp Forest", ((0, 0), (0, 40), (0, 40), (0, 40)))
+    raw_perf = make_performance("Glass Meridian", parts=((0, 0),))
+    raw_ws, _ = make_waveseq({0: [40, 41]})
+
+    path = tmp_path / "endtoend.lib"
+    path.write_bytes(
+        _lib_file(
+            _lib_entry(
+                0,
+                "Kelp Forest",
+                data=_lib_patch_data(raw_patch),
+                comment="RAM1-00",
+            )
+            + _lib_entry(
+                0,
+                "Glass Meridian",
+                data=_lib_performance_data(raw_perf, 1),
+                comment="RAM1-00",
+            )
+            + _lib_entry(
+                0,
+                records.sequence_names(raw_ws)[0] or "Seq0",
+                data=_lib_sequence_data(raw_ws, 0),
+                comment="RAM1-00",
+            )
+        )
+    )
+
+    out = importers.read_file(str(path))
+    assert len(out) == 1
+    assert out[0].source.waveseq is not None
+    assert len(out[0].source.waveseq) == records.WAVESEQ_BANK_SIZE

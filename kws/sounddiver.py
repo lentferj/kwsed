@@ -39,7 +39,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Dict, List, Tuple, cast
+from typing import Dict, List, Optional, Tuple, cast
 
 from kws import messages as m
 from kws import records as rec
@@ -52,6 +52,7 @@ __all__ = [
     "decode_performance",
     "read_banks",
     "read_entries",
+    "build_waveseq",
 ]
 
 #: raw oscillator byte -> position inside the 84-byte block in the LIB.
@@ -165,11 +166,12 @@ class SoundDiverError(ValueError):
 
 @dataclass(frozen=True)
 class LibBank:
-    """The decodable patches and performances of one bank."""
+    """The decodable patches, performances and wave sequences of one bank."""
 
     scope: str
     performances: List[bytes]
     patches: List[bytes]
+    waveseq: Optional[bytes]
     note: str
 
 
@@ -393,33 +395,80 @@ def _decode_banks(
     return patches, performances, duplicate_patches, duplicate_performances
 
 
+def _is_sequence_entry_data(data: bytes) -> bool:
+    return len(data) >= 32 and len(data) % 16 == 0
+
+
+def _decode_sequence_slots(
+    entries: List[LibEntry],
+) -> Tuple[Dict[str, Dict[int, LibEntry]], int]:
+    """Select the last wave-sequence entry per slot, per scope."""
+    sequence_slots: Dict[str, Dict[int, LibEntry]] = {}
+    duplicates = 0
+    for entry in entries:
+        match = _SLOT_COMMENT.match(entry.comment.strip())
+        if match is None:
+            continue
+        if not _is_sequence_entry_data(entry.data):
+            continue
+        scope = match.group(1)
+        slot = int(match.group(2))
+        if not 0 <= slot <= 31:
+            continue
+        slots = sequence_slots.setdefault(scope, {})
+        if slot in slots:
+            duplicates += 1
+        slots[slot] = entry
+    return sequence_slots, duplicates
+
+
 def read_banks(path: str) -> List[LibBank]:
-    """Decode a ``.LIB``'s patches and performances into per-bank lists."""
+    """Decode a ``.LIB``'s patches, performances and wave sequences."""
     entries = read_entries(path)
     patches, performances, dup_patches, dup_performances = _decode_banks(entries)
-    scopes = sorted(set(patches) | set(performances))
+
+    sequence_slots, dup_sequences = _decode_sequence_slots(entries)
+
+    seq_scopes = set(sequence_slots)
+    scopes = sorted(set(patches) | set(performances) | seq_scopes)
     if not scopes:
         raise SoundDiverError(
-            "no decodable Wavestation patches or performances in this .LIB"
+            "no decodable Wavestation patches, performances or wave sequences "
+            "in this .LIB"
         )
     patch_count = sum(len(slots) for slots in patches.values())
     performance_count = sum(len(slots) for slots in performances.values())
+    seq_count = sum(len(slots) for slots in sequence_slots.values())
+    seq_steps = sum(
+        (len(entry.data) - 16) // 16
+        for slots in sequence_slots.values()
+        for entry in slots.values()
+    )
     recognised = set(_PATCH_OSCILLATORS) | set(_PERFORMANCE_PARTS)
     other = sum(
-        1 for entry in entries if entry.data and len(entry.data) not in recognised
+        1
+        for entry in entries
+        if entry.data
+        and len(entry.data) not in recognised
+        and not _is_sequence_entry_data(entry.data)
     )
     notes: List[str] = [
         f"{patch_count} patch{'' if patch_count == 1 else 'es'} and "
         f"{performance_count} performance"
         f"{'' if performance_count == 1 else 's'} decoded"
     ]
-    duplicates = dup_patches + dup_performances
+    if seq_count:
+        notes.append(
+            f"{seq_count} wave sequence{'s' if seq_count != 1 else ''} "
+            f"({seq_steps} step{'s' if seq_steps != 1 else ''})"
+        )
+    duplicates = dup_patches + dup_performances + dup_sequences
     if duplicates:
         notes.append(f"{duplicates} duplicate slot(s) kept the last entry")
     if other:
         notes.append(
             f"{other} other entr{'y' if other == 1 else 'ies'} "
-            "(wave sequences, multisets, ...) not converted"
+            "(multisets, ...) not converted"
         )
     note = "; ".join(notes)
     result: List[LibBank] = []
@@ -437,7 +486,77 @@ def read_banks(path: str) -> List[LibBank]:
                     patch_slots.get(number, bytes(rec.PATCH_SIZE))
                     for number in range(35)
                 ],
+                waveseq=build_waveseq(entries, scope),
                 note=note,
             )
         )
     return result
+
+
+def _decode_sequence_header(entry: LibEntry) -> Tuple[bytes, List[bytes]]:
+    """Split a wave-sequence entry into its 16-byte header and steps."""
+    data = entry.data
+    n = (len(data) - 16) // 16
+    if len(data) != 16 + 16 * n or n < 1:
+        raise SoundDiverError(
+            "a SoundDiver wave-sequence entry carries 16 + 16*n bytes; "
+            f"this one has {len(data)}"
+        )
+    header = data[:16]
+    steps = [data[16 + i * 16 : 16 + (i + 1) * 16] for i in range(n)]
+    return header, steps
+
+
+def build_waveseq(entries: List[LibEntry], scope: str = "RAM1") -> Optional[bytes]:
+    """Assemble a wave-sequence bank from ``.LIB`` entries."""
+    pattern = re.compile(rf"^{re.escape(scope)}-(\d{{1,2}})$")
+    selected: Dict[int, LibEntry] = {}
+    for entry in entries:
+        match = pattern.match(entry.comment.strip())
+        if match is None:
+            continue
+        if len(entry.data) < 32 or len(entry.data) % 16 != 0:
+            continue
+        slot = int(match.group(1))
+        if not 0 <= slot <= 31:
+            continue
+        # keep the last entry per slot
+        selected[slot] = entry
+
+    if not selected:
+        return None
+
+    bank = bytearray(rec.WAVESEQ_BANK_SIZE)
+    cursor = 1
+    for slot in sorted(selected):
+        entry = selected[slot]
+        header, steps = _decode_sequence_header(entry)
+        n = len(steps)
+        if cursor + n > rec.STEPS_PER_BANK:
+            raise SoundDiverError(
+                "wave-sequence step budget exceeded: "
+                f"need {cursor + n}, have {rec.STEPS_PER_BANK}"
+            )
+        b = cursor
+        # header
+        at_header = rec.SEQ_BASE + slot * rec.SEQ_SIZE
+        rec._put_u16(bank, at_header, b)
+        rec._put_u16(bank, at_header + 2, b)
+        bank[at_header + 4 : at_header + 16] = header[4:16]
+
+        for i, step_bytes in enumerate(steps):
+            f = (step_bytes[0] << 8) | step_bytes[1]
+            bb = (step_bytes[2] << 8) | step_bytes[3]
+            bank_step_pos = rec.STEP_BASE + (b + i) * rec.STEP_SIZE
+            rec._put_u16(bank, bank_step_pos, b + f if f else 0)
+            rec._put_u16(bank, bank_step_pos + 2, b + bb - 1 if bb else 0)
+            bank[bank_step_pos + 4 : bank_step_pos + 6] = step_bytes[4:6]
+            bank[bank_step_pos + 6 : bank_step_pos + 16] = step_bytes[6:16]
+        at_name = rec.SEQNAME_BASE + slot * rec.SEQNAME_SIZE
+        bank[at_name : at_name + rec.SEQNAME_SIZE] = bytes(
+            m.encode_name(entry.name, length=8)
+        )
+
+        cursor += n
+
+    return bytes(bank)
