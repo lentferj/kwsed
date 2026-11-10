@@ -271,6 +271,7 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
         Binding("plus", "nudge(1)", "Nudge +", show=False),
         Binding("minus", "nudge(-1)", "Nudge -", show=False),
         Binding("b", "bank", "Bank", show=False),
+        Binding("s", "stage", "Stage to RAM", show=False),
         Binding("n", "rename", "Rename", show=False),
     ]
 
@@ -284,6 +285,10 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
         backup_dir: Optional[str] = None,
         catalog: Any = None,
         name_for: Optional[Callable[[Any], str]] = None,
+        sources: Optional[Dict[str, Any]] = None,
+        archive: Optional[Dict[int, Any]] = None,
+        physical: Optional[Dict[str, Any]] = None,
+        resident_scope: Optional[str] = None,
     ) -> None:
         super().__init__()
         # A copy: the original list and its entries are not mutated.
@@ -296,6 +301,12 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
         self._backup_dir = backup_dir
         self._catalog = catalog
         self._name_for = name_for
+        self._sources: Dict[str, Any] = dict(sources) if sources else {}
+        self._archive: Dict[int, Any] = dict(archive) if archive else {}
+        self._physical: Dict[str, Any] = dict(physical) if physical else {}
+        self._resident_card_scope: Optional[str] = resident_scope
+        self._desired_scopes: Dict[int, str] = {}
+        self._staged_plan: Optional[Any] = None
         self._armed = False
         self._table: Optional[DataTable[Any]] = None
 
@@ -331,12 +342,95 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
                 return ""
         return ""
 
+    def _resident_scope(self) -> Optional[str]:
+        return self._resident_card_scope
+
+    def _scope_label(self, scope: str) -> str:
+        if scope == "CARD":
+            return "Card"
+        if scope.startswith("CARD/"):
+            suffix = scope[len("CARD/") :]
+            return f"Card {suffix}"
+        return scope
+
+    def _scope_name(self, scope: str, number: int) -> str:
+        if scope == "CARD":
+            return ""
+        if not scope.startswith("CARD/"):
+            return ""
+        suffix = scope[len("CARD/") :]
+        if suffix.lower().startswith("c"):
+            key = suffix.lower()
+            phys = self._physical.get(key)
+            if phys is None:
+                return ""
+            try:
+                return str(phys.performances.get(number, ""))
+            except Exception:
+                return ""
+        try:
+            bank_num = int(suffix)
+        except ValueError:
+            return ""
+        arch = self._archive.get(bank_num)
+        if arch is None:
+            return ""
+        try:
+            return str(arch.performances.get(number, ""))
+        except Exception:
+            return ""
+
+    def _parse_card_scope(self, suffix: str) -> Optional[str]:
+        if suffix.lower().startswith("c"):
+            digits = suffix[1:].strip()
+            try:
+                n = int(digits)
+                return f"CARD/c{n}"
+            except ValueError:
+                if digits:
+                    return f"CARD/c{digits.lower()}"
+                return None
+        try:
+            n = int(suffix)
+        except ValueError:
+            return None
+        return f"CARD/{n:02d}"
+
+    def _parse_scope(self, text: str) -> Optional[str]:
+        raw = text.strip()
+        if not raw:
+            return None
+        upper = raw.upper()
+        if upper in ("CARD", "C"):
+            return "CARD"
+        if upper.startswith("CARD/"):
+            return self._parse_card_scope(raw[len("CARD/") :].strip())
+        try:
+            from kws import banks as _banks
+
+            b = _banks.bank(raw)
+            return b.id
+        except Exception:  # noqa: S110
+            pass
+        try:
+            n = int(raw)
+        except ValueError:
+            return None
+        try:
+            from kws import banks as _banks
+
+            if 0 <= n <= 11:
+                return _banks.bank(n).id
+        except Exception:
+            return None
+        return None
+
     def compose(self) -> ComposeResult:
         with Vertical():
             yield Label(self._title(), id="multi-edit-title")
             yield Static(
                 "⏎ edits the cell · + / - nudge · space on/off · "
-                "n rename · a arm, w write · esc cancels",
+                "b bank · s stage · n rename · a arm, w write · esc cancels",
                 classes="hint",
             )
             table: DataTable[Any] = DataTable(id="multi-edit-table", cursor_type="cell")
@@ -386,8 +480,13 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
         if part is None:
             return (f"{i + 1:02d}", "--", "", "--", "--")
         if getattr(part, "used", False):
-            perf = f"{_bank_label(part.bank)} {part.performance:02d}"
-            name = self._name_for_part(part)
+            scope = self._desired_scopes.get(i)
+            if scope is not None and str(scope).startswith("CARD"):
+                perf = f"{self._scope_label(scope)} {part.performance:02d}"
+                name = self._scope_name(scope, part.performance)
+            else:
+                perf = f"{_bank_label(part.bank)} {part.performance:02d}"
+                name = self._name_for_part(part)
             used = "used"
         else:
             perf = "--"
@@ -444,6 +543,7 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
         parts[index] = new_part
         new_ms = _replace(ms, parts=tuple(parts))
         self._multisets_copy[self._selected] = new_ms
+        self._staged_plan = None
         self._rebuild_row(index)
         self._rebuild_title()
 
@@ -561,14 +661,23 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
             raw = text.strip()
             if not raw:
                 return
-            bank_sysex = self._parse_bank(raw)
-            if bank_sysex is None:
+            scope = self._parse_scope(raw)
+            if scope is None:
                 self._status(f"bank must be 0-11 or CARD/C, not {text!r}")
                 return
             from dataclasses import replace as _replace
+            from kws import banks as _banks
 
+            if scope.startswith("CARD"):
+                bank_sysex = _banks.bank("CARD").sysex
+                self._desired_scopes[idx] = scope
+            else:
+                bank_sysex = _banks.bank(scope).sysex
+                self._desired_scopes.pop(idx, None)
             new_part = _replace(part, bank=bank_sysex)
             self._set_part(idx, new_part)
+            self._staged_plan = None
+            self._status(f"bank set to {scope}")
 
         self.app.push_screen(
             PromptScreen(
@@ -629,9 +738,98 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
 
     # --- arm / write ------------------------------------------------------
 
+    def action_stage(self) -> None:
+        from kws import banks as _banks
+        from kws import multistage as _ms_mod
+        from kws import relations as _rels
+
+        ms = self._ms()
+        desired: List[Any] = []
+        for i, part in enumerate(list(ms.parts)[:16]):
+            if not getattr(part, "used", False):
+                perf = None
+            else:
+                scope = self._desired_scopes.get(i)
+                if scope is None:
+                    try:
+                        scope = _banks.by_sysex(part.bank).id
+                    except LookupError:
+                        scope = None
+                perf = None if scope is None else _rels.PerfId(scope, part.performance)
+            desired.append(
+                _ms_mod.DesiredChannel(
+                    channel=i + 1,
+                    perf=perf,
+                    level=getattr(part, "level", 127),
+                    flag=getattr(part, "flag", 1),
+                )
+            )
+        plan = _ms_mod.plan_multi_staging(
+            ms,
+            desired,
+            self._sources,
+            target_banks=("RAM3",),
+            mode="append",
+            resident_card_scope=self._resident_scope(),
+            stage_all_cards=True,
+        )
+        if not plan.fits:
+            plan2 = _ms_mod.plan_multi_staging(
+                ms,
+                desired,
+                self._sources,
+                target_banks=("RAM1", "RAM2", "RAM3"),
+                mode="append",
+                resident_card_scope=self._resident_scope(),
+                stage_all_cards=True,
+            )
+            if plan2.fits:
+                plan = plan2
+        if not plan.fits:
+            reasons = "; ".join(plan.rejected) if plan.rejected else "does not fit"
+            self._status(f"staging: {reasons}", refused=True)
+            return
+        self._staged_plan = plan
+        self._multisets_copy[self._selected] = plan.updated_multiset
+        self._populate()
+        self._status(self._stage_summary(plan))
+
+    def _stage_summary(self, plan: Any) -> str:
+        n = sum(1 for c in plan.channels if getattr(c, "staged", False))
+        if n == 0:
+            return "nothing to stage; press a then w to write"
+        banks_labels = sorted(
+            {
+                str(c.target_bank.label)
+                for c in plan.channels
+                if getattr(c, "staged", False) and c.target_bank is not None
+            }
+        )
+        banks_text = ", ".join(banks_labels)
+        slots: List[int] = []
+        for c in plan.channels:
+            if getattr(c, "staged", False):
+                slots.extend(list(getattr(c, "target_patch_slots", ()) or ()))
+        if slots:
+            lo = min(slots)
+            hi = max(slots)
+            return (
+                f"staged {n} card perf(s) into {banks_text} "
+                f"(patches {lo:02d}..{hi:02d}); press a then w to write"
+            )
+        return f"staged {n} card perf(s) into {banks_text}; press a then w to write"
+
     def action_arm(self) -> None:
+        if (
+            any(i in self._desired_scopes for i in range(16))
+            and self._staged_plan is None
+        ):
+            self.action_stage()
         self._armed = True
-        self._status("[b]ARMED[/b] - w writes the Multi Mode Setup. Nothing sent yet.")
+        self._status(
+            "ARMED - w writes the staged bank(s) and the Multi Mode Setup. "
+            "Nothing sent yet."
+        )
 
     def action_fire(self) -> None:  # noqa: C901
         if not self._armed:
@@ -655,9 +853,18 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
                         return
                 except Exception:  # noqa: S110
                     pass
-            app._multi_edit_write_worker(
-                list(self._multisets_copy), self._device, self._backup_dir, self
-            )
+            if self._staged_plan is not None:
+                app._multi_edit_write_worker(
+                    list(self._multisets_copy),
+                    self._device,
+                    self._backup_dir,
+                    self,
+                    self._staged_plan,
+                )
+            else:
+                app._multi_edit_write_worker(
+                    list(self._multisets_copy), self._device, self._backup_dir, self
+                )
             return
         # Fallback (no app): direct, for unit contexts.
         from kws import multi as multi_mod
@@ -707,9 +914,6 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
     def _write_succeeded(self, result: Any) -> None:
         try:
             app = self.app
-            if hasattr(app, "_record_write"):
-                payload = result if isinstance(result, dict) else {"backup": None}
-                app._record_write(payload)
             if hasattr(app, "_multi_sets"):
                 app._multi_sets = list(self._multisets_copy)
             if hasattr(app, "_multisets"):
@@ -4476,79 +4680,203 @@ class KwsedApp(App[None]):
                 device=self.device,
                 backup_dir=None,
                 catalog=getattr(self, "catalog", None),
+                sources=getattr(self, "_sources", None),
+                archive=getattr(self, "_archive", None),
+                physical=getattr(self, "_physical", None),
             )
         )
 
     @work(thread=True)
-    def _multi_edit_write_worker(  # noqa: C901
+    def _multi_edit_write_worker(
+        self,
+        multisets: Sequence[Any],
+        device: Any,
+        backup_dir: Optional[str],
+        screen: Any,
+        staged: Optional[Any] = None,
+    ) -> None:
+        """**MIDI only** -- state, undo and the screen update on the main thread."""
+        if staged is None:
+            self._multi_write_plain(multisets, device, backup_dir, screen)
+        else:
+            self._multi_write_staged(multisets, device, backup_dir, screen, staged)
+
+    def _multi_where(self, backup_dir: Optional[str]) -> str:
+        from kws import backup as _backup
+
+        return backup_dir if backup_dir is not None else _backup.default_dir()
+
+    def _multi_release(self) -> None:
+        try:
+            self._exchange.release()
+        except RuntimeError:
+            pass
+
+    def _multi_report_failure(self, screen: Any, failure: Any) -> None:
+        text = str(failure)
+        self.call_from_thread(self.notify_status, f"multi write: {text}", refused=True)
+        try:
+            self.call_from_thread(screen._write_failed, text)
+        except Exception:  # noqa: S110
+            pass
+
+    def _multi_write_plain(
         self,
         multisets: Sequence[Any],
         device: Any,
         backup_dir: Optional[str],
         screen: Any,
     ) -> None:
-        failure: BaseException | None = None
+        from kws import multi as multi_mod
+
         result: Any = None
         try:
-            from kws import multi as multi_mod
-
             encoded = multi_mod.encode(multisets)
             with self._busy_gate, self._lock:
-                kwargs: Dict[str, Any] = {}
-                if backup_dir is not None:
-                    kwargs["backup_dir"] = backup_dir
-                else:
-                    try:
-                        from kws import backup as _backup
-
-                        kwargs["backup_dir"] = _backup.default_dir()
-                    except Exception:  # noqa: S110
-                        pass
-                kwargs["verify"] = True
-                result = device.write_multi(encoded, **kwargs)
+                result = device.write_multi(
+                    encoded, backup_dir=self._multi_where(backup_dir), verify=True
+                )
         except BaseException as exc:
-            failure = exc
-        finally:
-            try:
-                self._exchange.release()
-            except RuntimeError:
-                pass
-        if failure is not None:
-            self.call_from_thread(
-                self.notify_status, f"multi write: {failure}", refused=True
-            )
-            try:
-                self.call_from_thread(screen._write_failed, str(failure))
-            except Exception:  # noqa: S110
-                pass
+            self._multi_release()
+            self._multi_report_failure(screen, exc)
             return
-        verified = result.get("verified") if isinstance(result, dict) else None
-        if verified is not True:
+        self._multi_release()
+        if not isinstance(result, dict) or result.get("verified") is not True:
             mismatch = (
                 result.get("mismatch")
                 if isinstance(result, dict) and result.get("mismatch") is not None
                 else "the read-back did not confirm the write"
             )
-            mismatch_text = str(mismatch)
-            self.call_from_thread(
-                self.notify_status, f"multi write: {mismatch_text}", refused=True
-            )
-            try:
-                self.call_from_thread(screen._write_failed, mismatch_text)
-            except Exception:  # noqa: S110
-                pass
+            self._multi_report_failure(screen, mismatch)
             return
+        self.call_from_thread(self._multi_plain_finish, multisets, result, screen)
+
+    def _multi_plain_finish(
+        self, multisets: Sequence[Any], result: Any, screen: Any
+    ) -> None:
+        """Main thread: remember the written setup and its one undo step."""
         try:
             if hasattr(self, "_record_write"):
-                payload = result if isinstance(result, dict) else {"backup": None}
-                self._record_write(payload)
-            if hasattr(self, "_multi_sets"):
-                self._multi_sets = list(multisets)
-                self._multisets = list(multisets)
+                self._record_write(result)
+            self._multi_sets = list(multisets)
+            self._multisets = list(multisets)
         except Exception:  # noqa: S110
             pass
         try:
-            self.call_from_thread(screen._write_succeeded, result)
+            screen._write_succeeded(result)
+        except Exception:  # noqa: S110
+            pass
+
+    def _multi_write_staged(
+        self,
+        multisets: Sequence[Any],
+        device: Any,
+        backup_dir: Optional[str],
+        screen: Any,
+        staged: Any,
+    ) -> None:
+        composite: Any = None
+        try:
+            with self._busy_gate, self._lock:
+                composite = self._multi_stage_write(
+                    multisets, device, self._multi_where(backup_dir), staged
+                )
+        except BaseException as exc:
+            self._multi_release()
+            self._multi_report_failure(screen, exc)
+            return
+        self._multi_release()
+        self.call_from_thread(
+            self._multi_staged_finish, multisets, staged, composite, screen
+        )
+
+    def _multi_stage_write(
+        self,
+        multisets: Sequence[Any],
+        device: Any,
+        where: str,
+        staged: Any,
+    ) -> Dict[str, Any]:
+        """Write every staged bank, then the remapped Multi Mode Setup."""
+        from kws import banks as _banks
+        from kws import multi as multi_mod
+
+        backups: List[Any] = []
+        for bank_id, built in staged.built_banks.items():
+            dest = _banks.bank(bank_id)
+            result = device.write_bank_bundle(
+                dest.number,
+                performances=built.performances,
+                patches=built.patches,
+                waveseq=built.waveseq,
+                backup_dir=where,
+            )
+            if not isinstance(result, dict) or result.get("verified") is not True:
+                mismatch = (
+                    result.get("mismatch")
+                    if isinstance(result, dict) and result.get("mismatch") is not None
+                    else "the read-back did not confirm the write"
+                )
+                raise RuntimeError(f"{dest.label}: {mismatch}")
+            backups.append(result.get("backup"))
+        multi_result = device.write_multi(
+            multi_mod.encode(multisets), backup_dir=where, verify=True
+        )
+        if (
+            not isinstance(multi_result, dict)
+            or multi_result.get("verified") is not True
+        ):
+            mismatch = (
+                multi_result.get("mismatch")
+                if isinstance(multi_result, dict)
+                and multi_result.get("mismatch") is not None
+                else "the read-back did not confirm the write"
+            )
+            raise RuntimeError(f"multi: {mismatch}")
+        return {
+            "backups": [path for path in backups if path],
+            "multi": multi_result.get("backup"),
+            "verified": True,
+            "bank": sorted(staged.built_banks.keys()),
+            "kind": "composite",
+        }
+
+    def _multi_staged_finish(
+        self,
+        multisets: Sequence[Any],
+        staged: Any,
+        composite: Any,
+        screen: Any,
+    ) -> None:
+        """Main thread: merge the staged banks, record ONE undo step, dismiss."""
+        from kws import deps as _deps
+        from kws import records as _rec
+
+        for bank_id, built in staged.built_banks.items():
+            perfs = [
+                built.performances[
+                    i * _rec.PERFORMANCE_SIZE : (i + 1) * _rec.PERFORMANCE_SIZE
+                ]
+                for i in range(len(built.performances) // _rec.PERFORMANCE_SIZE)
+            ]
+            patches = [
+                built.patches[i * _rec.PATCH_SIZE : (i + 1) * _rec.PATCH_SIZE]
+                for i in range(len(built.patches) // _rec.PATCH_SIZE)
+            ]
+            self._sources[bank_id] = _deps.Source(
+                bank_id=bank_id,
+                performances=perfs,
+                patches=patches,
+                waveseq=built.waveseq,
+            )
+        self._multi_sets = list(multisets)
+        self._multisets = list(multisets)
+        if hasattr(self, "_record_write"):
+            self._record_write(composite)
+        if hasattr(self, "_after_multi_write"):
+            self._after_multi_write()
+        try:
+            screen._write_succeeded(composite)
         except Exception:  # noqa: S110
             pass
 
