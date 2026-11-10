@@ -657,3 +657,80 @@ def test_lib_patch_performance_and_sequence_end_to_end(tmp_path):
     assert len(out) == 1
     assert out[0].source.waveseq is not None
     assert len(out[0].source.waveseq) == records.WAVESEQ_BANK_SIZE
+
+
+def _disk_bank_bytes(name: str = "Glass Meridian") -> bytes:
+    ws, _ = make_waveseq({0: [40, 41]})
+    perf_rows = b"".join(
+        [make_performance(name, ((0, 0),))] + [bytes(r.PERFORMANCE_SIZE)] * 49
+    )
+    patch_rows = b"".join(
+        make_patch("Kelp Forest") for _ in range(banks.PATCHES_PER_BANK)
+    )
+    return (
+        m.frame_bulk(m.Function.ALL_PERFORMANCE_DUMP, 0, perf_rows)
+        + m.frame_bulk(m.Function.ALL_PATCH_DUMP, 0, patch_rows)
+        + m.frame_bulk(m.Function.ALL_WAVESEQ_DUMP, 0, ws)
+    )
+
+
+def test_fat12_image_bank_is_imported(tmp_path):
+    from tests.test_fat12 import make_fat12_image
+
+    path = tmp_path / "disk.img"
+    path.write_bytes(
+        make_fat12_image({"TEST.SYX": _disk_bank_bytes(), "README.TXT": b"hi"})
+    )
+
+    out = importers.read_file(str(path))
+    assert len(out) == 1
+    assert out[0].format == "img"
+    assert out[0].scope == "RAM1"
+    assert out[0].label == "disk.img / TEST.SYX [RAM1]"
+    assert len(out[0].source.performances) == 50
+    assert len(out[0].source.patches) == 35
+    assert out[0].source.waveseq is not None
+
+
+def test_zip_reads_images_and_direct_sysex_and_skips_flux(tmp_path):
+    import zipfile
+
+    from tests.test_fat12 import make_fat12_image
+
+    path = tmp_path / "set.zip"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("disk.img", make_fat12_image({"TEST.SYX": _disk_bank_bytes()}))
+        archive.writestr("direct.syx", _disk_bank_bytes("Amber Drift"))
+        archive.writestr("flux.7z", b"7z\xbc\xaf\x27\x1c not real flux")
+        archive.writestr("notes.txt", b"ignore")
+
+    out = importers.read_file(str(path))
+    labels = {bank.label for bank in out}
+    assert "set.zip / disk.img / TEST.SYX [RAM1]" in labels
+    assert "set.zip / direct.syx [RAM1]" in labels
+    assert len(out) == 2
+
+
+def test_bnk_bundle_with_a_prefix_is_read_as_sysex(tmp_path):
+    path = tmp_path / "bank.bnk"
+    path.write_bytes(b"FR" + _disk_bank_bytes())
+    out = importers.read_file(str(path))
+    assert len(out) == 1
+    assert out[0].scope == "RAM1"
+    assert m.decode_name(out[0].source.performances[0]) == "Glass Meridian"
+
+
+def test_flux_archive_is_refused(tmp_path):
+    path = tmp_path / "flux.7z"
+    path.write_bytes(b"7z\xbc\xaf\x27\x1c0000")
+    with pytest.raises(importers.UnsupportedFormat, match="flux"):
+        importers.read_file(str(path))
+
+
+def test_fat12_image_without_banks_is_refused(tmp_path):
+    from tests.test_fat12 import make_fat12_image
+
+    path = tmp_path / "empty.img"
+    path.write_bytes(make_fat12_image({"README.TXT": b"nothing"}))
+    with pytest.raises(importers.UnsupportedFormat, match="no Wavestation"):
+        importers.read_file(str(path))

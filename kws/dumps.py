@@ -57,6 +57,7 @@ __all__ = [
     "parse_patch",
     "record_name",
     "read_syx_file",
+    "read_syx_data",
 ]
 
 #: Bytes per performance in a bank dump.
@@ -203,25 +204,30 @@ def parse_patch(packet: m.Packet) -> bytes:
     return data[:PATCH_RECORD]
 
 
-def read_syx_file(path: str) -> List[m.Packet]:
-    """Every Wavestation message in a ``.syx`` file, in order.
+def read_syx_data(data: bytes) -> List[m.Packet]:
+    """Every Wavestation message in a SysEx byte stream, in order.
 
     Foreign messages are skipped rather than raising: a file somebody
     assembled may carry other devices' data.
     """
-    with open(path, "rb") as handle:
-        raw = handle.read()
     out: List[m.Packet] = []
     cursor = 0
     while True:
-        start = raw.find(b"\xf0", cursor)
+        start = data.find(b"\xf0", cursor)
         if start < 0:
             break
-        end = raw.find(b"\xf7", start)
+        end = data.find(b"\xf7", start)
         if end < 0:
             break
-        packet = m.parse(raw[start : end + 1])
+        packet = m.parse(data[start : end + 1])
         if packet is not None:
             out.append(packet)
         cursor = end + 1
     return out
+
+
+def read_syx_file(path: str) -> List[m.Packet]:
+    """Every Wavestation message in a ``.syx`` file, in order."""
+    with open(path, "rb") as handle:
+        raw = handle.read()
+    return read_syx_data(raw)

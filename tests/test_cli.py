@@ -1606,6 +1606,37 @@ class TestImportCommand:
         assert m.decode_name(loaded.performances[0]) == "Kelp Forest"
         assert "CARD/07" in capsys.readouterr().out
 
+    def test_label_selects_one_bank_from_a_zip(self, tmp_path, capsys):
+        import zipfile
+
+        from kws import bankstore
+        from tests.test_importers import _disk_bank_bytes
+
+        path = tmp_path / "set.zip"
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("a.syx", _disk_bank_bytes("Glass Meridian"))
+            archive.writestr("b.syx", _disk_bank_bytes("Amber Drift"))
+
+        assert cli._cmd_import(None, self._args(path, "--list")) == 0
+        listed = capsys.readouterr().out
+        assert "set.zip / a.syx [RAM1]" in listed
+        assert "set.zip / b.syx [RAM1]" in listed
+
+        cache = str(tmp_path / "banks")
+        args = self._args(
+            path,
+            "--label",
+            "set.zip / b.syx [RAM1]",
+            "--as",
+            "RAM1",
+            "--bankstore",
+            cache,
+        )
+        assert cli._cmd_import(None, args) == 0
+        loaded = bankstore.load("RAM1", cache)
+        assert loaded is not None
+        assert m.decode_name(loaded.performances[0]) == "Amber Drift"
+
     def test_a_patch_lib_imports_into_the_cache(self, tmp_path, capsys):
         from kws import bankstore
         from tests.test_bankbuild import make_patch

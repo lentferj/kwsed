@@ -22,11 +22,13 @@ regardless of how it was carried.
 
 from __future__ import annotations
 
+import io
 import os
+import zipfile
 from dataclasses import dataclass
 from typing import Any, List, Optional, Tuple
 
-from kws import banks, deps, dumps, multi
+from kws import banks, deps, dumps, fat12, multi
 from kws import messages as m
 from kws import records as rec
 
@@ -35,6 +37,8 @@ __all__ = [
     "UnsupportedFormat",
     "read_file",
     "describe_file",
+    "read_midi_data",
+    "read_midi_file",
 ]
 
 
@@ -73,10 +77,8 @@ def _read_vlq(data: bytes, index: int) -> Tuple[int, int]:
     return value, index
 
 
-def read_midi_file(path: str) -> List[m.Packet]:
-    """Extract Wavestation SysEx messages from a Standard MIDI File."""
-    with open(path, "rb") as handle:
-        raw = handle.read()
+def read_midi_data(raw: bytes) -> List[m.Packet]:
+    """Extract Wavestation SysEx messages from Standard MIDI File bytes."""
     if not raw.startswith(b"MThd"):
         raise UnsupportedFormat("not a Standard MIDI File (no MThd header)")
     if len(raw) < 14:
@@ -99,6 +101,13 @@ def read_midi_file(path: str) -> List[m.Packet]:
         pos = trk_end
         _parse_track(track, out)
     return out
+
+
+def read_midi_file(path: str) -> List[m.Packet]:
+    """Extract Wavestation SysEx messages from a Standard MIDI File."""
+    with open(path, "rb") as handle:
+        raw = handle.read()
+    return read_midi_data(raw)
 
 
 def _parse_track(track: bytes, out: List[m.Packet]) -> None:
@@ -426,6 +435,122 @@ def _assemble(packets: List[m.Packet], path: str, fmt: str) -> List[ImportedBank
     return result
 
 
+def _relabel_disk_banks(
+    banks_list: List[ImportedBank], label: str, name: str
+) -> List[ImportedBank]:
+    out: List[ImportedBank] = []
+    for bank in banks_list:
+        out.append(
+            ImportedBank(
+                label=f"{label} / {name} [{bank.scope}]",
+                scope=bank.scope,
+                format="img",
+                source=bank.source,
+                multisets=bank.multisets,
+                notes=bank.notes,
+            )
+        )
+    return out
+
+
+def _read_disk_bytes(data: bytes, label: str) -> List[ImportedBank]:
+    if not fat12.is_fat12(data):
+        raise UnsupportedFormat("not a FAT12 floppy image")
+    files = fat12.read_files(data)
+    result: List[ImportedBank] = []
+    for name in sorted(files):
+        content = files[name]
+        ext = os.path.splitext(name)[1].lower()
+        packets: Optional[List[m.Packet]] = None
+        stream_fmt = "sysex"
+        if ext in (".syx", ".sysex", ".bnk"):
+            packets = dumps.read_syx_data(content)
+        elif ext in (".mid", ".midi"):
+            try:
+                packets = read_midi_data(content)
+            except UnsupportedFormat:
+                packets = None
+            stream_fmt = "midi"
+        elif b"\xf0\x42" in content:
+            packets = dumps.read_syx_data(content)
+        else:
+            continue
+        if not packets:
+            continue
+        assembled = _assemble(packets, f"{label} / {name}", stream_fmt)
+        result.extend(_relabel_disk_banks(assembled, label, name))
+    if not result:
+        raise UnsupportedFormat("no Wavestation banks in disk image")
+    return result
+
+
+def _read_disk_file(path: str) -> List[ImportedBank]:
+    with open(path, "rb") as handle:
+        raw = handle.read()
+    return _read_disk_bytes(raw, os.path.basename(path))
+
+
+def _zip_parse_member(content: bytes, ext: str) -> Optional[Tuple[List[m.Packet], str]]:
+    if ext in (".syx", ".sysex", ".bnk"):
+        return dumps.read_syx_data(content), "sysex"
+    if ext in (".mid", ".midi"):
+        try:
+            return read_midi_data(content), "midi"
+        except UnsupportedFormat:
+            return None
+    if b"\xf0\x42" not in content:
+        return None
+    return dumps.read_syx_data(content), "sysex"
+
+
+def _zip_member_banks(
+    zf: zipfile.ZipFile, info: zipfile.ZipInfo, label: str
+) -> List[ImportedBank]:
+    if info.is_dir():
+        return []
+    name = info.filename
+    ext = os.path.splitext(name)[1].lower()
+    if ext == ".7z":
+        return []
+    if ext == ".img":
+        try:
+            member = zf.read(info)
+        except (OSError, zipfile.BadZipFile, RuntimeError):
+            return []
+        try:
+            return _read_disk_bytes(member, f"{label} / {name}")
+        except UnsupportedFormat:
+            return []
+    try:
+        content = zf.read(info)
+    except (OSError, zipfile.BadZipFile, RuntimeError):
+        return []
+    parsed = _zip_parse_member(content, ext)
+    if parsed is None:
+        return []
+    packets, stream_fmt = parsed
+    if not packets:
+        return []
+    assembled = _assemble(packets, f"{label} / {name}", stream_fmt)
+    return _relabel_disk_banks(assembled, label, name)
+
+
+def _read_zip_bytes(data: bytes, label: str) -> List[ImportedBank]:
+    result: List[ImportedBank] = []
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            for info in sorted(zf.infolist(), key=lambda item: item.filename):
+                result.extend(_zip_member_banks(zf, info, label))
+    except zipfile.BadZipFile as exc:
+        raise UnsupportedFormat("not a zip archive") from exc
+    if not result:
+        raise UnsupportedFormat(
+            "no Wavestation banks in zip (KryoFlux .7z flux archives are "
+            "not decoded; use the .img files)"
+        )
+    return result
+
+
 def _read_sqs_packets(path: str) -> Tuple[List[m.Packet], str]:
     from kws import soundquest
 
@@ -456,35 +581,76 @@ def _load_packets(path: str, ext: str) -> Tuple[List[m.Packet], str]:
     raise UnsupportedFormat(f"unsupported format {sniffed}")
 
 
+_RECOGNIZED_EXTS = (".syx", ".sysex", ".mid", ".midi", ".sqs", ".lib")
+
+
+def _read_lib_file(path: str) -> List[ImportedBank]:
+    from kws import sounddiver
+
+    try:
+        lib_banks = sounddiver.read_banks(path)
+    except (sounddiver.SoundDiverError, ValueError) as exc:
+        raise UnsupportedFormat(str(exc)) from exc
+    return [
+        ImportedBank(
+            label=f"{os.path.basename(path)} [{bank.scope}]",
+            scope=bank.scope,
+            format="lib",
+            source=deps.Source(
+                bank_id=bank.scope,
+                performances=list(bank.performances),
+                patches=list(bank.patches),
+                waveseq=bank.waveseq,
+            ),
+            notes=bank.note,
+        )
+        for bank in lib_banks
+    ]
+
+
+def _read_container(path: str, raw: bytes) -> Optional[List[ImportedBank]]:
+    basename = os.path.basename(path)
+    if fat12.is_fat12(raw):
+        return _read_disk_bytes(raw, basename)
+    if raw.startswith(b"PK\x03\x04"):
+        return _read_zip_bytes(raw, basename)
+    if raw.startswith(b"7z\xbc\xaf\x27\x1c"):
+        raise UnsupportedFormat(
+            "KryoFlux flux archives are not decoded; use the .img files "
+            "in the same download"
+        )
+    return None
+
+
 def read_file(path: str) -> List[ImportedBank]:
     ext = os.path.splitext(path)[1].lower()
     try:
         with open(path, "rb") as handle:
             head = handle.read(4)
+            handle.seek(0)
+            raw = handle.read()
     except OSError:
         head = b""
+        raw = b""
     if ext == ".lib" or head == b"MROF":
-        from kws import sounddiver
-
-        try:
-            lib_banks = sounddiver.read_banks(path)
-        except (sounddiver.SoundDiverError, ValueError) as exc:
-            raise UnsupportedFormat(str(exc)) from exc
-        return [
-            ImportedBank(
-                label=f"{os.path.basename(path)} [{bank.scope}]",
-                scope=bank.scope,
-                format="lib",
-                source=deps.Source(
-                    bank_id=bank.scope,
-                    performances=list(bank.performances),
-                    patches=list(bank.patches),
-                    waveseq=bank.waveseq,
-                ),
-                notes=bank.note,
-            )
-            for bank in lib_banks
-        ]
+        return _read_lib_file(path)
+    if ext == ".img":
+        return _read_disk_file(path)
+    if ext == ".zip":
+        return _read_zip_bytes(raw, os.path.basename(path))
+    if ext == ".7z":
+        raise UnsupportedFormat(
+            "KryoFlux flux archives are not decoded; use the .img files "
+            "in the same download"
+        )
+    container = _read_container(path, raw)
+    if container is not None:
+        return container
+    if ext == ".bnk" or (ext not in _RECOGNIZED_EXTS and b"\xf0\x42" in raw):
+        packets = dumps.read_syx_data(raw)
+        if not packets:
+            raise UnsupportedFormat("no Wavestation messages found")
+        return _assemble(packets, path, "sysex")
     packets, fmt = _load_packets(path, ext)
     if not packets:
         raise UnsupportedFormat("no Wavestation messages found")
@@ -498,7 +664,10 @@ def describe_file(path: str) -> str:
     try:
         with open(path, "rb") as handle:
             raw = handle.read()
-        sniffed = _sniff_format(raw)
+        try:
+            sniffed = _sniff_format(raw)
+        except (UnsupportedFormat, ValueError):
+            sniffed = None
     except OSError:
         sniffed = None
 
@@ -521,18 +690,31 @@ def describe_file(path: str) -> str:
         return "\n".join(lines)
 
     banks_list = read_file(path)
-    lines = []
+    rows: List[str] = []
+    if ext in (".img", ".zip"):
+        for ib in banks_list:
+            used_perfs = sum(1 for perf in ib.source.performances if any(perf))
+            used_patches = sum(1 for patch in ib.source.patches if any(patch))
+            rows.append(
+                f"{ib.label}  "
+                f"[{used_perfs} performances, {used_patches} patches, "
+                f"waveseq={'yes' if ib.source.waveseq else 'no'}]"
+            )
+        return "\n".join(rows)
     for ib in banks_list:
-        lines.append(ib.label)
+        rows.append(ib.label)
         if ib.notes:
-            lines.append(f"  note: {ib.notes}")
-        perfs = ib.source.performances
-        for slot, perf in enumerate(perfs):
-            if not perf:
-                continue
-            if not any(perf):
-                continue
-            name = m.decode_name(perf)
-            if name.strip():
-                lines.append(f"  {slot}: {name}")
-    return "\n".join(lines)
+            rows.append(f"  note: {ib.notes}")
+        rows.extend(_describe_bank_perfs(ib))
+    return "\n".join(rows)
+
+
+def _describe_bank_perfs(ib: ImportedBank) -> List[str]:
+    out: List[str] = []
+    for slot, perf in enumerate(ib.source.performances):
+        if not perf or not any(perf):
+            continue
+        name = m.decode_name(perf)
+        if name.strip():
+            out.append(f"  {slot}: {name}")
+    return out

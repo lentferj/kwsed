@@ -1148,7 +1148,25 @@ def _cmd_import(_device: Any, args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return spec.EXIT_USAGE
 
-    if getattr(args, "scope", None):
+    if getattr(args, "label", None):
+        selected = None
+        for bank in banks_list:
+            if bank.label != args.label:
+                continue
+            if getattr(args, "scope", None) and bank.scope != args.scope:
+                continue
+            selected = bank
+            break
+        if selected is None:
+            candidates = banks_list
+            if getattr(args, "scope", None):
+                candidates = [b for b in banks_list if b.scope == args.scope]
+            print(
+                "available labels: " + ", ".join(b.label for b in candidates),
+                file=sys.stderr,
+            )
+            return spec.EXIT_USAGE
+    elif getattr(args, "scope", None):
         selected = None
         for bank in banks_list:
             if bank.scope == args.scope:
@@ -1994,6 +2012,12 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("file")
     sp.add_argument("--list", action="store_true", help="list the file's banks")
     sp.add_argument("--scope", default=None, metavar="SCOPE")
+    sp.add_argument(
+        "--label",
+        default=None,
+        metavar="LABEL",
+        help="exact bank label from --list",
+    )
     sp.add_argument("--as", dest="as", default=None, metavar="DEST")
     sp.add_argument(
         "--bankstore",
