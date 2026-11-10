@@ -122,6 +122,25 @@ _DUMP_FOR_KIND = {
     banks.Kind.PATCH: m.Function.ALL_PATCH_DUMP,
 }
 
+#: The three kinds a copied performance drags along, with the dump each one
+#: is written and read back as. A bundle names them in this order for the
+#: send -- wave sequences first, performances last -- so a read-back of a
+#: performance cannot precede the patches it points at.
+_BUNDLE_FUNCTIONS = {
+    "waveseq": m.Function.ALL_WAVESEQ_DUMP,
+    "patches": m.Function.ALL_PATCH_DUMP,
+    "performances": m.Function.ALL_PERFORMANCE_DUMP,
+}
+
+#: The decoded size of each kind's whole bank. Checked before anything is
+#: read or sent: a frame built from a short payload would still be a legal
+#: message, and the unit would store a bank with the tail missing.
+_BUNDLE_SIZES = {
+    "performances": banks.PERFORMANCES_PER_BANK * records.PERFORMANCE_SIZE,
+    "patches": banks.PATCHES_PER_BANK * records.PATCH_SIZE,
+    "waveseq": records.WAVESEQ_BANK_SIZE,
+}
+
 _HINTS = ("wavestation", "ws sr", "wssr", "korg")
 
 
@@ -1058,6 +1077,137 @@ class WavestationBridge:
         result["verified"] = bytes(after) == bytes(sent)
         if not result["verified"]:
             result["mismatch"] = _first_difference(bytes(sent), bytes(after))
+        return result
+
+    def write_bank_bundle(
+        self,
+        bank: int | str,
+        *,
+        performances: Optional[bytes] = None,
+        patches: Optional[bytes] = None,
+        waveseq: Optional[bytes] = None,
+        backup_dir: str,
+        verify: bool = True,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Replace several kinds in one bank as **one** undoable write.
+
+        Copying a performance into another bank rewrites its performances,
+        its patches and (when wave sequences are involved) its wave
+        sequences. Three separate :meth:`write_bank` calls would produce
+        three backups, three read-backs, and three chances to stop halfway
+        through a bank that is then neither the old one nor the new one.
+
+        So the fence is applied to the bundle as a whole:
+
+        1. **A ROM bank is refused** before any traffic, as in
+           :meth:`write_bank`.
+        2. **Every payload is checked**, and every kind being written is
+           read in full and backed up into **one** envelope. If any of those
+           reads fails, nothing is sent -- a bundle that cannot be undone is
+           not one this program performs.
+        3. The dumps go out with wave sequences first and performances last,
+           so the patches a performance names are already there when it
+           arrives.
+        4. **Every written kind is read back and compared**, and the result
+           says whether all of them match rather than only the last.
+
+        The order of the result's ``kinds`` is the send order, not the
+        caller's argument order.
+        """
+        entry = banks.bank(bank)
+        if not entry.writable:
+            raise DeviceError(
+                f"{entry.label} is ROM and cannot be written. The banks that "
+                f"can are: "
+                f"{', '.join(b.label for b in banks.writable_banks())}."
+            )
+
+        payloads: Dict[str, bytes] = {}
+        for kind, data in (
+            ("waveseq", waveseq),
+            ("patches", patches),
+            ("performances", performances),
+        ):
+            if data is None:
+                continue
+            expected = _BUNDLE_SIZES[kind]
+            if len(data) != expected:
+                raise ValueError(
+                    f"{kind} must be {expected} bytes for a whole bank; got {len(data)}"
+                )
+            payloads[kind] = bytes(data)
+        if not payloads:
+            raise ValueError("nothing to write")
+
+        # --- 1. back every destination up, or do not write any of them ------
+        before: Dict[str, bytes] = {}
+        for kind, function in _BUNDLE_FUNCTIONS.items():
+            if kind not in payloads:
+                continue
+            try:
+                before[kind] = self.read_raw(entry.sysex, function, timeout=timeout)
+            except Exception as exc:
+                raise DeviceError(
+                    f"could not read {entry.label} {kind} before writing it, "
+                    f"so nothing was sent ({exc}). kwsed does not overwrite a "
+                    f"bank it has not backed up."
+                ) from exc
+        saved = backup.save(
+            backup_dir,
+            kind="bank-bundle",
+            slot=entry.label,
+            name=entry.label,
+            device_id=str(self.channel),
+            source="kwsed",
+            blocks=before,
+        )
+
+        # --- 2. send, wave sequences first and performances last ------------
+        self._drain()
+        sent: Dict[str, bytes] = {}
+        for kind, function in _BUNDLE_FUNCTIONS.items():
+            if kind not in payloads:
+                continue
+            frame = m.frame_bulk(
+                function,
+                entry.sysex,
+                payloads[kind],
+                channel=self.channel,
+            )
+            sent[kind] = frame
+            self._send(frame)
+
+        written = [kind for kind in _BUNDLE_FUNCTIONS if kind in payloads]
+        result: Dict[str, Any] = {
+            "bank": entry.label,
+            "kind": "bank-bundle",
+            "kinds": written,
+            "backup": saved,
+            "verified": None,
+            "mismatch": None,
+        }
+        if not verify:
+            return result
+
+        # --- 3. read every written kind back and compare --------------------
+        mismatch: Optional[str] = None
+        for kind in written:
+            try:
+                after = self.read_raw(
+                    entry.sysex, _BUNDLE_FUNCTIONS[kind], timeout=timeout
+                )
+            except Exception as exc:
+                mismatch = (
+                    f"the write was sent but {entry.label} {kind} could not be "
+                    f"read back to check it ({exc}). Whether it took is unknown."
+                )
+                break
+            if bytes(after) != sent[kind]:
+                mismatch = _first_difference(sent[kind], bytes(after))
+                break
+        result["verified"] = mismatch is None
+        result["mismatch"] = mismatch
         return result
 
     def read_raw(

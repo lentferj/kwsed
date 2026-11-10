@@ -73,6 +73,23 @@ def demo_name(bank_id: str, kind: str, number: int) -> str:
     return f"{adjective} {noun}"[: m.NAME_LEN - 1]
 
 
+#: The decoded size of each whole-bank payload a caller may write. The same
+#: three the bridge checks, so the fake refuses what the unit would.
+_WRITE_SIZES = {
+    banks.Kind.PERFORMANCE: banks.PERFORMANCES_PER_BANK * records.PERFORMANCE_SIZE,
+    banks.Kind.PATCH: banks.PATCHES_PER_BANK * records.PATCH_SIZE,
+    "waveseq": records.WAVESEQ_BANK_SIZE,
+}
+
+#: A bundle names its kinds in the plural, as the bridge's result does; the
+#: stored key stays the singular kind a plain write uses.
+_BUNDLE_KINDS = {
+    "performances": banks.Kind.PERFORMANCE,
+    "patches": banks.Kind.PATCH,
+    "waveseq": "waveseq",
+}
+
+
 class DemoDevice:
     """Answers the subset of the protocol kwsed speaks."""
 
@@ -99,6 +116,14 @@ class DemoDevice:
         #: many times: the editor's fence is exercised without a unit.
         self.multi_written: Optional[bytes] = None
         self.multi_write_count: int = 0
+        #: What the fake was asked to write, per ``(bank id, kind)``. Stored
+        #: decoded, so a later read returns exactly the bytes that went in --
+        #: which is what a read-back and an undo have to see.
+        self._written: Dict[Tuple[str, str], bytes] = {}
+        self.bank_writes: List[Dict[str, Any]] = []
+        self.bank_write_count: int = 0
+        self.bundle_writes: List[Dict[str, Any]] = []
+        self.bundle_write_count: int = 0
         self.received: List[bytes] = []
         self.identify_calls: int = 0
         self._closed = False
@@ -145,6 +170,9 @@ class DemoDevice:
             function, size = (m.Function.ALL_PERFORMANCE_DUMP, dumps.PERFORMANCE_RECORD)
         else:
             function, size = m.Function.ALL_PATCH_DUMP, dumps.PATCH_RECORD
+        stored = self._written.get((entry.id, kind))
+        if stored is not None:
+            return m.frame_bulk(function, number, stored, channel=self.channel)
         raw = bytearray()
         for index in range(banks.count_for(kind)):
             record = bytearray(size)
@@ -172,14 +200,19 @@ class DemoDevice:
             )
             return self._bank_dump(bank_number, kind)
         if function == m.Function.ALL_WAVESEQ_DUMP:
-            data = bytearray(records.WAVESEQ_BANK_SIZE)
-            for i in range(records.SEQUENCES_PER_BANK):
-                name = f"Demo {i:02d}"
-                at = records.SEQNAME_BASE + i * records.SEQNAME_SIZE
-                encoded = name.encode("ascii")
-                data[at : at + len(encoded)] = encoded
+            stored = self._written.get((entry.id, "waveseq"))
+            if stored is not None:
+                data = bytes(stored)
+            else:
+                pool = bytearray(records.WAVESEQ_BANK_SIZE)
+                for i in range(records.SEQUENCES_PER_BANK):
+                    name = f"Demo {i:02d}"
+                    at = records.SEQNAME_BASE + i * records.SEQNAME_SIZE
+                    encoded = name.encode("ascii")
+                    pool[at : at + len(encoded)] = encoded
+                data = bytes(pool)
             return bytes(
-                m.frame_bulk(function, entry.sysex, bytes(data), channel=self.channel)
+                m.frame_bulk(function, entry.sysex, data, channel=self.channel)
             )
         raise ValueError(f"unsupported function {function:#04x}")
 
@@ -281,3 +314,118 @@ class DemoDevice:
         self.multi_written = bytes(data)
         self.multi_write_count += 1
         return {"backup": None, "verified": True, "mismatch": None}
+
+    # --- writing, which is stored so a read-back and an undo can see it -----
+
+    def _checked(
+        self, bank: int | str, kind: str, data: Any
+    ) -> Tuple[banks.Bank, bytes]:
+        """Check one whole-bank payload, without storing it yet."""
+        entry = banks.bank(bank)
+        if not entry.writable:
+            raise ValueError(
+                f"{entry.label} is ROM and cannot be written. The banks that "
+                f"can are: "
+                f"{', '.join(b.label for b in banks.writable_banks())}."
+            )
+        if kind not in _WRITE_SIZES:
+            raise ValueError(
+                f"cannot write {kind!r}; have {', '.join(sorted(_WRITE_SIZES))}"
+            )
+        expected = _WRITE_SIZES[kind]
+        payload = bytes(data)
+        if len(payload) != expected:
+            raise ValueError(
+                f"{kind} must be {expected} bytes for a whole bank; got {len(payload)}"
+            )
+        return entry, payload
+
+    def _accept(
+        self, bank: int | str, kind: str, data: Any
+    ) -> Tuple[banks.Bank, bytes]:
+        """Check one whole-bank payload and remember it, decoded."""
+        entry, payload = self._checked(bank, kind, data)
+        self._written[(entry.id, kind)] = payload
+        return entry, payload
+
+    def write_bank(
+        self,
+        bank: int | str,
+        kind: str,
+        data: Any,
+        *,
+        backup_dir: str,
+        verify: bool = True,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Accept a whole bank. The fake keeps what it was given.
+
+        Nothing is sent and nothing is backed up -- this is the device a TUI
+        screen or a test drives with no ports open. What it does provide is
+        the same answer shape as the bridge and a later read that returns
+        exactly the bytes written, so a read-back or an undo is exercised
+        rather than short-circuited.
+        """
+        self._tick()
+        entry, payload = self._accept(bank, kind, data)
+        self.bank_write_count += 1
+        self.bank_writes.append(
+            {"bank": entry.label, "kind": kind, "bytes": len(payload)}
+        )
+        return {
+            "bank": entry.label,
+            "kind": kind,
+            "backup": None,
+            "verified": True,
+            "mismatch": None,
+        }
+
+    def write_bank_bundle(
+        self,
+        bank: int | str,
+        *,
+        performances: Optional[bytes] = None,
+        patches: Optional[bytes] = None,
+        waveseq: Optional[bytes] = None,
+        backup_dir: str,
+        verify: bool = True,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Accept several kinds for one bank, stored in the bridge's order."""
+        self._tick()
+        provided = (
+            ("waveseq", waveseq),
+            ("patches", patches),
+            ("performances", performances),
+        )
+        # A bundle names its kinds in the plural; the stored key is the
+        # singular one so a later read finds it.
+        checked: List[Tuple[str, str, bytes]] = []
+        entry = banks.bank(bank)
+        for bundle_kind, data in provided:
+            if data is None:
+                continue
+            kind = _BUNDLE_KINDS[bundle_kind]
+            entry, payload = self._checked(bank, kind, data)
+            checked.append((bundle_kind, kind, payload))
+        if not checked:
+            raise ValueError("nothing to write")
+        for _bundle_kind, kind, payload in checked:
+            self._written[(entry.id, kind)] = payload
+        kinds = [bundle_kind for bundle_kind, _kind, _payload in checked]
+        self.bundle_write_count += 1
+        self.bundle_writes.append(
+            {
+                "bank": entry.label,
+                "kinds": kinds,
+                "bytes": sum(len(payload) for _bundle, _kind, payload in checked),
+            }
+        )
+        return {
+            "bank": entry.label,
+            "kind": "bank-bundle",
+            "kinds": kinds,
+            "backup": None,
+            "verified": True,
+            "mismatch": None,
+        }
