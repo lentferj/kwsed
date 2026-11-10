@@ -2336,16 +2336,88 @@ class TestCopyPerformance:
             app._fill((banks.bank("CARD").number, banks.Kind.PERFORMANCE), 7)
             app.query_one("#slot-table").focus()
             await pilot.press("y")
-            await settle(pilot)
+            await settle(pilot, 20)
             assert isinstance(app.screen, CopyPerformanceScreen)
-
-            await pilot.press("a")
-            await settle(pilot)
-            await pilot.press("w")
-            await settle(pilot, 40)
-
-            assert app.device.bundle_write_count == 0
             text = panel_text(app, "#status")
             assert "CARD/07" in text
             assert "CARD/13" in text, "the refusal names the bank in the slot"
             assert "refused" in text
+
+            await pilot.press("a")
+            await settle(pilot)
+            await pilot.press("w")
+            await settle(pilot, 20)
+
+            assert app.device.bundle_write_count == 0
+            text = panel_text(app, "#status")
+            assert "CARD/13" in text, "firing repeats the failed read, it does not lie"
+            assert "refused" in text
+
+    async def test_preview_uses_loaded_destination_bank(self, tmp_path):
+        from kws import perfcopy
+        from tests.test_bankbuild import make_performance
+
+        class _Ram3Demo(DemoDevice):
+            def read_raw(self, bank_number, function, *, timeout=None):
+                if bank_number == banks.bank("RAM3").sysex:
+                    from kws import messages as _m
+
+                    active = make_performance("Active Zero", ((0, 0),))
+                    perfs = [active, active] + [
+                        make_performance("", ())
+                        for _ in range(banks.PERFORMANCES_PER_BANK - 2)
+                    ]
+                    patches = [
+                        bytes(rec.PATCH_SIZE) for _ in range(banks.PATCHES_PER_BANK)
+                    ]
+                    perf_blob = b"".join(perfs)
+                    patch_blob = b"".join(patches)
+                    ws_blob = bytes(rec.WAVESEQ_BANK_SIZE)
+                    if function == m.Function.ALL_PERFORMANCE_DUMP:
+                        return m.frame_bulk(
+                            function, bank_number, perf_blob, channel=self.channel
+                        )
+                    if function == m.Function.ALL_PATCH_DUMP:
+                        return m.frame_bulk(
+                            function, bank_number, patch_blob, channel=self.channel
+                        )
+                    if function == m.Function.ALL_WAVESEQ_DUMP:
+                        return m.frame_bulk(
+                            function, bank_number, ws_blob, channel=self.channel
+                        )
+                return super().read_raw(bank_number, function, timeout=timeout)
+
+        device = _Ram3Demo()
+        app = KwsedApp(device, catalog=cat.Catalog([]))
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._sources["RAM1"] = _copied_source()
+            # deliberately leave RAM3 out
+            app._fill((0, banks.Kind.PERFORMANCE))
+            app.query_one("#slot-table").focus()
+            await pilot.press("y")
+            await settle(pilot)
+            assert isinstance(app.screen, CopyPerformanceScreen)
+            screen = app.screen
+
+            ids = [b.id for b in screen._destinations]
+            screen._dest_index = ids.index("RAM3")
+            screen._ensure_context()
+            await settle(pilot, 20)
+
+            assert "RAM3" in app._sources
+            assert len(perfcopy.active_performances(app._sources["RAM3"])) == 2
+
+            assert isinstance(app.screen, CopyPerformanceScreen)
+            state = str(app.screen.query_one("#copy-perf-state", Static).content)
+            assert "target Performance slot 02" in state
+            assert "destination active performances" in state
+
+            # firing is refused while a bank load is still in flight
+            screen._loading = {"RAM3"}
+            screen._armed = True
+            screen.action_fire()
+            await settle(pilot)
+            assert "still reading the banks" in panel_text(app, "#status")
+            assert device.bundle_write_count == 0
+            screen._loading.clear()

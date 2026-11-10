@@ -1119,6 +1119,8 @@ class CopyPerformanceScreen(ModalScreen[Optional[Dict[str, Any]]]):
         self._mode_index = 0
         self._armed = False
         self._destinations = banks.writable_banks()
+        self._loading: set[str] = set()
+        self._load_error: Optional[str] = None
 
     def _destination(self) -> Any:
         return self._destinations[self._dest_index]
@@ -1148,15 +1150,50 @@ class CopyPerformanceScreen(ModalScreen[Optional[Dict[str, Any]]]):
 
     def on_mount(self) -> None:
         self._skip_readonly_card()
+        self._ensure_context()
+
+    def _missing_scopes(self) -> list[str]:
+        app = self._app
+        merged = app._sources_with_store()
+        scopes: list[str] = []
+        for sid in (self.perf.scope_id, self._destination().id):
+            if sid not in merged and sid not in scopes:
+                scopes.append(sid)
+        return scopes
+
+    def _ensure_context(self) -> None:
+        missing = self._missing_scopes()
+        if missing and not self._loading and self._load_error is None:
+            self._loading = set(missing)
+            self._app._copy_perf_load_worker(missing, self)
         self._refresh()
+
+    def _context_loaded(self) -> None:
+        self._loading.clear()
+        self._load_error = None
+        # A destination changed while this load was in flight may still be
+        # missing; re-check rather than leaving the screen waiting forever.
+        self._ensure_context()
+
+    def _context_failed(self, message: str) -> None:
+        self._loading.clear()
+        self._load_error = message
+        self._refresh()
+        self._app.notify_status(message, refused=True)
 
     def _plan_preview(self) -> List[str]:
         """The dry-run plan lines for the current destination and mode."""
         app = self._app
         dest = self._destination()
+        if self._load_error is not None:
+            return [f"cannot plan: {self._load_error}"]
+        missing = self._missing_scopes()
+        if missing:
+            return [f"waiting for {', '.join(sorted(missing))}..."]
+        merged = app._sources_with_store()
         try:
             result = perfcopy.copy_into_bank(
-                app._sources,
+                merged,
                 dest.id,
                 [self.perf],
                 mode=self._mode(),
@@ -1181,7 +1218,7 @@ class CopyPerformanceScreen(ModalScreen[Optional[Dict[str, Any]]]):
             f"Wave Seqs {len(plan.sequence_map)}/32, "
             f"Steps {plan.steps_used}/501"
         )
-        dest_src = app._sources.get(dest.id)
+        dest_src = merged.get(dest.id)
         if dest_src is not None:
             active = perfcopy.active_performances(dest_src)
             if active:
@@ -1206,7 +1243,8 @@ class CopyPerformanceScreen(ModalScreen[Optional[Dict[str, Any]]]):
         self._dest_index = (self._dest_index + 1) % len(self._destinations)
         self._skip_readonly_card()
         self._armed = False
-        self._refresh()
+        self._load_error = None
+        self._ensure_context()
 
     def action_mode(self) -> None:
         self._mode_index = (self._mode_index + 1) % len(self._modes)
@@ -1221,6 +1259,14 @@ class CopyPerformanceScreen(ModalScreen[Optional[Dict[str, Any]]]):
     def action_fire(self) -> None:
         if not self._armed:
             self._app.notify_status("press a to arm first", refused=True)
+            return
+        if self._load_error is not None:
+            self._app.notify_status(self._load_error, refused=True)
+            return
+        if self._loading or self._missing_scopes():
+            self._app.notify_status(
+                "still reading the banks; try again in a moment", refused=True
+            )
             return
         dest = self._destination()
         mode = self._mode()
@@ -2835,6 +2881,47 @@ class KwsedApp(App[None]):
             self._deps_worker(scope, entry.kind, entry.number, None)
             return
         self._show_deps(scope, entry.kind, entry.number, None, sources)
+
+    @work(thread=True)
+    def _copy_perf_load_worker(self, scopes: list[str], screen: Any) -> None:
+        loaded: Dict[str, deps.Source] = {}
+        failure: BaseException | None = None
+        try:
+            if not self._exchange.acquire(blocking=False):
+                self.call_from_thread(screen._context_failed, "busy")
+                return
+            try:
+                with self._busy_gate, self._lock:
+                    for scope in scopes:
+                        loaded[scope] = self._read_source_offline(scope)
+            finally:
+                try:
+                    self._exchange.release()
+                except RuntimeError:
+                    pass
+        except Exception as exc:
+            failure = exc
+        if failure is not None:
+            self.call_from_thread(screen._context_failed, str(failure))
+            return
+        self.call_from_thread(self._copy_perf_context_loaded, loaded, screen)
+
+    def _copy_perf_context_loaded(self, loaded: Any, screen: Any) -> None:
+        for scope, src in loaded.items():
+            self._sources[scope] = src
+        if self._bankstore_dir is not None:
+            for scope, src in loaded.items():
+                try:
+                    bankstore.save(
+                        scope,
+                        performances=b"".join(src.performances),
+                        patches=b"".join(src.patches),
+                        waveseq=src.waveseq,
+                        directory=self._bankstore_dir,
+                    )
+                except OSError:
+                    pass
+        screen._context_loaded()
 
     @work(thread=True)
     def _deps_worker(
