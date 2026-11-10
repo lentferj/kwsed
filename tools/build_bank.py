@@ -154,7 +154,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             else bytes(banks.PERFORMANCES_PER_BANK * rec.PERFORMANCE_SIZE)
         ),
         template_waveseq=(template.waveseq or bytes(rec.WAVESEQ_BANK_SIZE)),
-        destination_bank=destination.sysex,
+        destination_bank=destination.number,
     )
 
     channel = args.channel - 1

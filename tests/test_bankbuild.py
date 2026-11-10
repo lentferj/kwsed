@@ -15,10 +15,14 @@
 
 """Records, dependencies and building. Every fixture here is invented."""
 
+import importlib.util
+from pathlib import Path
+
 import pytest
 
 from kws import bankbuild as bb
-from kws import deps
+from kws import banks, deps, dumps
+from kws import messages as m
 from kws import records as r
 
 
@@ -461,3 +465,64 @@ class TestAChainThatRunsOffTheEnd:
 
         chain = deps.walk_sequence(bytes(bank), 0)
         assert chain.steps == (1, 2), "the walk should stop, not raise"
+
+
+_PATH = Path(__file__).resolve().parents[1] / "tools" / "build_bank.py"
+_spec = importlib.util.spec_from_file_location("build_bank_under_test", _PATH)
+assert _spec is not None and _spec.loader is not None
+module = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(module)
+
+
+class TestBuildBankCLI:
+    """Interior (Bank.number) vs wire (Bank.sysex) distinction.
+
+    A performance part's bank field is an interior display index; the
+    framed dump's bank byte is the wire value. A wrong interior number
+    plays a different bank's patch while the file still loads and verifies.
+    """
+
+    @pytest.mark.parametrize(
+        "bank_name,wire,interior", [("CARD", 3, 11), ("RAM3", 4, 2)]
+    )
+    def test_interior_vs_wire_bank(self, tmp_path, bank_name, wire, interior):
+        patch = make_patch("Invented", ((0, 40), (0, 40), (0, 40), (0, 40)))
+        perf = make_performance("Invented", parts=((0, 0),))
+
+        pb = bytearray(banks.PATCHES_PER_BANK * r.PATCH_SIZE)
+        pb[0 : r.PATCH_SIZE] = patch
+        perfbank = bytearray(banks.PERFORMANCES_PER_BANK * r.PERFORMANCE_SIZE)
+        perfbank[0 : r.PERFORMANCE_SIZE] = perf
+
+        src_path = tmp_path / "source.syx"
+        src_path.write_bytes(
+            m.frame_bulk(m.Function.ALL_PATCH_DUMP, 0, bytes(pb))
+            + m.frame_bulk(m.Function.ALL_PERFORMANCE_DUMP, 0, bytes(perfbank))
+        )
+
+        out = tmp_path / f"out-{bank_name.lower()}"
+        rc = module.main(
+            [
+                "--source",
+                f"A={src_path}",
+                "--bank",
+                bank_name,
+                "--patch",
+                "A:0",
+                "--out",
+                str(out),
+            ]
+        )
+        assert rc == 0
+
+        perf_path = Path(f"{out}-perf.syx")
+        packets = dumps.read_syx_file(str(perf_path))
+        assert len(packets) == 1
+        packet = packets[0]
+        assert packet.bank == wire
+        dump = dumps.parse_bulk(packet)
+        rec0 = dump.records[0]
+        for part in r.performance_parts(rec0):
+            if part.used:
+                assert part.bank == interior
+                assert part.patch < 35
