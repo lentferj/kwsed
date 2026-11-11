@@ -44,12 +44,14 @@ import contextlib
 import sys
 import threading
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import (
     TYPE_CHECKING,
     Any,
     Callable,
     Dict,
     List,
+    Mapping,
     Optional,
     Sequence,
     Set,
@@ -3234,6 +3236,10 @@ class KwsedApp(App[None]):
             self._import_cursor = picker.last_row
             if path:
                 self._import_path_chosen(kind, path)
+            else:
+                # Escape from the file picker goes back to the Import menu,
+                # not all the way to the browser.
+                self.action_import()
 
         self.push_screen(picker, done)
 
@@ -3254,6 +3260,9 @@ class KwsedApp(App[None]):
                 lambda choice: self._import_whole_bank_chosen(banks_list, choice),
             )
             return
+        self._open_source_chooser(path, banks_list)
+
+    def _open_source_chooser(self, path: str, banks_list: Sequence[Any]) -> None:
         self.push_screen(
             BankImportScreen(path=path, banks=banks_list),
             lambda index: self._import_single_source_chosen(path, banks_list, index),
@@ -3289,6 +3298,8 @@ class KwsedApp(App[None]):
 
     def _import_whole_bank_chosen(self, banks_list: Sequence[Any], choice: Any) -> None:
         if choice is None:
+            # Back to the file picker, not the browser.
+            self._import_kind_chosen(0)
             return
         try:
             bank = banks_list[choice.source_index]
@@ -3367,6 +3378,8 @@ class KwsedApp(App[None]):
         self, path: str, banks_list: Sequence[Any], index: Optional[int]
     ) -> None:
         if index is None:
+            # Back to the file picker, not the browser.
+            self._import_kind_chosen(1)
             return
         try:
             bank = banks_list[index]
@@ -3376,21 +3389,81 @@ class KwsedApp(App[None]):
             return
         from kws import banks as _banks
 
-        writable = [b for b in _banks.writable_banks() if b.id != bank.scope]
-        if not writable:
-            writable = _banks.writable_banks()
+        writable = _banks.writable_banks()
         if not writable:
             self.notify_status("no writable target banks", refused=True)
             return
+        self._open_single_target_chooser(path, bank, banks_list, writable)
+
+    def _open_single_target_chooser(
+        self,
+        path: str,
+        bank: Any,
+        banks_list: Sequence[Any],
+        writable: Sequence[Any],
+    ) -> None:
         self.push_screen(
             ChoiceScreen("Target bank", [b.label for b in writable]),
-            lambda ti: self._import_single_target_chosen(path, bank, writable, ti),
+            lambda ti: self._import_single_target_chosen(
+                path, bank, banks_list, writable, ti
+            ),
         )
 
+    def _source_bank_number_for_scope(self, scope: str) -> Optional[int]:
+        if scope.startswith("CARD/"):
+            return banks.bank("CARD").number
+        try:
+            return banks.bank(scope).number
+        except LookupError:
+            return None
+
+    def _unique_source_scope(self, base: str, sources: Mapping[str, Any]) -> str:
+        if base not in sources:
+            return base
+        index = 2
+        while f"{base}#{index}" in sources:
+            index += 1
+        return f"{base}#{index}"
+
+    def _session_source(
+        self, bank: Any, sources: Mapping[str, Any]
+    ) -> tuple[Any, deps.Source]:
+        """A source bank under a unique session key.
+
+        Two RAM1 files can be assembled into one target. The key is a
+        session alias; ``Source.bank_number`` carries the real bank number
+        so the planner still knows which parts are local.
+        """
+        base = str(getattr(bank, "scope", ""))
+        alias = self._unique_source_scope(base, sources)
+        original = bank.source
+        number = getattr(original, "bank_number", None)
+        if number is None:
+            number = self._source_bank_number_for_scope(base)
+        aliased = deps.Source(
+            bank_id=alias,
+            performances=list(original.performances),
+            patches=list(original.patches),
+            waveseq=original.waveseq,
+            bank_number=number,
+        )
+        label = getattr(bank, "label", base)
+        if alias != base:
+            label = f"{label} ({alias})"
+        wrapped = SimpleNamespace(label=label, scope=alias, source=aliased)
+        return wrapped, aliased
+
     def _import_single_target_chosen(
-        self, path: str, bank: Any, writable: Sequence[Any], target_index: Optional[int]
+        self,
+        path: str,
+        bank: Any,
+        banks_list: Sequence[Any],
+        writable: Sequence[Any],
+        target_index: Optional[int],
     ) -> None:
         if target_index is None:
+            # Back to the source-bank preview.
+            self._open_source_chooser(path, banks_list)
             return
         try:
             target = writable[target_index]
@@ -3398,13 +3471,7 @@ class KwsedApp(App[None]):
             return
         if target is None:
             return
-        if bank.scope == target.id:
-            self.notify_status(
-                "import: source and target bank have the same scope; not supported yet",
-                refused=True,
-            )
-            return
-        sources = self._sources_with_store()
+        sources = dict(self._sources_with_store())
         target_source = sources.get(target.id)
         if target_source is None:
             try:
@@ -3415,28 +3482,113 @@ class KwsedApp(App[None]):
                 )
                 return
             self._sources[target.id] = target_source
-            sources = self._sources_with_store()
-        sources = dict(sources)
-        sources[bank.scope] = bank.source
+            sources = dict(self._sources_with_store())
+        wrapped, aliased = self._session_source(bank, sources)
+        sources[wrapped.scope] = aliased
         sources[target.id] = target_source
         self._import_single_sources = sources
         self._import_single_bank = bank
         self.push_screen(
             SingleImportScreen(
                 path=path,
-                banks=[bank],
+                banks=[wrapped],
                 sources=sources,
                 target_bank=target,
                 target_source=target_source,
                 gate=self._write_gate,
+                on_source_request=self._single_source_menu,
             ),
-            lambda choice: self._import_single_chosen(choice, target, bank, sources),
+            lambda choice: self._import_single_chosen(
+                choice, target, bank, sources, path, banks_list, writable
+            ),
         )
 
+    def _single_source_menu(self, screen: Any) -> None:
+        choices = [
+            f"{index:02d} {getattr(bank, 'label', '')}"
+            for index, bank in enumerate(screen.source_banks)
+        ]
+        choices.append("Add another source file…")
+        self.push_screen(
+            ChoiceScreen("Source bank", choices, screen.source_index),
+            lambda index: self._single_source_menu_chosen(screen, index),
+        )
+
+    def _single_source_menu_chosen(self, screen: Any, index: Optional[int]) -> None:
+        if index is None:
+            return
+        if 0 <= index < len(screen.source_banks):
+            screen.select_source(index)
+            return
+        self._browse_extra_source(screen)
+
+    def _browse_extra_source(self, screen: Any) -> None:
+        picker = FilePickerScreen(
+            start=self._import_folder or "",
+            start_row=self._import_cursor,
+        )
+
+        def done(path: Optional[str]) -> None:
+            self._import_folder = str(picker.folder)
+            from kws import config as _cfg
+
+            if self._config_path is not None:
+                try:
+                    _cfg.save_import_folder(str(picker.folder), self._config_path)
+                except OSError:
+                    pass
+            self._import_cursor = picker.last_row
+            if not path:
+                return
+            try:
+                extra_banks = importers.read_file(path)
+            except (importers.UnsupportedFormat, ValueError, OSError) as exc:
+                self.notify_status(f"import: {exc}", refused=True)
+                return
+            if not extra_banks:
+                self.notify_status("import: no banks found")
+                return
+            if len(extra_banks) == 1:
+                self._add_extra_source(screen, extra_banks[0])
+                return
+            self.push_screen(
+                BankImportScreen(path=path, banks=extra_banks),
+                lambda choice: self._add_extra_source_choice(
+                    screen, extra_banks, choice
+                ),
+            )
+
+        self.push_screen(picker, done)
+
+    def _add_extra_source_choice(
+        self, screen: Any, banks_list: Sequence[Any], index: Optional[int]
+    ) -> None:
+        if index is None:
+            return
+        try:
+            bank = banks_list[index]
+        except (IndexError, TypeError):
+            return
+        if bank is not None:
+            self._add_extra_source(screen, bank)
+
+    def _add_extra_source(self, screen: Any, bank: Any) -> None:
+        wrapped, aliased = self._session_source(bank, screen.sources)
+        screen.add_source_bank(wrapped, aliased)
+
     def _import_single_chosen(  # noqa: C901 - one flow, with fence and cache
-        self, choice: Any, target: Any, bank: Any, sources: Any
+        self,
+        choice: Any,
+        target: Any,
+        bank: Any,
+        sources: Any,
+        path: str = "",
+        banks_list: Sequence[Any] = (),
+        writable: Sequence[Any] = (),
     ) -> None:
         if choice is None:
+            if path and writable:
+                self._open_single_target_chooser(path, bank, banks_list, writable)
             return
         if not self._write_gate.armed:
             self.notify_status("write gate is locked", refused=True)
@@ -3444,6 +3596,9 @@ class KwsedApp(App[None]):
         from kws import banks as _banks
         from kws import backup as _backup
 
+        choice_sources = getattr(choice, "sources", None)
+        if isinstance(choice_sources, Mapping) and choice_sources:
+            sources = dict(choice_sources)
         target_bank = _banks.bank(getattr(choice, "target_bank", target.id))
         target_scope = target_bank.id
         assignments = getattr(choice, "assignments", {}) or {}

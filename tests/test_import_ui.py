@@ -15,7 +15,7 @@ from unittest.mock import patch
 import pytest
 from textual.widgets import DataTable
 
-from kws import bankstore, config, deps, importers, perfcopy, relations
+from kws import banks, bankstore, config, deps, importers, perfcopy, relations
 from kws import messages as m
 from kwsed.app import _HELP, KEY_HINTS, CopyPerformanceScreen, KwsedApp
 from kwsed.demo import DemoDevice
@@ -432,26 +432,23 @@ async def test_before_blocks_frames(tmp_path: Any) -> None:
 
 
 @pytest.mark.asyncio
-async def test_single_target_same_scope_refused(tmp_path: Any) -> None:
+async def test_single_target_same_scope_aliases_source(tmp_path: Any) -> None:
     app = _make_app(tmp_path, bankstore_dir=str(tmp_path / "store"))
     bank = _make_bank(scope="RAM3")
     from kws import banks as _banks
 
     writable = _banks.writable_banks()
-    target = None
-    for w in writable:
-        if w.id == "RAM3":
-            target = w
-    assert target is not None
-    statuses: list[str] = []
-    app.notify_status = lambda msg, *a, **k: statuses.append(str(msg))  # type: ignore[method-assign]
+    target = next(w for w in writable if w.id == "RAM3")
+    app._sources["RAM3"] = _make_bank(scope="RAM3").source
     pushed: list[Any] = []
     app.push_screen = lambda s, c=None: pushed.append(s)  # type: ignore[assignment]
-    app._import_single_target_chosen("p", bank, [target], 0) if False else None
-    # call with target same scope
-    app._import_single_target_chosen("p", bank, writable, writable.index(target))
-    assert not any(isinstance(s, SingleImportScreen) for s in pushed)
-    assert any("same scope" in s for s in statuses)
+    app._import_single_target_chosen(
+        "p", bank, [bank], writable, writable.index(target)
+    )
+    screen = next(s for s in pushed if isinstance(s, SingleImportScreen))
+    assert screen._source_scope() != "RAM3"
+    source = screen.sources[screen._source_scope()]
+    assert source.bank_number == _banks.bank("RAM3").number
 
 
 @pytest.mark.asyncio
@@ -473,8 +470,78 @@ async def test_single_target_different_pushes_screen(tmp_path: Any) -> None:
         pushed.append((screen, callback))
 
     app.push_screen = fake_push  # type: ignore[assignment]
-    app._import_single_target_chosen("p", bank, writable, writable.index(target))
+    app._import_single_target_chosen(
+        "p", bank, [bank], writable, writable.index(target)
+    )
     assert any(isinstance(s, SingleImportScreen) for s, _ in pushed)
+
+
+@pytest.mark.asyncio
+async def test_back_from_single_returns_to_target_chooser(tmp_path: Any) -> None:
+    app = _make_app(tmp_path)
+    bank = _make_bank(scope="RAM1")
+    target = next(w for w in banks.writable_banks() if w.id == "RAM3")
+    pushed: list[Any] = []
+    app.push_screen = lambda s, c=None: pushed.append(s)  # type: ignore[assignment]
+    app._import_single_chosen(None, target, bank, {}, "p.syx", [bank], [target])
+    assert pushed and isinstance(pushed[0], ChoiceScreen)
+    assert pushed[0]._choices == [target.label]
+
+
+@pytest.mark.asyncio
+async def test_back_from_target_returns_to_source_chooser(tmp_path: Any) -> None:
+    app = _make_app(tmp_path)
+    bank = _make_bank(scope="RAM1")
+    target = next(w for w in banks.writable_banks() if w.id == "RAM3")
+    pushed: list[Any] = []
+    app.push_screen = lambda s, c=None: pushed.append(s)  # type: ignore[assignment]
+    app._import_single_target_chosen("p.syx", bank, [bank], [target], None)
+    assert pushed and isinstance(pushed[0], BankImportScreen)
+
+
+@pytest.mark.asyncio
+async def test_back_from_source_returns_to_file_picker(tmp_path: Any) -> None:
+    app = _make_app(tmp_path)
+    bank = _make_bank(scope="RAM1")
+    pushed: list[Any] = []
+    app.push_screen = lambda s, c=None: pushed.append(s)  # type: ignore[assignment]
+    app._import_single_source_chosen("p.syx", [bank], None)
+    assert pushed and isinstance(pushed[0], FilePickerScreen)
+
+
+@pytest.mark.asyncio
+async def test_back_from_whole_returns_to_file_picker(tmp_path: Any) -> None:
+    app = _make_app(tmp_path)
+    bank = _make_bank(scope="RAM1")
+    pushed: list[Any] = []
+    app.push_screen = lambda s, c=None: pushed.append(s)  # type: ignore[assignment]
+    app._import_whole_bank_chosen([bank], None)
+    assert pushed and isinstance(pushed[0], FilePickerScreen)
+
+
+@pytest.mark.asyncio
+async def test_file_picker_cancel_returns_to_import_menu(tmp_path: Any) -> None:
+    app = _make_app(tmp_path)
+    pushed: list[Any] = []
+    app.push_screen = lambda s, c=None: pushed.append((s, c))  # type: ignore[assignment]
+    menus: list[int] = []
+    app.action_import = lambda: menus.append(1)  # type: ignore[method-assign]
+    app._import_kind_chosen(1)
+    assert pushed
+    _picker, done = pushed[0]
+    done(None)
+    assert menus == [1]
+
+
+@pytest.mark.asyncio
+async def test_session_source_alias_carries_bank_number(tmp_path: Any) -> None:
+    app = _make_app(tmp_path)
+    bank = _make_bank(scope="RAM3")
+    existing = {"RAM3": _make_bank(scope="RAM3").source}
+    wrapped, aliased = app._session_source(bank, existing)
+    assert wrapped.scope != "RAM3"
+    assert aliased.bank_number == banks.bank("RAM3").number
+    assert wrapped.label.endswith("(RAM3#2)")
 
 
 @pytest.mark.asyncio
@@ -557,6 +624,55 @@ async def test_import_refreshes_the_target_bank_table(tmp_path: Any) -> None:
         await pilot.pause()
         slot_table = app.query_one("#slot-table", DataTable)
         assert "TestName" in str(slot_table.get_row_at(3)[2])
+
+
+@pytest.mark.asyncio
+async def test_single_chosen_uses_session_alias_sources(tmp_path: Any) -> None:
+    app = _make_app(tmp_path, bankstore_dir=str(tmp_path / "store"))
+    from kws import banks as _banks
+    from kws import records as _records
+    from kws import relations as _rels
+    from tests.test_bankbuild import make_patch, make_performance
+
+    target = next(w for w in _banks.writable_banks() if w.id == "RAM3")
+    target_source = deps.Source(
+        bank_id="RAM3",
+        performances=[bytes(PERF_RECORD_SIZE)] * 50,
+        patches=[bytes(PATCH_RECORD_SIZE)] * 35,
+        waveseq=None,
+    )
+    alias = "RAM1#2"
+    aliased = deps.Source(
+        bank_id=alias,
+        performances=[make_performance("Alias", ((0, 0),))]
+        + [bytes(PERF_RECORD_SIZE)] * 49,
+        patches=[make_patch("AliasPatch")] + [bytes(PATCH_RECORD_SIZE)] * 34,
+        waveseq=None,
+        bank_number=0,
+    )
+    sources = {alias: aliased, target.id: target_source}
+    app._sources[target.id] = target_source
+    app._write_gate = EditGate(armed=True)
+    app.device.write_bank_bundle = lambda *a, **k: {"verified": True}
+
+    def _no_record(_result: Any) -> None:
+        return None
+
+    app._record_write = _no_record  # type: ignore[method-assign]
+    app.notify_status = lambda *a, **k: None  # type: ignore[method-assign]
+    original = _make_bank(scope="RAM1")
+    choice = SingleImportChoice(
+        target_bank="RAM3",
+        assignments={0: _rels.PerfId(alias, 0)},
+        sources=sources,
+    )
+    app._import_single_chosen(choice, target, original, sources)
+    built = app._sources["RAM3"]
+    record = built.performances[0]
+    assert m.decode_name(record) == "Alias"
+    assert any(
+        part.bank == target.number for part in _records.performance_parts(record)
+    )
 
 
 @pytest.mark.asyncio
