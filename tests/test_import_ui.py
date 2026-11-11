@@ -13,6 +13,7 @@ from typing import Any, Optional
 from unittest.mock import patch
 
 import pytest
+from textual.widgets import DataTable
 
 from kws import bankstore, config, deps, importers, perfcopy, relations
 from kws import messages as m
@@ -386,6 +387,7 @@ async def test_whole_unit_choice_armed(tmp_path: Any) -> None:
     # _sources updated
     assert "RAM3" in app._sources
     assert len(recorded) == 1
+    assert app.catalog.display_name("RAM3", 3, _banks.Kind.PERFORMANCE) == "TestName"
 
 
 @pytest.mark.asyncio
@@ -516,6 +518,45 @@ async def test_single_chosen_armed(tmp_path: Any) -> None:
     assert writes[0]["before_blocks"]
     assert "RAM3" in app._sources
     assert len(recorded) == 1
+    assert app.catalog.display_name("RAM3", 3, _banks.Kind.PERFORMANCE) == "TestName"
+
+
+@pytest.mark.asyncio
+async def test_import_refreshes_the_target_bank_table(tmp_path: Any) -> None:
+    app = _make_app(tmp_path, bankstore_dir=str(tmp_path / "store"))
+    from kws import banks as _banks
+    from kws import relations as _rels
+
+    bank = _make_bank(scope="RAM1")
+    target = next(w for w in _banks.writable_banks() if w.id == "RAM3")
+    target_source = _make_bank(scope="RAM3", active_slots=[]).source
+    app._sources["RAM3"] = target_source
+    app._write_gate = EditGate(armed=True)
+    app.device.write_bank_bundle = lambda *a, **k: {"verified": True}
+
+    def _no_record(_result: Any) -> None:
+        return None
+
+    app._record_write = _no_record  # type: ignore[method-assign]
+    app.notify_status = lambda *a, **k: None  # type: ignore[method-assign]
+    sources = {bank.scope: bank.source, target.id: target_source}
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        target_number = _banks.bank("RAM3").number
+        app._fill((target_number, _banks.Kind.PERFORMANCE))
+        await pilot.pause()
+        slot_table = app.query_one("#slot-table", DataTable)
+        assert "TestName" not in str(slot_table.get_row_at(3)[2])
+
+        choice = SingleImportChoice(
+            target_bank="RAM3", assignments={3: _rels.PerfId("RAM1", 3)}
+        )
+        with patch.object(bankstore, "save", lambda *a, **k: None):
+            app._import_single_chosen(choice, target, bank, sources)
+        await pilot.pause()
+        slot_table = app.query_one("#slot-table", DataTable)
+        assert "TestName" in str(slot_table.get_row_at(3)[2])
 
 
 @pytest.mark.asyncio

@@ -2456,6 +2456,107 @@ class KwsedApp(App[None]):
             waveseq=built.waveseq,
         )
 
+    @staticmethod
+    def _names_in_blob(blob: bytes, size: int) -> Dict[int, str]:
+        return {
+            index: m.decode_name(blob[index * size : (index + 1) * size])
+            for index in range(len(blob) // size)
+        }
+
+    def _save_written_names(
+        self,
+        entry: Any,
+        perf_names: Dict[int, str],
+        patch_names: Dict[int, str],
+    ) -> None:
+        for kind, names in (
+            (banks.Kind.PERFORMANCE, perf_names),
+            (banks.Kind.PATCH, patch_names),
+        ):
+            for number, name in names.items():
+                self.catalog.set_live_name(entry.id, number, name, kind)
+        if self._live_path is None:
+            return
+        flat = {
+            _livenames.key(entry.id, number, kind): name
+            for kind, names in (
+                (banks.Kind.PERFORMANCE, perf_names),
+                (banks.Kind.PATCH, patch_names),
+            )
+            for number, name in names.items()
+        }
+        try:
+            _livenames.save(flat, self._live_path)
+        except OSError:
+            pass
+
+    def _save_written_card(
+        self,
+        scope_id: str,
+        perf_names: Dict[int, str],
+        patch_names: Dict[int, str],
+    ) -> None:
+        """An HCard bank is displayed from the capture archive, not the catalog."""
+        if scope_id == "CARD":
+            number = self._current_card
+        elif scope_id.startswith("CARD/"):
+            key = scope_id[5:]
+            number = int(key) if key.isdigit() else self._current_card
+        else:
+            return
+        if number is None:
+            return
+        captured = self._archive.get(number)
+        if captured is None:
+            return
+        updated = _cards.CapturedBank(
+            number=captured.number,
+            name=captured.name,
+            captured_at=captured.captured_at,
+            performances=perf_names,
+            patches=patch_names,
+            label=captured.label,
+            digest=captured.digest,
+            verified=False,
+        )
+        self._archive[number] = updated
+        if self._cards_path is not None:
+            try:
+                _cards.save(updated, self._cards_path)
+            except OSError:
+                pass
+
+    def _refresh_written_bank(self, scope_id: str, built: Any) -> None:
+        """Refresh the browser for the bank a write just changed.
+
+        The built bytes are already the post-write state; re-reading every
+        bank (``S``) would be slow and would send another `RECEIVING SYSEX`
+        request. Update this bank's live names and the visible rows instead.
+        """
+        try:
+            entry = banks.bank(scope_id)
+        except LookupError:
+            if not scope_id.startswith("CARD/"):
+                return
+            entry = banks.bank("CARD")
+
+        perf_blob = getattr(built, "performances", b"") or b""
+        patch_blob = getattr(built, "patches", b"") or b""
+        perf_names = self._names_in_blob(perf_blob, rec.PERFORMANCE_SIZE)
+        patch_names = self._names_in_blob(patch_blob, rec.PATCH_SIZE)
+        self._save_written_names(entry, perf_names, patch_names)
+        self._save_written_card(scope_id, perf_names, patch_names)
+
+        # Some callers (CLI-style tests) invoke the import methods without
+        # an App screen stack. The data is refreshed above; there is no
+        # table to repaint in that case.
+        if not getattr(self, "_screen_stack", None):
+            return
+        if self._current_pair[0] == entry.number:
+            self._refill_keeping_place()
+        else:
+            self._refresh_deps_pane()
+
     def _copy_perf_finished(
         self,
         perf: Any,
@@ -2483,6 +2584,7 @@ class KwsedApp(App[None]):
                 )
             except OSError:
                 pass
+        self._refresh_written_bank(destination.id, built)
         slot = (
             built.plan.allocations[0].target_perf_slot if built.plan.allocations else 0
         )
@@ -3256,6 +3358,7 @@ class KwsedApp(App[None]):
                 )
             except OSError:
                 pass
+        self._refresh_written_bank(target.id, relocated)
         self.notify_status(
             f"imported {bank.label} into {target.label}: {len(perfs)} performances"
         )
@@ -3395,6 +3498,7 @@ class KwsedApp(App[None]):
                 )
             except OSError:
                 pass
+        self._refresh_written_bank(target_scope, built)
         self.notify_status(f"imported into {target_bank.label}")
 
     def _import_bank_chosen(
@@ -5860,6 +5964,7 @@ class KwsedApp(App[None]):
         """Main thread: merge the staged banks, record ONE undo step, dismiss."""
         for bank_id, built in staged.built_banks.items():
             self._sources[bank_id] = self._source_from_built(bank_id, built)
+            self._refresh_written_bank(bank_id, built)
         self._multi_sets = list(multisets)
         self._multisets = list(multisets)
         if hasattr(self, "_record_write"):
