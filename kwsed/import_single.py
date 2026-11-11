@@ -41,6 +41,7 @@ _HELP_LINES = [
     "U  clear all assignments",
     "p  toggle shared/fresh patches (fresh = the import gets its own",
     "   patch copies, independent of the target bank)",
+    "a  auto audition: moving on a source row plays it after a short pause",
     "z  undo the last import or staging write (needs the armed gate)",
     "t  audition the focused row in the unit's edit buffer (an unassigned",
     "   row borrows the first free slot); fresh patch copies are staged",
@@ -162,6 +163,8 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
     }
     SingleImportScreen DataTable { height: 1fr; }
     .progress { height: 1; color: $accent; display: none; }
+    .status.warning { background: $error 30%; }
+    .gate.locked { background: $error 30%; }
     """
 
     BINDINGS = [
@@ -176,6 +179,7 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
         Binding("U", "clear_all", "Clear"),
         Binding("p", "toggle_patches", "Patches"),
         Binding("t", "audition", "Audition"),
+        Binding("a", "toggle_auto_audition", "Auto audition"),
         Binding("s", "cycle_source", "Source"),
         Binding("w", "toggle_gate", "Gate"),
         Binding("z", "undo_app", "Undo"),
@@ -229,6 +233,10 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
         self._slot_entry = ""
         self._slot_entry_source: Optional[int] = None
         self._source_path_width = 28
+        #: Audition whatever row the cursor lands on, after a short pause so
+        #: scrolling with the arrow keys does not start a transfer per row.
+        self._auto_audition = False
+        self._auto_audition_timer: Any = None
 
     @property
     def assignments(self) -> Dict[int, relations.PerfId]:
@@ -425,14 +433,19 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
             share_existing=self._share_patches,
         )
 
-    def _set_status(self, message: str) -> None:
+    def _set_status(self, message: str, *, warning: bool = False) -> None:
         self._status_message = message
         with suppress(Exception):
-            self.query_one(f"#{self.STATUS_ID}", Static).update(message)
+            widget = self.query_one(f"#{self.STATUS_ID}", Static)
+            widget.update(message)
+            if warning:
+                widget.add_class("warning")
+            else:
+                widget.remove_class("warning")
 
-    def set_status(self, message: str) -> None:
+    def set_status(self, message: str, *, warning: bool = False) -> None:
         """Show an app-generated source warning/merge note."""
-        self._set_status(message)
+        self._set_status(message, warning=warning)
 
     def set_progress(self, text: str) -> None:
         """Show the app's transfer bar: this screen covers the app's own."""
@@ -460,7 +473,12 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
                 gate_text = "Write gate: ARMED · w locks · ctrl+s writes"
             else:
                 gate_text = "Write gate: locked (press w) · ctrl+s writes"
-            self.query_one(f"#{self.GATE_ID}", Static).update(gate_text)
+            gate = self.query_one(f"#{self.GATE_ID}", Static)
+            gate.update(gate_text)
+            if self._gate is not None and not self._gate.armed:
+                gate.add_class("locked")
+            else:
+                gate.remove_class("locked")
         plan = self._plan()
         self._refresh_source_table()
         self._refresh_target_table(plan)
@@ -605,8 +623,8 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
             hint = (
                 "Space assign · type 00-49 + Enter exact slot (inline) · "
                 "u unassign · A all · U clear\n"
-                "s source banks/add · p patches · t audition · w gate · "
-                "ctrl+s import · ? help · Esc cancel"
+                "s source banks/add · p patches · t audition · a auto · "
+                "w gate · ctrl+s import · ? help · Esc cancel"
             )
             yield Static(hint, classes="hint", markup=False)
             yield DataTable(
@@ -916,7 +934,7 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
             # A DataTable keeps its cursor when unfocused, so ask for real
             # focus: auditioning a row the user is not looking at would
             # sound like the wrong row.
-            self._set_status("focus a source row to audition")
+            self._set_status("focus a source row to audition", warning=True)
             return
         # An unassigned row is auditioned through a scratch slot: the sound
         # depends on where the parts point, not on which performance slot
@@ -924,6 +942,52 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
         if self._on_audition_request is not None:
             self._on_audition_request(self)
             return
+
+    def action_toggle_auto_audition(self) -> None:
+        """Play the row the cursor lands on, like an Ensoniq editor does."""
+        self._auto_audition = not self._auto_audition
+        if not self._auto_audition:
+            if self._auto_audition_timer is not None:
+                self._auto_audition_timer.stop()
+                self._auto_audition_timer = None
+            self._set_status("auto audition off")
+            return
+        self._set_status("auto audition on — moving on a source row plays it")
+        self._schedule_auto_audition(immediate=True)
+
+    def on_data_table_row_highlighted(self, event: Any) -> None:
+        table = getattr(event, "data_table", None)
+        if (
+            table is not None
+            and table.id == self.SOURCE_TABLE_ID
+            and self._auto_audition
+        ):
+            self._schedule_auto_audition()
+
+    def _schedule_auto_audition(self, *, immediate: bool = False) -> None:
+        if not self._auto_audition or self._on_audition_request is None:
+            return
+        if self._auto_audition_timer is not None:
+            self._auto_audition_timer.stop()
+        delay = 0.05 if immediate else 0.6
+        self._auto_audition_timer = self.set_timer(delay, self._fire_auto_audition)
+
+    def _fire_auto_audition(self) -> None:
+        self._auto_audition_timer = None
+        if not self._auto_audition or self._on_audition_request is None:
+            return
+        # One audition at a time: while a transfer is running, the next
+        # cursor move retries, and a row is never queued twice.
+        exchange = getattr(self.app, "_exchange", None)
+        if exchange is not None and exchange.locked():
+            return
+        try:
+            table = self.query_one(f"#{self.SOURCE_TABLE_ID}", DataTable)
+        except Exception:
+            return
+        if not table.has_focus or table.cursor_row < 0:
+            return
+        self._on_audition_request(self)
 
     def action_toggle_gate(self) -> None:
         if self._gate is None:
@@ -933,7 +997,7 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
         if self._gate.armed:
             self._set_status("armed — press ctrl+s to write")
         else:
-            self._set_status("locked — press w to arm; ctrl+s writes")
+            self._set_status("locked — press w to arm; ctrl+s writes", warning=True)
         self._refresh()
 
     def action_import_choice(self) -> None:

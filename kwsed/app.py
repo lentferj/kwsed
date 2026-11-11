@@ -1544,6 +1544,9 @@ class KwsedApp(App[None]):
         height: 1; background: $boost; color: $accent; padding: 0 1;
         display: none;
     }
+    #status.warning {
+        background: $error 30%;
+    }
     """
 
     BINDINGS = [
@@ -1653,6 +1656,9 @@ class KwsedApp(App[None]):
         #: an audition has tried; False makes later auditions skip the
         #: attempt and go straight to the bank dump.
         self._preaudit_single_writes: Optional[bool] = None
+        #: True while an audition's staging is on the unit and `z` can still
+        #: take it back out; the import screen's exit says so.
+        self._pending_staging = False
         try:
             self.device.progress = self._progress_report
         except Exception:  # noqa: S110 - decoration, not protocol
@@ -2289,6 +2295,8 @@ class KwsedApp(App[None]):
         for record in reversed(failed or []):
             self._undo_log.push(record)
         self._undo_log.settle(results)
+        if results and all(results):
+            self._pending_staging = False
 
     @work(thread=True)
     def _undo_worker(self, records: list[Any]) -> None:
@@ -3704,6 +3712,11 @@ class KwsedApp(App[None]):
         target = _banks.bank(choice.target_bank)
         sources = self._sources_with_store()
         label = getattr(bank, "label", "")
+        conflict = self._preaudit_conflicting_slots(
+            target,
+            range(_banks.PERFORMANCES_PER_BANK),
+            range(_banks.PATCHES_PER_BANK),
+        )
 
         def work() -> Any:
             target_source = sources.get(target.id)
@@ -3726,13 +3739,23 @@ class KwsedApp(App[None]):
                 self.notify_status(f"import: {failure}", refused=True)
                 return
             relocated, write_result = result
-            self._import_whole_bank_written(label, target, relocated, write_result)
+            self._import_whole_bank_written(
+                label, target, relocated, write_result, conflict
+            )
 
-        self.notify_status(f"writing {label} into {target.label}...")
+        status = f"writing {label} into {target.label}..."
+        if conflict:
+            status = f"warning: this import overwrites {conflict} — writing anyway"
+        self.notify_status(status, warn=bool(conflict))
         self._device_worker(work, done, f"importing {label} into {target.label}")
 
     def _import_whole_bank_written(
-        self, label: str, target: Any, relocated: Any, result: Any
+        self,
+        label: str,
+        target: Any,
+        relocated: Any,
+        result: Any,
+        conflict: str = "",
     ) -> None:
         """Book-keeping after a whole-bank import has landed."""
         if hasattr(self, "_record_write"):
@@ -3766,8 +3789,11 @@ class KwsedApp(App[None]):
             except OSError:
                 pass
         self._refresh_written_bank(target.id, relocated)
+        overwrote = f"; overwrote {conflict}" if conflict else ""
         self.notify_status(
             f"imported {label} into {target.label}: {len(perfs)} performances"
+            f"{overwrote}",
+            warn=bool(conflict),
         )
 
     def _complete_source_file(self, path: str, bank: Any) -> tuple[Any, str]:
@@ -4003,8 +4029,43 @@ class KwsedApp(App[None]):
 
     def _refuse_audition(self, screen: Any, msg: str) -> None:
         """Say no in both places: the screen's line and the app's."""
-        screen.set_status(msg)
+        screen.set_status(msg, warning=True)
         self.notify_status(msg, refused=True)
+
+    def _preaudit_conflicting_slots(
+        self,
+        target_bank: Any,
+        perf_slots: Any,
+        patch_slots: Any,
+    ) -> str:
+        """What of the configured staging area an import is about to replace.
+
+        The staging slots are the user's scratch, reserved by config; an
+        import into that same bank will write them like any other slot.
+        Naming them before the write is the difference between a surprise
+        and a decision.
+        """
+        from kws import config as _cfg
+
+        hits: list[str] = []
+        perf_area = _cfg.load_preaudit_target(self._config_path)
+        if (
+            perf_area is not None
+            and perf_area[0].id == target_bank.id
+            and perf_area[1] in set(perf_slots)
+        ):
+            hits.append(f"performance {perf_area[1]:02d}")
+        patch_area = _cfg.load_preaudit_patch_area(self._config_path)
+        if patch_area is not None and patch_area[0].id == target_bank.id:
+            overlap = sorted(set(patch_area[1]) & set(patch_slots))
+            if overlap:
+                hits.append("patch " + ", ".join(f"{n:02d}" for n in overlap))
+        if not hits:
+            return ""
+        return (
+            f"pre-audit staging {' and '.join(hits)} in {target_bank.label} "
+            "(preaudit_target_perf / preaudit_target_patches)"
+        )
 
     def _audition_staging_areas(
         self, screen: Any, fresh: Any
@@ -4128,6 +4189,7 @@ class KwsedApp(App[None]):
                         payload={"backups": undo_entries},
                     )
                 )
+                self._pending_staging = True
             msg = self._staging_message(
                 fresh,
                 patch_area,
@@ -4291,7 +4353,15 @@ class KwsedApp(App[None]):
                 # this program is the only writer of the staging slots, so
                 # what it wrote last time is what is there now. With the
                 # backup switched off, nothing is read at all.
-                before = bytes(self.device.read_patch(bank.number, staging_slot))
+                before = bytes(
+                    self.device.read_patch(
+                        bank.number,
+                        staging_slot,
+                        label=(
+                            f"backing up {bank.label} staging slot {staging_slot:02d}"
+                        ),
+                    )
+                )
                 cache_slots[staging_slot] = before
             captured[staging_slot] = before if before is not None else b""
             try:
@@ -4715,7 +4785,13 @@ class KwsedApp(App[None]):
         writable: Sequence[Any] = (),
     ) -> None:
         if choice is None:
-            if path and writable:
+            if self._pending_staging:
+                self.notify_status(
+                    "an audition's staging is still on the unit; z restores "
+                    "it (armed gate)",
+                    warn=True,
+                )
+            elif path and writable:
                 self._open_single_target_chooser(path, bank, banks_list, writable)
             return
         if not self._write_gate.armed:
@@ -4751,6 +4827,14 @@ class KwsedApp(App[None]):
                 refused=True,
             )
             return
+        patch_slots = {
+            slot
+            for alloc in built.plan.allocations
+            for _pid, slot in alloc.allocated_patches
+        }
+        conflict = self._preaudit_conflicting_slots(
+            target_bank, assignments.keys(), patch_slots
+        )
         target_source = sources.get(target_scope)
         if target_source is None:
             target_source = sources.get(target.id)
@@ -4774,13 +4858,23 @@ class KwsedApp(App[None]):
             if failure is not None:
                 self.notify_status(f"import: {failure}", refused=True)
                 return
-            self._import_single_written(built, target_scope, target_bank, result)
+            self._import_single_written(
+                built, target_scope, target_bank, result, conflict
+            )
 
-        self.notify_status(f"writing the import into {target_bank.label}...")
+        status = f"writing the import into {target_bank.label}..."
+        if conflict:
+            status = f"warning: this import overwrites {conflict} — writing anyway"
+        self.notify_status(status, warn=bool(conflict))
         self._device_worker(work, done, f"importing into {target_bank.label}")
 
     def _import_single_written(
-        self, built: Any, target_scope: str, target_bank: Any, result: Any
+        self,
+        built: Any,
+        target_scope: str,
+        target_bank: Any,
+        result: Any,
+        conflict: str = "",
     ) -> None:
         """Book-keeping after a single import has landed."""
         if hasattr(self, "_record_write"):
@@ -4799,9 +4893,11 @@ class KwsedApp(App[None]):
             except OSError:
                 pass
         self._refresh_written_bank(target_scope, built)
+        overwrote = f"; overwrote {conflict}" if conflict else ""
         self.notify_status(
-            f"imported into {target_bank.label}; target refreshed only "
-            "(S is a full scan, r re-reads the current bank)"
+            f"imported into {target_bank.label}{overwrote}; target refreshed "
+            "only (S is a full scan, r re-reads the current bank)",
+            warn=bool(conflict),
         )
 
     def _import_bank_chosen(
@@ -5961,9 +6057,18 @@ class KwsedApp(App[None]):
                 f"{_cards.bank_title(captured, entry)}   [dim]{status}[/dim]"
             )
 
-    def notify_status(self, message: str, *, refused: bool = False) -> None:
+    def notify_status(
+        self, message: str, *, refused: bool = False, warn: bool = False
+    ) -> None:
         prefix = "[b]refused[/b] · " if refused else ""
-        self.query_one("#status", Static).update(prefix + message)
+        widget = self.query_one("#status", Static)
+        widget.update(prefix + message)
+        # A red-tinted line for anything that is a refusal or a warning, so
+        # the eye finds it without reading; plain status clears the tint.
+        if refused or warn:
+            widget.add_class("warning")
+        else:
+            widget.remove_class("warning")
 
     # --- transfer progress --------------------------------------------------
 

@@ -28,14 +28,15 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from textual.widgets import Static
+from textual.widgets import DataTable, Static
 
-from kws import backup, banks, config, deps
+from kws import backup, banks, config, deps, relations
 from kws import catalog as cat
 from kws import records as r
 from kwsed.app import KwsedApp
 from kwsed.demo import DemoDevice
-from kwsed.import_single import SingleImportScreen
+from kwsed.gate import EditGate
+from kwsed.import_single import SingleImportChoice, SingleImportScreen
 from tests.test_bankbuild import make_patch, make_performance, make_waveseq
 
 RAM3 = banks.bank("RAM3")
@@ -678,3 +679,121 @@ async def test_the_staging_bank_is_read_when_the_screen_opens(tmp_path, monkeypa
         assert bank_reads == [], "the fallback reused the prefetched bank"
         assert device.bundle_write_count == 1
         assert device.read_patch("RAM3", 27) == _pcm_patch()
+
+
+def test_the_conflict_warning_names_the_staging_slots(tmp_path):
+    app = KwsedApp(
+        DemoDevice(), catalog=cat.Catalog([]), config_path=_staging_config(tmp_path)
+    )
+    conflict = app._preaudit_conflicting_slots(banks.bank("RAM3"), {49}, {27, 28})
+    assert "performance 49" in conflict
+    assert "patch 27, 28" in conflict
+    assert "RAM 3" in conflict
+    assert app._preaudit_conflicting_slots(banks.bank("RAM2"), {49}, {27, 28}) == ""
+
+
+@pytest.mark.asyncio
+async def test_a_single_import_into_a_staging_slot_warns(tmp_path):
+    device = DemoDevice()
+    app = KwsedApp(
+        device, catalog=cat.Catalog([]), config_path=_staging_config(tmp_path)
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._sources["RAM1"] = _pcm_source()
+        app._sources["RAM3"] = _target_source(keep=False)
+        target = banks.bank("RAM3")
+        app._write_gate = EditGate(armed=True)
+        seen: list[str] = []
+        app.notify_status = lambda msg, *a, **k: seen.append(str(msg))  # type: ignore[method-assign]
+
+        choice = SingleImportChoice(
+            target_bank="RAM3", assignments={49: relations.PerfId("RAM1", 0)}
+        )
+        app._import_single_chosen(
+            choice, target, app._sources["RAM1"], dict(app._sources)
+        )
+        await app.workers.wait_for_complete()
+        await _settle(pilot)
+
+        assert any("pre-audit" in msg and "49" in msg for msg in seen), seen
+
+
+@pytest.mark.asyncio
+async def test_warnings_tint_the_status_line(tmp_path):
+    device = DemoDevice()
+    app = KwsedApp(device, catalog=cat.Catalog([]), config_path=str(tmp_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        status = app.query_one("#status", Static)
+        app.notify_status("plain")
+        await pilot.pause()
+        assert not status.has_class("warning")
+        app.notify_status("nope", refused=True)
+        await pilot.pause()
+        assert status.has_class("warning")
+        app.notify_status("plain again")
+        await pilot.pause()
+        assert not status.has_class("warning")
+
+
+@pytest.mark.asyncio
+async def test_auto_audition_plays_the_row_the_cursor_lands_on(tmp_path):
+    device = DemoDevice()
+    app = KwsedApp(device, catalog=cat.Catalog([]), config_path=str(tmp_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        source = _pcm_source()
+        source.performances[1] = make_performance("Second", ((0, 0), (0, 0)))
+        app._sources["RAM1"] = source
+        app._sources["RAM3"] = _target_source(keep=True)
+        screen = await _open_import_screen(app, pilot)
+        table = screen.query_one("#source-table", DataTable)
+        table.focus()
+        await _settle(pilot)
+
+        await pilot.press("a")
+        await pilot.pause(0.2)
+        await app.workers.wait_for_complete()
+        await _settle(pilot)
+        assert screen._auto_audition is True
+        first = len(device.buffer_log)
+        assert first >= 1, "turning it on plays the current row"
+
+        table.move_cursor(row=1)
+        await pilot.pause(0.9)
+        await app.workers.wait_for_complete()
+        await _settle(pilot)
+        assert len(device.buffer_log) > first, "the next row plays too"
+
+
+@pytest.mark.asyncio
+async def test_leaving_the_screen_says_the_staging_is_still_on_the_unit(tmp_path):
+    device = DemoDevice()
+    app = KwsedApp(
+        device, catalog=cat.Catalog([]), config_path=_staging_config(tmp_path)
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._sources["RAM1"] = _pcm_source()
+        app._sources["RAM3"] = _target_source(keep=False)
+        before = device.read_patch("RAM3", 27)
+        await _open_import_screen(app, pilot)
+        await pilot.press("w")
+        await _settle(pilot)
+        await pilot.press("t")
+        await app.workers.wait_for_complete()
+        await _settle(pilot)
+        assert app._pending_staging is True
+
+        await pilot.press("q")
+        await _settle(pilot)
+        status = app.query_one("#status", Static)
+        assert "staging is still on the unit" in str(status.content)
+        assert status.has_class("warning")
+
+        await pilot.press("z")
+        await app.workers.wait_for_complete()
+        await _settle(pilot)
+        assert app._pending_staging is False
+        assert device.read_patch("RAM3", 27) == before

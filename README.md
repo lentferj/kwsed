@@ -602,6 +602,8 @@ u / Backspace / Delete   unassign
 A / U        assign all unassigned / clear all
 p            toggle shared/fresh patches (fresh = the import gets its
              own patch copies, independent of the target bank)
+t            audition the focused row (see below)
+a            toggle auto audition: moving on a source row plays it
 s            choose a source bank already in the session, or add another file
 w            toggle the write gate
 z            undo the last import or staging write (needs the armed gate)
@@ -615,7 +617,11 @@ t            audition the focused row in the unit's edit buffer before
              memory as one fenced write, backed up and one `z` to undo.
              Without a configured staging area -> refused, use ctrl+s;
              staging writes need the armed write gate and are backed up;
-             the staging slots are the user's to keep free
+             the staging slots are the user's to keep free. `a` turns on
+             auto audition: the row the cursor lands on is played after a
+             short pause, so arrow-key scrolling does not start a transfer
+             per row. An import that would overwrite the configured
+             pre-audit slots warns (red status line) before it writes.
 ```
 
 The lower table has a `patch slots` column: it lists the destination patch

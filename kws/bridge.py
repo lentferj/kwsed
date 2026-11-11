@@ -733,11 +733,21 @@ class WavestationBridge:
             )
 
     def read_patch(
-        self, bank: int | str, number: int, *, timeout: Optional[float] = None
+        self,
+        bank: int | str,
+        number: int,
+        *,
+        timeout: Optional[float] = None,
+        label: Optional[str] = None,
     ) -> bytes:
-        """One patch's 426 bytes. Read-only, and makes no sound."""
+        """One patch's 426 bytes. Read-only, and makes no sound.
+
+        ``label`` names the transfer in the progress bar; the audition
+        staging reads a slot to back it up, which is a different thing
+        from reading it to play it and worth saying so.
+        """
         entry = banks.bank(bank)
-        label = f"reading {entry.label} patch {number:02d}"
+        label = label or f"reading {entry.label} patch {number:02d}"
         wire = records.PATCH_SIZE * 2
         with self._progress_scope(label, _wire_estimate(wire)) as estimate:
             started = time.monotonic()

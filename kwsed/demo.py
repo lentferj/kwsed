@@ -570,7 +570,12 @@ class DemoDevice:
         }
 
     def read_patch(
-        self, bank: int | str, number: int, *, timeout: Optional[float] = None
+        self,
+        bank: int | str,
+        number: int,
+        *,
+        timeout: Optional[float] = None,
+        label: Optional[str] = None,
     ) -> bytes:
         entry = banks.bank(bank)
         payload = self._bank_payload(entry, banks.Kind.PATCH)
