@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import os
 import sys
 import threading
 from dataclasses import dataclass
@@ -71,6 +72,7 @@ from textual.screen import ModalScreen
 from textual.widgets import DataTable, Header, Input, Label, Static
 
 from kws import bankstore
+from kws import import_audit
 from kws import importers
 from kws import banks
 from kws import deps
@@ -87,6 +89,7 @@ from kws import scan as _scan
 from kws import undo as _undo
 from kwsed.gate import EditGate
 from kwsed.file_picker import FilePickerScreen
+from kwsed.import_companions import find_companions, unique_equivalent_companions
 from kwsed.import_screen import BankImportScreen
 from kwsed.import_bank import WholeBankImportScreen
 from kwsed.import_single import SingleImportScreen
@@ -3645,6 +3648,39 @@ class KwsedApp(App[None]):
             f"imported {bank.label} into {target.label}: {len(perfs)} performances"
         )
 
+    def _complete_source_file(self, path: str, bank: Any) -> tuple[Any, str]:
+        """Auto-merge uniquely matching companion fragments and warn if short."""
+        if not path:
+            return bank, ""
+        current = bank.source
+        notes: list[str] = []
+        for _ in range(4):
+            audit = import_audit.audit_source(current)
+            if audit.complete:
+                break
+            companions = unique_equivalent_companions(
+                find_companions(path, current), path
+            )
+            if len(companions) > 1:
+                names = ", ".join(os.path.basename(c.path) for c in companions[:3])
+                notes.append(f"{audit.summary()}; multiple companions: {names}")
+                break
+            if not companions:
+                notes.append(f"{audit.summary()}; no companion file found")
+                break
+            companion = companions[0]
+            current = companion.merged
+            notes.append(f"auto-merged {os.path.basename(companion.path)}")
+        final = import_audit.audit_source(current)
+        if notes and not final.complete:
+            notes.append(final.summary())
+        completed = SimpleNamespace(
+            label=getattr(bank, "label", ""),
+            scope=getattr(bank, "scope", ""),
+            source=current,
+        )
+        return completed, "; ".join(notes)
+
     def _import_single_source_chosen(
         self, path: str, banks_list: Sequence[Any], index: Optional[int]
     ) -> None:
@@ -3664,7 +3700,8 @@ class KwsedApp(App[None]):
         if not writable:
             self.notify_status("no writable target banks", refused=True)
             return
-        self._open_single_target_chooser(path, bank, banks_list, writable)
+        bank, note = self._complete_source_file(path, bank)
+        self._open_single_target_chooser(path, bank, banks_list, writable, note)
 
     def _open_single_target_chooser(
         self,
@@ -3672,11 +3709,12 @@ class KwsedApp(App[None]):
         bank: Any,
         banks_list: Sequence[Any],
         writable: Sequence[Any],
+        note: str = "",
     ) -> None:
         self.push_screen(
             TargetBankScreen("Target bank", [b.label for b in writable]),
             lambda ti: self._import_single_target_chosen(
-                path, bank, banks_list, writable, ti
+                path, bank, banks_list, writable, ti, note
             ),
         )
 
@@ -3733,6 +3771,7 @@ class KwsedApp(App[None]):
         banks_list: Sequence[Any],
         writable: Sequence[Any],
         target_index: Optional[int],
+        note: str = "",
     ) -> None:
         if target_index is None:
             # Back to the source-bank preview.
@@ -3770,6 +3809,7 @@ class KwsedApp(App[None]):
                 target_source=target_source,
                 gate=self._write_gate,
                 on_source_request=self._single_source_menu,
+                initial_status=note,
             ),
             lambda choice: self._import_single_chosen(
                 choice, target, bank, sources, path, banks_list, writable
@@ -3900,6 +3940,7 @@ class KwsedApp(App[None]):
             self._add_extra_source(screen, bank, path)
 
     def _add_extra_source(self, screen: Any, bank: Any, path: str = "") -> None:
+        bank, note = self._complete_source_file(path, bank)
         incoming = bank.source
         for index, existing in enumerate(screen.source_banks):
             if not same_source_bank(existing.source, incoming):
@@ -3915,13 +3956,17 @@ class KwsedApp(App[None]):
                 read_only=bool(getattr(existing, "read_only", False)),
             )
             screen.replace_source_bank(index, entry, merged)
-            self.notify_status(
+            message = note or (
                 f"merged {getattr(bank, 'label', path)} into "
                 f"{entry.label}; assignments kept"
             )
+            screen.set_status(message)
+            self.notify_status(message)
             return
         wrapped, aliased = self._session_source(bank, screen.sources, path)
         screen.add_source_bank(wrapped, aliased)
+        if note:
+            screen.set_status(note)
 
     def _import_single_chosen(  # noqa: C901 - one flow, with fence and cache
         self,
@@ -4001,7 +4046,10 @@ class KwsedApp(App[None]):
             except OSError:
                 pass
         self._refresh_written_bank(target_scope, built)
-        self.notify_status(f"imported into {target_bank.label}")
+        self.notify_status(
+            f"imported into {target_bank.label}; target refreshed only "
+            "(S is a full scan, r re-reads the current bank)"
+        )
 
     def _import_bank_chosen(
         self, kind: int, banks_list: Sequence[Any], index: Optional[int]
@@ -6120,6 +6168,9 @@ class KwsedApp(App[None]):
         )
 
     def _maybe_offer_scan(self) -> None:
+        # Do not put the empty-catalog offer on top of an import/dialog.
+        if len(self.screen_stack) > 1:
+            return
         if (
             self._live_path is None
             or bool(self.catalog)

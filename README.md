@@ -595,12 +595,21 @@ waveseq files. Components for the same bank are merged into the source entry,
 so the performance brings the matching patches and sequence data with it when
 assigned.
 
+When a performance-only file is selected, the app audits its used parts:
+missing local patch slots and referenced wave sequences are reported in the
+import screen. It also looks in the same directory for similarly named
+`.syx`/`.MID`/`.bnk` companions. If exactly one candidate covers the missing
+references (byte-identical `.MID`/`.syx` copies count as one), it is merged
+automatically and the screen says so. Ambiguous or incomplete candidates are
+listed as warnings instead of being guessed. References to RAM2/RAM3/ROM/Card
+are treated as external and are not reported as missing from the file.
+
 The app reads the destination bank once, the slot-preserving planner keeps
 every untouched destination slot and every surviving shared/ROM reference, and
 `ctrl+s` writes one fenced bundle with one undo step instead of one slow
 single-performance operation per row. After the write, the target bank's names
 and rows are refreshed from the bytes just written, without re-reading every
-bank; `S` remains the full rescan.
+bank; `S` remains the full rescan and `r` re-reads only the current bank/kind.
 
 The Import menu and the target-bank chooser bind both `q` and `Esc` and show
 the legend `↑/↓ choose · Enter select · q / Esc back · ? help`.

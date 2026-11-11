@@ -76,6 +76,7 @@ def _screen(
     target_used_patches: int = 0,
     gate_armed: bool = True,
     initial_assignments: Any = None,
+    initial_status: str = "",
 ) -> SingleImportScreen:
     if active_slots is None:
         active_slots = [0, 1]
@@ -108,6 +109,7 @@ def _screen(
         target_source=target_source,
         gate=EditGate(armed=gate_armed),
         initial_assignments=initial_assignments,
+        initial_status=initial_status,
     )
 
 
@@ -124,6 +126,20 @@ async def test_mount() -> None:
         assert tgt.row_count == 50
         row0 = [str(c) for c in tgt.get_row_at(0)]
         assert row0[1] == "Init"
+
+
+@pytest.mark.asyncio
+async def test_initial_status_is_visible_and_survives_refresh() -> None:
+    screen = _screen(active_slots=[0], initial_status="warning: missing patches")
+    host = _host()
+    async with host.run_test() as pilot:
+        host.push_screen_cb(screen)
+        await settle(pilot)
+        status = screen.query_one("#status", Static)
+        assert "missing patches" in str(status.content)
+        screen._refresh()
+        await settle(pilot)
+        assert "missing patches" in str(status.content)
 
 
 @pytest.mark.asyncio
@@ -194,6 +210,24 @@ async def test_inline_one_digit_enter_assigns() -> None:
         await settle(pilot)
         assert screen.assignments.get(1) is not None
         assert screen.assignments[1].number == 1
+        assert src.cursor_row == 1
+
+
+@pytest.mark.asyncio
+async def test_inline_enter_keeps_a_lower_source_row_selected() -> None:
+    screen = _screen(active_slots=[0, 1, 2])
+    host = _host()
+    async with host.run_test() as pilot:
+        host.push_screen_cb(screen)
+        await settle(pilot)
+        src = screen.query_one("#source-table", DataTable)
+        src.move_cursor(row=2)
+        await settle(pilot)
+        await pilot.press("0")
+        await pilot.press("5")
+        await settle(pilot)
+        assert screen.assignments.get(5) is not None
+        assert src.cursor_row == 2
 
 
 @pytest.mark.asyncio
@@ -447,6 +481,23 @@ async def test_add_source_bank_keeps_assignments_and_carries_sources() -> None:
         result = host.result
         assert isinstance(result, SingleImportChoice)
         assert "RAM1#2" in result.sources
+
+
+@pytest.mark.asyncio
+async def test_gate_arming_shows_ctrl_s_and_does_not_duplicate_line() -> None:
+    screen = _screen(active_slots=[0], gate_armed=False)
+    host = _host()
+    async with host.run_test() as pilot:
+        host.push_screen_cb(screen)
+        await settle(pilot)
+        await pilot.press("w")
+        await settle(pilot)
+        gate = str(screen.query_one("#gate", Static).content)
+        status = str(screen.query_one("#status", Static).content)
+        assert "ARMED" in gate
+        assert "ctrl+s writes" in gate
+        assert "ctrl+s" in status
+        assert gate != status
 
 
 @pytest.mark.asyncio

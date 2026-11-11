@@ -191,6 +191,7 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
         on_source_request: Optional[Callable[["SingleImportScreen"], None]] = None,
         on_cancel: Optional[Callable[["SingleImportScreen"], None]] = None,
         initial_assignments: Optional[Mapping[int, relations.PerfId]] = None,
+        initial_status: str = "",
     ) -> None:
         super().__init__()
         self._path = path
@@ -207,7 +208,7 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
             dict(initial_assignments) if initial_assignments else {}
         )
         self._active_sources: List[int] = []
-        self._status_message = ""
+        self._status_message = initial_status
         #: Target slot digits typed straight into the source row. No modal:
         #: the target column shows the digits while they are entered.
         self._slot_entry = ""
@@ -413,6 +414,10 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
         with suppress(Exception):
             self.query_one(f"#{self.STATUS_ID}", Static).update(message)
 
+    def set_status(self, message: str) -> None:
+        """Show an app-generated source warning/merge note."""
+        self._set_status(message)
+
     def _refresh(self) -> None:
         self._active_sources = self._active_source_slots()
         with suppress(Exception):
@@ -426,11 +431,11 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
             self.query_one(f"#{self.HEADER_ID}", Static).update(header_text)
         with suppress(Exception):
             if self._gate is None:
-                gate_text = "Write gate: not held here"
+                gate_text = "Write gate: not held here · ctrl+s writes"
             elif self._gate.armed:
-                gate_text = "Write gate: ARMED"
+                gate_text = "Write gate: ARMED · w locks · ctrl+s writes"
             else:
-                gate_text = "Write gate: locked (press w)"
+                gate_text = "Write gate: locked (press w) · ctrl+s writes"
             self.query_one(f"#{self.GATE_ID}", Static).update(gate_text)
         plan = self._plan()
         self._refresh_source_table()
@@ -450,7 +455,9 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
             if len(plan.rejected) > 3:
                 suffix = f" (+{len(plan.rejected) - 3} more)"
             self._set_status("; ".join(rejected) + suffix)
-        elif not self._status_message:
+        elif self._status_message:
+            self._set_status(self._status_message)
+        else:
             self._set_status("")
 
     def _refresh_source_table(self) -> None:
@@ -458,8 +465,13 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
             table = self.query_one(f"#{self.SOURCE_TABLE_ID}", DataTable)
         except Exception:
             return
-        table.clear()
         cursor = table.cursor_row
+        cursor_key = (
+            str(self._active_sources[cursor])
+            if cursor is not None and 0 <= cursor < len(self._active_sources)
+            else None
+        )
+        table.clear()
         for slot in self._active_sources:
             bank = self._source_bank()
             source = getattr(bank, "source", None)
@@ -477,10 +489,18 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
                 key=str(slot),
             )
         if self._active_sources:
-            if cursor is None or cursor < 0 or cursor >= len(self._active_sources):
-                cursor = 0
+            row = None
+            if cursor_key is not None:
+                with suppress(Exception):
+                    row = table.get_row_index(cursor_key)
+            if row is None:
+                row = (
+                    cursor
+                    if cursor is not None and 0 <= cursor < len(self._active_sources)
+                    else 0
+                )
             with suppress(Exception):
-                table.move_cursor(row=cursor)
+                table.move_cursor(row=row)
             table.focus()
 
     def _refresh_target_table(self, plan: Any = None) -> None:
@@ -841,9 +861,9 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
             return
         self._gate.toggle()
         if self._gate.armed:
-            self._set_status("write gate ARMED")
+            self._set_status("armed — press ctrl+s to write")
         else:
-            self._set_status("write gate locked (press w)")
+            self._set_status("locked — press w to arm; ctrl+s writes")
         self._refresh()
 
     def action_import_choice(self) -> None:

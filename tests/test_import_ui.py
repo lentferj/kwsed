@@ -15,13 +15,23 @@ from unittest.mock import patch
 import pytest
 from textual.widgets import DataTable, Static
 
-from kws import banks, bankstore, config, deps, importers, perfcopy, relations
+from kws import (
+    banks,
+    bankstore,
+    config,
+    deps,
+    import_audit,
+    importers,
+    perfcopy,
+    relations,
+)
 from kws import messages as m
 from kwsed.app import _HELP, KEY_HINTS, CopyPerformanceScreen, KwsedApp
 from kwsed.demo import DemoDevice
 from kwsed.file_picker import FilePickerScreen
 from kwsed.gate import EditGate
 from kwsed.import_bank import WholeBankChoice, WholeBankImportScreen
+from kwsed.import_companions import Companion
 from kwsed.import_screen import BankImportScreen
 from kwsed.import_single import SingleImportChoice, SingleImportScreen
 from kwsed.import_source import SourceEntry, unit_bank_choices
@@ -134,6 +144,9 @@ class _SourceHost:
         self.source_banks[index] = bank
         self.sources[str(bank.scope)] = source if source is not None else bank.source
 
+    def set_status(self, message: str) -> None:
+        self.status = message
+
 
 @pytest.mark.asyncio
 async def test_single_source_menu_offers_file_and_unit_sources(tmp_path: Any) -> None:
@@ -211,6 +224,96 @@ async def test_add_patch_file_merges_into_performance_source(tmp_path: Any) -> N
     assert source.performances == existing_source.performances
     assert len(source.patches) == 35
     assert replaced.source_origin == "/p/Performances.syx"
+
+
+def _partial_bank() -> importers.ImportedBank:
+    from tests.test_bankbuild import make_performance
+
+    source = deps.Source(
+        bank_id="RAM1",
+        performances=[make_performance("Needs Patch", ((0, 0),))]
+        + [bytes(PERF_RECORD_SIZE)] * 49,
+        patches=[],
+        waveseq=None,
+        bank_number=0,
+    )
+    return importers.ImportedBank(
+        label="Performance file", scope="RAM1", format="sysex", source=source
+    )
+
+
+def _complete_bank() -> Any:
+    from tests.test_bankbuild import make_patch, make_performance
+
+    source = deps.Source(
+        bank_id="RAM1",
+        performances=[make_performance("Needs Patch", ((0, 0),))]
+        + [bytes(PERF_RECORD_SIZE)] * 49,
+        patches=[make_patch("Complete")] + [bytes(PATCH_RECORD_SIZE)] * 34,
+        waveseq=None,
+        bank_number=0,
+    )
+    return source
+
+
+@pytest.mark.asyncio
+async def test_complete_source_auto_merges_unique_companion(tmp_path: Any) -> None:
+    app = _make_app(tmp_path)
+    bank = _partial_bank()
+    merged = _complete_bank()
+    audit = import_audit.audit_source(merged)
+    companion = Companion(
+        path="/p/MS_Test_Patches.syx",
+        label="Patches file",
+        source=merged,
+        merged=merged,
+        audit=audit,
+    )
+    with patch("kwsed.app.find_companions", return_value=[companion]):
+        completed, note = app._complete_source_file("/p/MS_Test.syx", bank)
+    assert "auto-merged" in note
+    assert len(completed.source.patches) == 35
+    assert import_audit.audit_source(completed.source).complete
+
+
+@pytest.mark.asyncio
+async def test_complete_source_warns_when_no_companion(tmp_path: Any) -> None:
+    app = _make_app(tmp_path)
+    bank = _partial_bank()
+    with patch("kwsed.app.find_companions", return_value=[]):
+        completed, note = app._complete_source_file("/p/MS_Test.syx", bank)
+    assert completed.source is bank.source
+    assert "missing" in note
+    assert "no companion" in note
+
+
+@pytest.mark.asyncio
+async def test_complete_source_reports_ambiguous_companions(tmp_path: Any) -> None:
+    app = _make_app(tmp_path)
+    bank = _partial_bank()
+    merged = _complete_bank()
+    candidate = Companion(
+        path="/p/MS_Test_Patches.syx",
+        label="Patches file",
+        source=merged,
+        merged=merged,
+        audit=import_audit.audit_source(merged),
+    )
+    other = _complete_bank()
+    other.patches[0] = bytes(PATCH_RECORD_SIZE)
+    other_candidate = Companion(
+        path="/p/MS_Test_Other.syx",
+        label="Other patches",
+        source=other,
+        merged=other,
+        audit=import_audit.audit_source(other),
+    )
+    with patch(
+        "kwsed.app.find_companions",
+        return_value=[candidate, other_candidate],
+    ):
+        _completed, note = app._complete_source_file("/p/MS_Test.syx", bank)
+    assert "multiple companions" in note
 
 
 @pytest.mark.asyncio
