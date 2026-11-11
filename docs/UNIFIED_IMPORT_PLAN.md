@@ -109,8 +109,10 @@ for **Whole bank** and feed the selected unit snapshot to
   planned performance to the unit's edit buffer without writing memory when
   nothing new is needed (an unassigned row borrows the first free slot).
   Fresh patch copies are staged into the configured pre-audit area
-  (`preaudit_target_perf`/`preaudit_target_patches`); wave sequences are
-  staged into the target bank's sequence memory as one fenced bundle write,
+  (`preaudit_target_perf`/`preaudit_target_patches`) one single-patch write
+  each -- a whole-bank dump only when the unit does not take the single
+  write; wave sequences are staged into the target bank's sequence memory
+  as one fenced bundle write,
   backed up and recorded as one undo step. Refuses when staging is
   unconfigured/undersized or the write gate is locked. Staging writes
   require the armed write gate and are backed up.

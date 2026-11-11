@@ -216,11 +216,11 @@ async def test_t_stages_fresh_patches_into_the_reserved_area(tmp_path, monkeypat
         await pilot.press("t")
         await _settle(pilot)
 
-        assert device.bundle_write_count == 1, (
-            "the staged patches go out as one whole-bank dump"
+        assert device.patch_write_count == 1, (
+            "one patch is staged as one single-patch write, not a whole bank"
         )
-        assert device.patch_write_count == 0, (
-            "the single-patch write command pops the unit's SAVE PATCH prompt"
+        assert device.bundle_write_count == 0, (
+            "no whole-bank dump is needed for a single patch"
         )
         staged = device.read_patch("RAM3", 27)
         assert staged == _pcm_patch(), "the staging slot holds the source patch"
@@ -242,6 +242,36 @@ async def test_t_stages_fresh_patches_into_the_reserved_area(tmp_path, monkeypat
         await app.workers.wait_for_complete()
         await _settle(pilot)
         assert device.read_patch("RAM3", 27) == before_staged
+
+
+@pytest.mark.asyncio
+async def test_a_refused_single_write_falls_back_to_the_bank_dump(
+    tmp_path, monkeypatch
+):
+    """A unit that ignores EXECUTE_WRITE for patches still gets an audition."""
+    device = DemoDevice()
+    app = KwsedApp(
+        device, catalog=cat.Catalog([]), config_path=_staging_config(tmp_path)
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._sources["RAM1"] = _pcm_source()
+        app._sources["RAM3"] = _target_source(keep=False)
+        screen = await _open_import_screen(app, pilot)
+        await pilot.press("w")
+        await _settle(pilot)
+
+        def refused(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            return {"verified": False, "status": None, "mismatch": "not stored"}
+
+        monkeypatch.setattr(device, "write_patch", refused)
+
+        await pilot.press("t")
+        await _settle(pilot)
+
+        assert device.bundle_write_count == 1, "the slow path still stages"
+        assert device.read_patch("RAM3", 27) == _pcm_patch()
+        assert "staged 1 patch" in _status(screen)
 
 
 @pytest.mark.asyncio
@@ -303,10 +333,10 @@ async def test_t_stages_wave_sequences_when_configured(tmp_path, monkeypatch):
         await pilot.press("t")
         await _settle(pilot)
 
-        assert device.bundle_write_count == 2, (
-            "one dump for the staging bank's patches, one for the sequences"
+        assert device.bundle_write_count == 1, (
+            "only the sequence bank needs a whole-bank dump"
         )
-        assert device.patch_write_count == 0
+        assert device.patch_write_count == 1, "the patch itself is one write"
         staged = device.read_patch("RAM3", 27)
         seqs = [wave for wave in r.patch_waves(staged) if wave.is_sequence]
         assert len(seqs) == 1
@@ -386,8 +416,8 @@ async def test_t_stages_only_the_fresh_patch_of_a_mixed_plan(tmp_path, monkeypat
         await pilot.press("t")
         await _settle(pilot)
 
-        assert device.bundle_write_count == 1, "only the staging bank is written"
-        assert device.patch_write_count == 0, "the reused patch is not rewritten"
+        assert device.patch_write_count == 1, "only the fresh copy is written"
+        assert device.bundle_write_count == 0, "no bank dump for one patch"
         buffer = device.edit_buffer
         assert buffer is not None
         used = [part for part in r.performance_parts(buffer) if part.used]

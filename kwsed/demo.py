@@ -594,6 +594,7 @@ class DemoDevice:
         backup_dir: str,
         verify: bool = True,
         timeout: Optional[float] = None,
+        wait_status: bool = True,
     ) -> Dict[str, Any]:
         self._tick()
         entry = banks.bank(bank)

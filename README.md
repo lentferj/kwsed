@@ -464,10 +464,14 @@ preaudit_target_patches = "RAM3:27-34"
 valid). Both must point at a writable bank (RAM 1-3 or the Card). It is the
 user's job to keep those slots free; the app still backs up whatever it
 overwrites there. A malformed value or a ROM bank silently turns the feature
-off. Staged auditions write whole banks (one patch bank, plus the target's
-sequence bank when the plan needs wave sequences), so **memory protect must
-be off** on the unit for those banks -- with protect on the unit refuses the
-bank dump. The ordinary `ctrl+s` import needs no audition and is unaffected.
+off. A staged audition writes each needed patch on its own (one 426-byte
+dump and an `EXECUTE_WRITE`, read back to prove it landed), so it costs a
+fraction of a second per patch instead of a whole bank. Only the target's
+sequence memory, when the plan needs wave sequences, is written as a whole
+bank -- and when a unit does not take the single-patch write, the staging
+falls back to one whole patch bank. Those whole-bank writes need **memory
+protect off**; with protect on the unit refuses the dump. The ordinary
+`ctrl+s` import needs no audition and is unaffected.
 
 ### Multisets and multi-card staging
 

@@ -641,27 +641,29 @@ class WavestationBridge:
         backup_dir: str,
         verify: bool = True,
         timeout: Optional[float] = None,
+        wait_status: bool = True,
     ) -> Dict[str, Any]:
         """Replace **one patch**. Destructive, and fenced like a bank write.
 
         Two messages, because one is not enough: a single patch dump lands
-        in the edit buffer, and a separate write command commits it to the
-        slot. Korg's appendix documents both. Edisyn sends the pair and
-        records that it does not work -- its write command passes the
-        function code and the bank where the bank and the number belong.
+        in the edit buffer and names the destination, then a change of the
+        SR-only EXECUTE_WRITE parameter commits it to that slot. That is
+        Edisyn's write path, and it does not raise the unit's front-panel
+        prompt. Korg's documented patch write command (0x11) does: seen
+        live on a Wavestation SR (2026-11), it shows "SAVE PATCH -- ARE
+        YOU SURE?" and waits for +1/YES, so a remote write stalls there and
+        later reads come back addressed oddly while the prompt is up.
 
         Far smaller than a bank write: 426 bytes and one slot, rather than
-        35 slots and 30 kB. The fence is the same anyway, because the thing
-        that makes a write safe is the backup and the read-back, not the
-        size.
+        35 slots and nearly 30 kB on the wire. The fence is the same
+        anyway, because the thing that makes a write safe is the backup and
+        the read-back, not the size.
 
-        Seen live on a Wavestation SR (2026-11): the write command makes
-        the unit show its front-panel "SAVE PATCH -- ARE YOU SURE?" prompt
-        and wait for +1/YES, so a remote write stalls there and later reads
-        come back addressed oddly (a patch dump for a different bank and
-        slot) while the prompt is up. Nobody should build a flow on this
-        expecting it to finish unattended -- kwsed's audition staging uses
-        a whole-bank dump instead, which loads without any prompt.
+        ``wait_status`` says whether to hold for the unit's WRITE_COMPLETED
+        reply. The audition staging pairs this with ``verify=True`` and
+        skips the wait: the read-back is the proof, and a unit that does
+        not answer a parameter change would otherwise cost its timeout for
+        every staged patch.
         """
         entry = banks.bank(bank)
         if not entry.writable:
@@ -713,18 +715,22 @@ class WavestationBridge:
             "verified": None,
             "mismatch": None,
         }
-        deadline = time.time() + 2.0
-        while time.time() < deadline:
-            message = self._in.get_message()
-            if message is None:
-                time.sleep(0.002)
-                continue
-            packet = m.parse(message[0])
-            if packet is None:
-                continue
-            if packet.function in (m.Function.WRITE_COMPLETED, m.Function.WRITE_ERROR):
-                result["status"] = packet.function_name
-                break
+        if wait_status:
+            deadline = time.time() + 2.0
+            while time.time() < deadline:
+                message = self._in.get_message()
+                if message is None:
+                    time.sleep(0.002)
+                    continue
+                packet = m.parse(message[0])
+                if packet is None:
+                    continue
+                if packet.function in (
+                    m.Function.WRITE_COMPLETED,
+                    m.Function.WRITE_ERROR,
+                ):
+                    result["status"] = packet.function_name
+                    break
         if not verify:
             return result
         try:

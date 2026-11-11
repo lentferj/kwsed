@@ -2172,6 +2172,8 @@ class KwsedApp(App[None]):
             raise ValueError("the backup names no bank")
         if kind == "multi":
             return self._undo_write_multi(dump)
+        if kind == "patch":
+            return self._undo_write_patch(dump)
         return self._undo_write_bank(slot, kind, self._decoded_backup_block(dump))
 
     def _write_bundle_undo(self, bank: Any, blocks: Dict[str, Any]) -> Dict[str, Any]:
@@ -2211,6 +2213,35 @@ class KwsedApp(App[None]):
         if found is None:
             raise ValueError("the bank-bundle backup holds no whole bank")
         return found
+
+    def _undo_write_patch(self, framed: Any) -> Dict[str, Any]:
+        """One single-patch write on behalf of an undo.
+
+        The backup is the framed single patch dump, which names its own
+        bank (the sysex bank byte) and slot, so the restore needs nothing
+        stored beside it. Used by the audition staging, whose undo is one
+        entry per staged patch rather than a whole bank.
+        """
+        from kws import backup as _backup
+
+        raw = bytes(framed) if isinstance(framed, (bytes, bytearray)) else b""
+        packet = m.parse(raw)
+        if packet is None or packet.function != m.Function.SINGLE_PATCH_DUMP:
+            raise ValueError("the patch backup is not a single patch dump")
+        bank_sysex = packet.payload[0]
+        number = packet.payload[1]
+        entry = next((b for b in banks.BANKS if b.sysex == bank_sysex), None)
+        if entry is None:
+            raise ValueError(f"no bank answers to sysex bank {bank_sysex}")
+        result: Dict[str, Any] = self.device.write_patch(
+            entry.number,
+            number,
+            bytes(packet.data()),
+            backup_dir=_backup.default_dir(),
+            verify=True,
+            wait_status=False,
+        )
+        return result
 
     def _undo_write_bank(self, bank: Any, kind: Any, data: Any) -> Dict[str, Any]:
         """One whole-bank write on behalf of an undo.
@@ -3874,17 +3905,18 @@ class KwsedApp(App[None]):
     ) -> None:
         """Stage what the plan needs, then put the record in the buffer.
 
-        Fresh patch copies are spliced into the user-reserved staging slots
-        and sent as the staging bank's whole patch bank; wave sequences go
-        to the target bank's sequence memory as its whole bank -- the very
-        bank the real import would install. Whole banks because the unit's
-        single-patch write command pops its front-panel "SAVE PATCH — ARE
-        YOU SURE?" prompt (seen live on the SR), while a bank dump loads
-        silently once memory protect is off. Both writes are fenced and
-        backed up, and together they are one undo record: `z` takes the
-        staging back out. Reused patches need no write: they are already
-        in the target bank, and the auditioned record points at them
-        there.
+        Fresh patch copies are written into the user-reserved staging
+        slots one patch at a time -- 426 bytes and an EXECUTE_WRITE, read
+        back to prove it landed -- because a whole patch bank is nearly
+        30 kB on the wire for what is usually one copy. Wave sequences go
+        to the target bank's sequence memory as its whole bank, the very
+        bank the real import would install; there is no single-sequence
+        write. A unit that does not take the single-patch write gets the
+        whole bank instead, which is the path proven on the SR. Every
+        write is fenced and backed up, and the staging is one undo record:
+        `z` takes it back out. Reused patches need no write: they are
+        already in the target bank, and the auditioned record points at
+        them there.
         """
         from kws import config as _cfg
 
@@ -3963,24 +3995,7 @@ class KwsedApp(App[None]):
         Returns the undo entries, one per bank written, and the sentence
         fragment that names the sequences in the status line.
         """
-        # The staging bank's own content is the base: its untouched slots
-        # keep whatever the user keeps there, and the undo puts the bank
-        # back as it really was. The target source is a different bank and
-        # restoring its bytes into the staging bank would be data loss.
-        staging_before = self.device.read_bank(patch_area[0].id, banks.Kind.PATCH)
-        staging_source = deps.Source(
-            patch_area[0].id, patches=list(staging_before.records)
-        )
-        staged_bank = bytearray(b"".join(staging_before.records))
-        for (_pid, planned_slot), staging_slot in zip(fresh, patch_area[1]):
-            src_at = planned_slot * rec.PATCH_SIZE
-            dst_at = staging_slot * rec.PATCH_SIZE
-            staged_bank[dst_at : dst_at + rec.PATCH_SIZE] = built.patches[
-                src_at : src_at + rec.PATCH_SIZE
-            ]
-        undo_entries = self._stage_one_bank(
-            screen, patch_area[0], "patches", bytes(staged_bank), staging_source
-        )
+        undo_entries = self._stage_patches(screen, built, fresh, patch_area)
         seq_note = ""
         if plan.sequence_map and built.waveseq is not None:
             undo_entries += self._stage_one_bank(
@@ -3991,6 +4006,102 @@ class KwsedApp(App[None]):
                 f"into {target_bank.label}"
             )
         return undo_entries, seq_note
+
+    def _stage_patches(
+        self, screen: Any, built: Any, fresh: Any, patch_area: Any
+    ) -> list[dict[str, Any]]:
+        """Stage the fresh copies one patch at a time, verifying each.
+
+        A whole patch bank is nearly 30 kB on the wire -- about ten seconds
+        each way -- for what is usually one or two patches. One patch is
+        426 bytes, so the same copy costs a fraction of a second, and a
+        read-back after each proves the unit stored it. The unit's own
+        EXECUTE_WRITE is what commits it (see bridge.write_patch).
+
+        When the unit does not take a single write -- the read-back says it
+        did not land, or the write is refused -- the whole bank is staged
+        instead. That path is slower but is the one proven on the SR, so a
+        unit that ignores EXECUTE_WRITE for patches still gets an audition.
+        """
+        from kws import backup as _backup
+        from kws import messages as _m
+
+        bank = patch_area[0]
+        entries: list[dict[str, Any]] = []
+        captured: dict[int, bytes] = {}
+        for (_pid, planned_slot), staging_slot in zip(fresh, patch_area[1]):
+            src_at = planned_slot * rec.PATCH_SIZE
+            data = bytes(built.patches[src_at : src_at + rec.PATCH_SIZE])
+            before = bytes(self.device.read_patch(bank.number, staging_slot))
+            captured[staging_slot] = before
+            try:
+                result = self.device.write_patch(
+                    bank.number,
+                    staging_slot,
+                    data,
+                    backup_dir=_backup.default_dir(),
+                    verify=True,
+                    wait_status=False,
+                )
+            except Exception:
+                return self._stage_patches_as_bank(
+                    screen, built, fresh, patch_area, captured
+                )
+            if result.get("verified") is False or result.get("status") == "write error":
+                return self._stage_patches_as_bank(
+                    screen, built, fresh, patch_area, captured
+                )
+            entries.append(
+                {
+                    "kind": "patch",
+                    "bank": bank.number,
+                    "slot": staging_slot,
+                    "blocks": {
+                        "dump": _m.single_patch_dump(
+                            bank.sysex,
+                            staging_slot,
+                            before,
+                            channel=self.device.channel,
+                        )
+                    },
+                }
+            )
+        return entries
+
+    def _stage_patches_as_bank(
+        self, screen: Any, built: Any, fresh: Any, patch_area: Any, captured: Any
+    ) -> list[dict[str, Any]]:
+        """Stage the fresh copies as one whole patch bank.
+
+        The slow path, kept because it is the one seen to work on an SR.
+        The bank is read first so its untouched slots survive, and every
+        slot this audition already tried to write gets its captured
+        original put back -- a refused single write may still have landed,
+        and the undo must put back what was there, not what a half-done
+        try left.
+        """
+        dump = self.device.read_bank(patch_area[0].id, banks.Kind.PATCH)
+        before_bank = bytearray(b"".join(dump.records))
+        for staging_slot, blob in captured.items():
+            at = staging_slot * rec.PATCH_SIZE
+            before_bank[at : at + rec.PATCH_SIZE] = blob
+        staged_bank = bytearray(before_bank)
+        for (_pid, planned_slot), staging_slot in zip(fresh, patch_area[1]):
+            src_at = planned_slot * rec.PATCH_SIZE
+            dst_at = staging_slot * rec.PATCH_SIZE
+            staged_bank[dst_at : dst_at + rec.PATCH_SIZE] = built.patches[
+                src_at : src_at + rec.PATCH_SIZE
+            ]
+        source = deps.Source(
+            patch_area[0].id,
+            patches=[
+                bytes(before_bank[at : at + rec.PATCH_SIZE])
+                for at in range(0, len(before_bank), rec.PATCH_SIZE)
+            ],
+        )
+        return self._stage_one_bank(
+            screen, patch_area[0], "patches", bytes(staged_bank), source
+        )
 
     def _stage_one_bank(
         self,
