@@ -1,0 +1,675 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+# SPDX-FileCopyrightText: Copyright (C) 2026  kwsed contributors
+#
+# This file is part of kwsed.
+#
+# The bank table is transcribed as a fact from the Hypersynth HCard-101
+# manual's Wavestation-SR mode and docs/HCARD.md section 2. No vendor code
+# is used here.
+#
+# kwsed is free software: you can redistribute it and/or modify it under the
+# terms of the GNU General Public License as published by the Free Software
+# Foundation, either version 2 of the License, or (at your option) any later
+# version.
+#
+# kwsed is distributed in the hope that it will be useful, but WITHOUT ANY
+# WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+# FOR A PARTICULAR PURPOSE. See the GNU General Public License for more
+# details.
+
+"""The forty banks behind one HCard slot.
+
+The Wavestation SR has **one** card slot. An HCard-101 multiplexes forty
+banks behind it, selected physically on the card: 00 is the Wavestation's
+own ROM, 01-04 the factory preloads, 05-24 the Korg ROM cards and 25-39
+the user banks. The synth can address none of them remotely -- which bank
+is in front of it is a property of the card's front panel, not of a wire
+byte.
+
+So this module is the first of the three layers in ``docs/HCARD.md``:
+
+1. **A static table** of what the forty banks are (this module).
+2. A per-bank archive of what was read off the unit (``cards.json``).
+3. Identity resolution from the live card name and its first names.
+
+The physical ``CARD`` slot stays ``CARD`` for writes, favourites and
+backups -- decision 8-B1. The forty banks are a browse overlay over it.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import sys
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+from kws import favorites
+from kws.banks import PATCHES_PER_BANK, PERFORMANCES_PER_BANK, Kind, count_for
+
+__all__ = [
+    "Category",
+    "Card",
+    "CapturedBank",
+    "USER_FIRST",
+    "USER_LAST",
+    "CARDS",
+    "FILE_NAME",
+    "PATCHES_PER_BANK",
+    "PERFORMANCES_PER_BANK",
+    "cards",
+    "card",
+    "card_words",
+    "is_user",
+    "bank_numbers",
+    "count_for",
+    "capture",
+    "set_label",
+    "bank_title",
+    "content_digest",
+    "default_path",
+    "load",
+    "load_active",
+    "resolve",
+    "resolve_by_digest",
+    "save",
+    "scope_id",
+    "set_active",
+]
+
+#: The archive's filename, beside the favourites database and the live-name
+#: cache.
+FILE_NAME = "cards.json"
+
+#: The schema version this module writes and the highest it reads.
+VERSION = 1
+
+#: The first user bank. 00-24 are factory, preload and ROM-card banks.
+USER_FIRST = 25
+
+#: The last user bank.
+USER_LAST = 39
+
+
+class Category:
+    """What kind of bank this is.
+
+    The words are the design document's, and they are different claims:
+    ``factory`` is the Wavestation's own ROM, ``preload`` is the factory
+    preload set, ``rom-card`` is a Korg card and ``user`` is somewhere a
+    person writes.
+    """
+
+    FACTORY = "factory"
+    PRELOAD = "preload"
+    ROM_CARD = "rom-card"
+    USER = "user"
+
+
+@dataclass(frozen=True)
+class Card:
+    """One of the forty banks, as the HCard manual names it."""
+
+    number: int  #: 00-39 in Wavestation-SR mode.
+    name: str  #: The name the card reports for this bank.
+    category: str  #: One of :class:`Category`.
+    #: The PCM card a bank needs, if any. 16-18 need WSC-01/02/03; a patch
+    #: that names a missing PCM wave plays the wrong sound, silently.
+    needs_pcm: Optional[str] = None
+
+    @property
+    def is_user(self) -> bool:
+        return self.category == Category.USER
+
+    @property
+    def is_rom(self) -> bool:
+        """True for a bank the HCard holds read-only."""
+        return self.category != Category.USER
+
+
+#: The forty banks in HCard order, transcribed verbatim from the HCard-101
+#: manual's Wavestation-SR-mode sound-library table (see docs/HCARD.md
+#: section 2). Banks 00-04 and 19-24 are named by the manual exactly as
+#: written here, including the "Korg " prefix on 00-18. Banks 25-29 are
+#: named from the owner's printed soundbank headers; 30-39 have no known
+#: name and keep the "User 06".."User 15" placeholders.
+CARDS: Tuple[Card, ...] = (
+    Card(0, "Korg WS Internal ROM", Category.FACTORY),
+    Card(1, "Korg WPC-00PI RAM1 factory preload", Category.PRELOAD),
+    Card(2, "Korg WPC-00PII RAM2 factory preload", Category.PRELOAD),
+    Card(3, "Korg WPC-00PIII RAM3EX factory preload", Category.PRELOAD),
+    Card(4, "Korg WPC-0AD RAM3AD", Category.PRELOAD),
+    Card(5, 'Korg WPC-11 "Performance 1"', Category.ROM_CARD),
+    Card(6, 'Korg WPC-12 "Performance 2"', Category.ROM_CARD),
+    Card(7, 'Korg WPC-13 "Performance 3"', Category.ROM_CARD),
+    Card(8, 'Korg WPC-14 "Analog & VS"', Category.ROM_CARD),
+    Card(9, 'Korg WPC-15 "Dance/Top 40"', Category.ROM_CARD),
+    Card(10, 'Korg WPC-16 "Wavestation Omnibus"', Category.ROM_CARD),
+    Card(11, 'Korg WPC-17 "Studio Collection"', Category.ROM_CARD),
+    Card(12, 'Korg WPC-18 "U.K. Modern"', Category.ROM_CARD),
+    Card(13, 'Korg WPC-19ex "Film Textures"', Category.ROM_CARD),
+    Card(14, 'Korg WPC-20ex "Song Factory"', Category.ROM_CARD),
+    Card(15, 'Korg WPC-J01 "Analog Freak"', Category.ROM_CARD),
+    Card(16, 'Korg WPC-1S "Piano"', Category.ROM_CARD, needs_pcm="WSC-01"),
+    Card(17, 'Korg WPC-2S "Drums & Percussion"', Category.ROM_CARD, needs_pcm="WSC-02"),
+    Card(18, 'Korg WPC-3S "Synth & Time Slice"', Category.ROM_CARD, needs_pcm="WSC-03"),
+    Card(19, 'MCR03-WS "Legendary Prophet-VS Sounds"', Category.ROM_CARD),
+    Card(20, 'MCR03-WS1 "Standard Synthesizer Sounds"', Category.ROM_CARD),
+    Card(21, 'MCR03-WS2 "Future Pad Sounds"', Category.ROM_CARD),
+    Card(22, 'MCR03-WS3 "Dancing Wavestation"', Category.ROM_CARD),
+    Card(23, 'MCR03-WS4 "Vocoder Effects & External"', Category.ROM_CARD),
+    Card(24, 'MCR03 "Vector World"', Category.ROM_CARD),
+    Card(25, "Pro-Rec WS1 Super WaveDance", Category.USER),
+    Card(26, "Pro-Rec WS2 UltraTexture", Category.USER),
+    Card(27, "Metra Sound Modern Times", Category.USER),
+    Card(28, "Metra Sound Up To Date", Category.USER),
+    Card(29, "Pro-Rec WS4 Power WaveSynth", Category.USER),
+    Card(30, "User 06", Category.USER),
+    Card(31, "User 07", Category.USER),
+    Card(32, "User 08", Category.USER),
+    Card(33, "User 09", Category.USER),
+    Card(34, "User 10", Category.USER),
+    Card(35, "User 11", Category.USER),
+    Card(36, "User 12", Category.USER),
+    Card(37, "User 13", Category.USER),
+    Card(38, "User 14", Category.USER),
+    Card(39, "User 15", Category.USER),
+)
+
+_BY_NUMBER: Dict[int, Card] = {entry.number: entry for entry in CARDS}
+_BY_NAME: Dict[str, Card] = {entry.name.casefold(): entry for entry in CARDS}
+
+
+def cards() -> Tuple[Card, ...]:
+    """All forty banks, in HCard order."""
+    return CARDS
+
+
+def card(number: int) -> Card:
+    """One bank by its 00-39 number."""
+    # ``isinstance(True, int)`` is True, and ``card(True)`` would return
+    # bank 01 -- the same shape of mistake :func:`kws.banks.bank` guards.
+    # A float or a string is not a bank number either: ``int(3.7)`` would
+    # silently truncate, and a string id lookup is not part of this API.
+    if isinstance(number, bool):
+        raise LookupError(f"a card bank is not a boolean, got {number!r}")
+    if not isinstance(number, int):
+        raise LookupError(f"no card bank {number!r}; the HCard has banks 00-39")
+    try:
+        return _BY_NUMBER[number]
+    except KeyError:
+        raise LookupError(
+            f"no card bank {number!r}; the HCard has banks 00-39"
+        ) from None
+
+
+def card_by_name(name: str) -> Optional[Card]:
+    """A bank by its default name, or ``None``.
+
+    Names are compared case-insensitively with surrounding space removed.
+    The card's own name field is space-padded and may be upper- or
+    lower-case, so a byte-for-byte comparison against the manual would miss
+    the bank it is plainly naming.
+    """
+    return _BY_NAME.get(name.strip().casefold())
+
+
+def is_user(number: int) -> bool:
+    """True for the fifteen user banks, 25-39."""
+    return USER_FIRST <= int(number) <= USER_LAST
+
+
+def bank_numbers() -> List[int]:
+    """00-39, in order."""
+    return [entry.number for entry in CARDS]
+
+
+def card_words(captured: bool, needs_pcm: Optional[str]) -> str:
+    """How to describe one HCard bank's state, in words.
+
+    One home for the two facts a person needs before trusting a bank, the
+    way :func:`kws.catalog.disagreement_words` has one home for what a
+    catalog difference means. ``captured`` is whether this archive holds
+    the bank; ``needs_pcm`` is the PCM card (banks 16-18) a patch there
+    depends on. A missing PCM card does not fail loudly -- the patch plays
+    the wrong sound -- so it is always said, not merely hinted.
+    """
+    state = "captured" if captured else "not captured"
+    if needs_pcm:
+        return f"{state}; needs {needs_pcm}"
+    return state
+
+
+# --- the per-bank archive ----------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CapturedBank:
+    """What one HCard bank held when it was read off the unit.
+
+    The card-name field is separate from the slot names on purpose: the
+    name identifies *which* bank is physically in front of the synth, and
+    the slot names are what that bank contains. Keeping them in one record
+    means a capture is one atomic statement rather than two files that can
+    disagree.
+    """
+
+    number: int  #: 00-39.
+    name: str  #: The name the card reported, or the table's if it said none.
+    captured_at: str  #: ISO-8601, UTC.
+    performances: Dict[int, str]  #: {slot: name}
+    patches: Dict[int, str]  #: {slot: name}
+    label: str = ""  #: A user-supplied name for the bank, local only.
+    digest: str = ""  #: Hex SHA-256 of the bank's decoded content.
+    verified: bool = False  #: Confirmed against evidence rather than asserted.
+
+    def names(self, kind: str) -> Dict[int, str]:
+        """The captured names of one kind."""
+        if kind == Kind.PERFORMANCE:
+            return dict(self.performances)
+        if kind == Kind.PATCH:
+            return dict(self.patches)
+        raise LookupError(
+            f"no bank kind {kind!r}; have {Kind.PERFORMANCE}, {Kind.PATCH}"
+        )
+
+
+def capture(
+    number: int,
+    name: str,
+    performances: Dict[int, str],
+    patches: Dict[int, str],
+    *,
+    captured_at: Optional[str] = None,
+    label: str = "",
+    digest: str = "",
+    verified: bool = False,
+) -> CapturedBank:
+    """Bundle one bank's read into a record. Does no MIDI and no I/O."""
+    return CapturedBank(
+        number=card(number).number,
+        name=name.strip(),
+        captured_at=captured_at or datetime.now(UTC).isoformat(timespec="seconds"),
+        performances={int(slot): str(value) for slot, value in performances.items()},
+        patches={int(slot): str(value) for slot, value in patches.items()},
+        label=label.strip() if isinstance(label, str) else str(label).strip(),
+        digest=digest if isinstance(digest, str) else str(digest),
+        verified=bool(verified),
+    )
+
+
+def default_path() -> str:
+    """Where the archive lives, beside the favourites database."""
+    return os.path.join(favorites.data_dir(), FILE_NAME)
+
+
+def scope_id(number: int) -> str:
+    """The per-bank key space for favourites and live names.
+
+    The synth has one ``CARD`` slot, so every HCard bank writes, favourites
+    and is named under the same physical slot. Filing them under the shared
+    ``CARD`` layer would let bank 07's favourites appear under bank 08, so
+    each bank gets its own two-digit space: bank 07 owns ``CARD/07``. An
+    ordinary card uses ``CARD/c1`` (see :func:`kws.physical.scope_id`).
+    """
+    return f"CARD/{number:02d}"
+
+
+def _as_slot_names(raw: object) -> Dict[int, str]:
+    """A JSON object of slot -> name, keeping only usable entries."""
+    if not isinstance(raw, dict):
+        return {}
+    out: Dict[int, str] = {}
+    for slot, name in raw.items():
+        try:
+            number = int(slot)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= number < max(PERFORMANCES_PER_BANK, PATCHES_PER_BANK) and isinstance(
+            name, str
+        ):
+            out[number] = name
+    return out
+
+
+def _bank_from_json(key: str, raw: object) -> Optional[CapturedBank]:
+    if not isinstance(raw, dict):
+        return None
+    try:
+        number = int(key)
+    except (TypeError, ValueError):
+        return None
+    if not 0 <= number < len(CARDS):
+        return None
+    name = raw.get("name")
+    captured_at = raw.get("captured_at")
+    if not isinstance(name, str) or not isinstance(captured_at, str):
+        return None
+    label = raw.get("label", "")
+    if not isinstance(label, str):
+        label = ""
+    digest = raw.get("digest", "")
+    if not isinstance(digest, str):
+        digest = ""
+    verified = raw.get("verified", False)
+    if not isinstance(verified, bool):
+        verified = False
+    entry = _BY_NUMBER.get(number)
+    # An old archive stored the table's placeholder ("User 05") as the
+    # card name for user banks. That was never a real read; treat it as
+    # unread so it does not masquerade as the bank's identity. Banks 25-29
+    # have since been given their real names, but archives written before
+    # that still carry the old placeholder.
+    if (
+        entry is not None
+        and entry.category == Category.USER
+        and name.strip() == _user_placeholder(number)
+    ):
+        name = ""
+    return CapturedBank(
+        number=number,
+        name=name,
+        captured_at=captured_at,
+        performances=_as_slot_names(raw.get("performances")),
+        patches=_as_slot_names(raw.get("patches")),
+        label=label,
+        digest=digest,
+        verified=verified,
+    )
+
+
+def load(path: Optional[str] = None) -> Dict[int, CapturedBank]:
+    """Every captured bank, keyed by number. Empty if there are none.
+
+    A missing file is normal: nothing has been captured yet. A corrupt one
+    is worth a warning rather than an exception -- the archive is a
+    convenience, and names can be read off the unit again.
+    """
+    where = path or default_path()
+    try:
+        with open(where, encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except FileNotFoundError:
+        return {}
+    except (OSError, ValueError) as exc:
+        print(
+            f"kwsed: ignoring {where}: {exc}. It is a cache of card banks "
+            "read from the unit; delete it and capture them again.",
+            file=sys.stderr,
+        )
+        return {}
+    if not isinstance(raw, dict) or not isinstance(raw.get("banks"), dict):
+        return {}
+    version = raw.get("version", VERSION)
+    if not isinstance(version, int) or version > VERSION:
+        return {}
+    out: Dict[int, CapturedBank] = {}
+    for key, value in raw["banks"].items():
+        bank = _bank_from_json(str(key), value)
+        if bank is not None:
+            out[bank.number] = bank
+    return out
+
+
+def _read_payload(where: str) -> Dict[str, Any]:
+    """The archive file as a dict, or {} when it is absent or unusable."""
+    try:
+        with open(where, encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def load_active(path: Optional[str] = None) -> Optional[int]:
+    """The HCard bank last confirmed or asserted as active, or ``None``.
+
+    This is a hint, not a reading: the active bank is a property of the
+    card's front panel and cannot be asked for (TODO item 25). It is
+    persisted so a new session can warn before auditioning from the wrong
+    bank, and it is only ever updated when a capture confirms or asserts
+    one.
+    """
+    value = _read_payload(path or default_path()).get("active")
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if 0 <= value < len(CARDS) else None
+
+
+def set_active(number: int, path: Optional[str] = None) -> None:
+    """Record which bank is believed active, preserving the captured banks."""
+    entry = card(number)
+    where = path or default_path()
+    _write(load(where), where, active=entry.number)
+
+
+def _to_json(bank: CapturedBank) -> Dict[str, object]:
+    return {
+        "name": bank.name,
+        "label": bank.label,
+        "captured_at": bank.captured_at,
+        "performances": {str(slot): name for slot, name in bank.performances.items()},
+        "patches": {str(slot): name for slot, name in bank.patches.items()},
+        "digest": bank.digest,
+        "verified": bank.verified,
+    }
+
+
+def save(bank: CapturedBank, path: Optional[str] = None) -> None:
+    """Write one bank into the archive, merging rather than replacing.
+
+    Read-modify-write, exactly as :mod:`vinsynlib.livenames` does: losing
+    every other bank because one was captured would be a poor trade.
+    Best effort -- a capture is still on screen if the disk is full.
+    """
+    where = path or default_path()
+    banks = load(where)
+    banks[bank.number] = bank
+    # Preserve the active-bank hint; capturing a bank must not clear it.
+    _write(banks, where, active=load_active(where))
+
+
+def _name_key(name: Optional[str]) -> str:
+    return (name or "").strip().casefold()
+
+
+def _name_matches(query: str, candidate: str) -> bool:
+    """Whether a card's name field identifies this bank.
+
+    Exact after case and padding, or a prefix long enough to be a real
+    name: the name field is sixteen bytes, and several of the table's
+    names (``WPC-13 "Performance 3"``) are longer than that. A two-letter
+    prefix is not evidence, so shorter queries do not count.
+    """
+    query = _name_key(query)
+    candidate = _name_key(candidate)
+    if not query or not candidate:
+        return False
+    if query == candidate:
+        return True
+    return len(query) >= 8 and candidate.startswith(query)
+
+
+def _fingerprint_matches(
+    bank: CapturedBank, perf0: Optional[str], patch0: Optional[str]
+) -> bool:
+    """Whether a captured bank's first slot names match what was read.
+
+    Only the checks the caller can supply are made. No names at all is no
+    evidence rather than a match, or every unknown bank would fingerprint
+    to every captured one.
+    """
+    checks: List[bool] = []
+    if perf0 and perf0.strip():
+        checks.append(_name_key(bank.performances.get(0)) == _name_key(perf0))
+    if patch0 and patch0.strip():
+        checks.append(_name_key(bank.patches.get(0)) == _name_key(patch0))
+    return bool(checks) and all(checks)
+
+
+def content_digest(*groups: Sequence[bytes]) -> str:
+    """Hex SHA-256 of the records, unambiguously framed.
+
+    Each record is length-prefixed (four big-endian bytes) before hashing,
+    so two record lists that concatenate to the same bytes but differ in
+    their split cannot collide. ``groups`` are hashed in caller order
+    (performances, then patches). Empty groups contribute nothing.
+    """
+    hasher = hashlib.sha256()
+    for group in groups:
+        for record in group:
+            hasher.update(len(record).to_bytes(4, "big"))
+            hasher.update(record)
+    return hasher.hexdigest()
+
+
+def resolve_by_digest(digest: str, captured: Dict[int, CapturedBank]) -> Optional[int]:
+    """The single captured bank whose stored digest equals ``digest``.
+
+    ``None`` for an empty digest, no match, or more than one match
+    (ambiguous -- never guess).
+    """
+    if not digest:
+        return None
+    matches = [number for number, bank in captured.items() if bank.digest == digest]
+    if len(matches) != 1:
+        return None
+    return matches[0]
+
+
+def resolve(
+    card_name: Optional[str],
+    perf0: Optional[str],
+    patch0: Optional[str],
+    *,
+    captured: Optional[Dict[int, CapturedBank]] = None,
+    digest: Optional[str] = None,
+) -> Optional[int]:
+    """Which HCard bank is active, or ``None`` when that cannot be said.
+
+    The order is docs/HCARD.md section 6:
+
+    1. **Exact card-name match** against the table or a captured bank's
+       stored name.
+    2. **Fingerprint fallback**: the first performance and patch names
+       against previously captured banks.
+    3. Ambiguous or unknown -> ``None``. The caller offers "new / user
+       bank" filing rather than guessing.
+
+    ``captured`` defaults to the archive on disk. Passing it in is how the
+    browser resolves against the archive it already holds, and how a test
+    says what was captured without writing a file.
+    """
+    archive = load() if captured is None else captured
+
+    # Content evidence first: the digest is the strongest signal we have,
+    # since the card name is unreadable and fingerprints can collide.
+    if digest is not None:
+        by_digest = resolve_by_digest(digest, archive)
+        if by_digest is not None:
+            return by_digest
+
+    named: set[int] = set()
+    query = _name_key(card_name)
+    if query:
+        for entry in CARDS:
+            if _name_matches(query, entry.name):
+                named.add(entry.number)
+        for number, bank in archive.items():
+            if _name_matches(query, bank.name):
+                named.add(number)
+
+    fingerprinted = {
+        number
+        for number, bank in archive.items()
+        if _fingerprint_matches(bank, perf0, patch0)
+    }
+
+    if len(named) == 1:
+        return next(iter(named))
+    if len(named) > 1:
+        # The name alone is ambiguous; the contents may still separate two
+        # banks that report the same name.
+        narrowed = named & fingerprinted
+        return next(iter(narrowed)) if len(narrowed) == 1 else None
+    # No usable name: the fingerprint is the only evidence left.
+    return next(iter(fingerprinted)) if len(fingerprinted) == 1 else None
+
+
+def set_label(number: int, label: str, path: Optional[str] = None) -> CapturedBank:
+    """Set (or clear) the local label of one already-captured bank.
+
+    Read-modify-write on the archive. A bank that has not been captured
+    cannot be labelled: there is no record to attach the label to.
+    """
+    where = path or default_path()
+    banks = load(where)
+    if number not in banks:
+        raise LookupError(f"Card {number:02d} is not captured; capture it first with C")
+    bank = banks[number]
+    updated = CapturedBank(
+        number=bank.number,
+        name=bank.name,
+        captured_at=bank.captured_at,
+        performances=dict(bank.performances),
+        patches=dict(bank.patches),
+        label=(label or "").strip(),
+        digest=bank.digest,
+        verified=bank.verified,
+    )
+    banks[number] = updated
+    _write(banks, where, active=load_active(where))
+    return updated
+
+
+def _user_placeholder(number: int) -> str:
+    """The placeholder name for a user bank with no known card name."""
+    return f"User {number - 24:02d}"
+
+
+def bank_title(captured: Optional[CapturedBank], entry: Card) -> str:
+    """The name to show for one bank, in display precedence.
+
+    A user label wins over everything (it is an explicit choice). Then the
+    name the card actually reported. For factory/preload/rom-card banks the
+    manual's table name is the expected identity, so it is the fallback.
+    The same is true for a user bank whose table entry is a real printed
+    card name; only a placeholder user bank ("User 06") falls back to
+    "(unnamed)".
+    """
+    if captured is not None:
+        if (captured.label or "").strip():
+            return captured.label.strip()
+        if (captured.name or "").strip():
+            return captured.name.strip()
+    if entry.category != Category.USER:
+        return entry.name
+    if entry.name.strip() == _user_placeholder(entry.number):
+        return "(unnamed)"
+    return entry.name
+
+
+def _write(
+    banks: Dict[int, CapturedBank], where: str, *, active: Optional[int] = None
+) -> None:
+    payload: Dict[str, object] = {
+        "version": VERSION,
+        "banks": {
+            f"{number:02d}": _to_json(bank) for number, bank in sorted(banks.items())
+        },
+    }
+    if active is not None:
+        payload["active"] = active
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(where)), exist_ok=True)
+        # Write-then-rename: a crash or a full disk mid-write leaves the
+        # previous archive intact rather than a half-written one.
+        temp = where + ".tmp"
+        with open(temp, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, indent=1, sort_keys=True, ensure_ascii=False)
+            handle.write("\n")
+        os.replace(temp, where)
+    except OSError:
+        pass

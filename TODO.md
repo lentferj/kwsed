@@ -10,22 +10,32 @@ from, is in [docs/RESOLUTION_NOTES.md](docs/RESOLUTION_NOTES.md).
 
 ---
 
-## 1. Which bank a Bank Select actually reaches is not established
+## 1. Which bank a Bank Select actually reaches — RESOLVED
 
-**Status:** open. Blocks nothing; makes `select` a best effort.
+**Status:** resolved from Korg's documentation (Player's Guide §4.8 and
+Reference Appendix 3 §1.3). `select` is no longer a best effort.
 
-`WavestationBridge.select()` sends Bank Select MSB `0`, LSB = the bank's
-System Exclusive number, then a Program Change. That the System Exclusive
-numbering (RAM 1 = 0 … Card = 11) is also the Bank Select numbering is an
-**assumption**, untested.
+The SR's twelve banks are six MIDI banks addressed by CC32 (LSB) 0-5; CC0
+(MSB) is always 0; each MIDI bank holds two internal banks of 50, so
+Program Change 0-49 selects the first and 50-99 the second:
 
-It is also unknown whether a Program Change selects a *performance* or a
-*patch* — that most likely depends on the unit's current mode, which kwsed
-does not read.
+- RAM1  -> CC32=0, PC base 0
+- RAM2  -> CC32=0, PC base 50
+- RAM3  -> CC32=2, PC base 0
+- ROM4  -> CC32=2, PC base 50
+- ROM5  -> CC32=3, PC base 0
+- ROM6  -> CC32=3, PC base 50
+- ROM7  -> CC32=4, PC base 0
+- ROM8  -> CC32=4, PC base 50
+- ROM9  -> CC32=5, PC base 0
+- ROM10 -> CC32=5, PC base 50
+- ROM11 -> CC32=1, PC base 0
+- CARD  -> CC32=1, PC base 50
 
-**Blocked on:** a session at the desk. Send a Bank Select and a Program
-Change, then read the unit's display and compare against the catalog. One
-pass over the twelve banks settles it.
+The SR has no patch mode: a Program Change always selects a Performance (or
+a Multiset in Multi mode), never a patch, so `select()` refuses a patch
+slot. The SR's "Bank Select" MIDI-receive parameter must be ON for this to
+work; kwsed cannot read it.
 
 ---
 
@@ -465,16 +475,19 @@ the rules will be made in one of the two.
 
 ## 17. The `Unit` test double answers patch requests only
 
-**Status:** open, real coverage gap. **Verified.**
+**Status:** FIXED (T6).
 
-`tests/test_write.py:70` intercepts `BULK_REQUEST` and always replies with
-`ALL_PATCH_DUMP`. A performance or wave-sequence read against it goes
-unanswered. So `write_bank` is exercised for one kind of three, and the
-kinds differ in dump function, record size and count -- and the bug fixed
-in `5cdaa21` was precisely a kind that defaulted to patch when it should
-not have.
+`tests/test_write.py` intercepts `BULK_REQUEST` and always replied with
+`ALL_PATCH_DUMP`, so `write_bank` was exercised for one kind of three while
+the kinds differ in dump function, record size and count -- and the bug
+fixed in `5cdaa21` was precisely a kind that defaulted to patch when it
+should not have.
 
-**Blocked on:** nothing but writing them.
+The double now answers `ALL_PATCH_DUMP` (`0x4C`), `ALL_PERFORMANCE_DUMP`
+(`0x4D`) and `ALL_WAVESEQ_DUMP` (`0x54`), stores what it is sent per
+`(wire bank byte, dump function)`, and can refuse a dump function (Data
+Load Error) or go silent, so the read-back and abort paths are exercised
+for all three kinds.
 
 ---
 
@@ -501,7 +514,8 @@ the review suggests.
 * `walk_sequence` with a self-loop (step 0's forward link at step 0).
 * `from_nibbles` with a nibble of exactly `0x0F`, the upper boundary of
   the strict check.
-* `write_bank` for performance and wave-sequence kinds -- see item 17.
+* `write_bank` for performance and wave-sequence kinds (covered now — see
+  item 17).
 
 The fourth the review lists, `identity_reply_fields` with a manufacturer
 byte at or above `0x80`, is not worth a test: item 10 explains why the
@@ -517,7 +531,7 @@ asserts on it; see `TestTheHeaderSaysWhereAChainStarts` in
 tests/test_bankbuild.py. The F841 suppression is gone.
 
 ```python
-first = step          # in make_waveseq
+first = step  # in make_waveseq
 for k, wave in enumerate(waves):
     at = r.STEP_BASE + step * r.STEP_SIZE
 ```
@@ -591,3 +605,175 @@ decoding it once would serve rxved, kwsed, p2ked, x5ded and nanosyned
 alike. Worth doing as shared work rather than five times over.
 
 **Blocked on:** nothing but the decoding. Nothing here depends on it.
+
+## 23. The HCard card-name: reading is closed, writing is possible — parked
+
+**Status:** read path closed by the documentation; write path designed, not
+built.
+
+The card name is **not readable** over MIDI, and that is now established
+rather than suspected:
+
+- The System Setup dump (`0x51`) is exactly the 34-field `system` structure
+  of Reference Appendix 4 §5.8 and has no name field.
+- The accompanying expanded dumps (`0x5C`, `0x61`) are 20 and 9 bytes
+  (§5.9, §5.10) and have none either.
+- The dump-request list (§1.1) has **no parameter-read request**.
+- `CARD_NAME` exists only as **parameter #1** in the parameter table
+  (§5.15), and Parameter Change (`0x41`) is a *set* message. Appendix 3
+  lists no parameter-change transmission, so the SR never reports it.
+
+`read_card_name()` therefore cannot work; the archive falls back to a local
+label (`cards.json` `label`) plus content evidence (item 25).
+`CARD_NAME_OFFSET` is dead as a read and should be removed when the method
+is next touched; `tools/probe_card_name.py` remains useful only for
+confirming the dump's shape.
+
+**Writing** it is documented: Appendix 4 §2.1.17 — function `0x41`,
+parameter #1, the value as 7-bit ASCII with `0x7F` = space and a NUL
+terminator, up to 15 characters. `frame(0x41, [1, 0, *ascii, 0])` is the
+whole message. Before shipping, two things need a real unit: whether a
+Parameter Change commits the name to the card (the NAME page auto-saves on
+exit; a parameter change never "enters" the page), and that there is **no
+read-back and no backup** — the old name cannot be read, so the operation is
+not automatically reversible. The HCard's Dynamic Update may also rewrite
+the name on a bank switch.
+
+**Blocked on:** a separate write-verification session. Writing the card name
+is a card write, outside the read-only HCard session.
+
+## 24. HCard write protection is invisible to the synth
+
+**Status:** documented, deliberately not implemented here.
+
+An HCard bank can be write-protected on the card itself, and the
+Wavestation cannot see that flag. A write to a protected bank fails its
+read-back comparison, so `write_bank` reports a mismatch rather than
+success. The browser should eventually say "the card may have this bank
+write-protected" when that happens, instead of only the generic mismatch.
+
+This is about writing *to* an HCard bank, which is the same `CARD` fence
+kwsed already has. No part of the read-only HCard support changes it.
+
+**Blocked on:** a separate write-verification session, deliberately outside
+this one.
+
+## 25. Which HCard bank is active cannot be read — identify by content
+
+**Status:** implemented — fec2c49 (content digest and digest resolution in
+`kws/cards.py`), 9f97d16 + 550eafd (verification, active-bank marker and
+switch prompt in the app), and the `kwscli cards` output this item
+describes. The original design text is kept below.
+
+Neither the SR nor kwsed can see which of the forty banks is in front of the
+synth: the card name is unreadable (item 23), the SR's `CURRENT_BANK` /
+`CURRENT_PROG` parameters are write-only in the documented SysEx, and the
+HCard itself has no MIDI. The active bank is a property of the card's front
+panel. The workable mechanism is therefore **evidence plus assertion**:
+
+1. **Content digest.** At capture, hash the decoded performance and patch
+   dumps (e.g. SHA-256 over both payloads) and store the digest with the
+   bank in `cards.json`. A fresh read can then be matched against every
+   captured bank without trusting the (unreadable) name.
+2. **Verification against the asserted bank.** `C` on a card sub-bank row
+   passes the row number as the expected bank, as the sweep already does.
+   Compare the digest with that bank's stored digest:
+   - match -> confirmed;
+   - matches a *different* captured bank -> the card is on that bank (or
+     the two are identical); say so and file accordingly;
+   - no match -> new or changed content; file under the asserted number and
+     mark it **unverified**.
+3. **Active-bank marker.** Remember the last confirmed/asserted bank and
+   mark it in the pane. A later read whose digest no longer matches the
+   stored digest means the bank changed since capture (or a different bank
+   is active); say which, rather than silently trusting the row.
+4. **"Switch on the HCard" prompt.** When the user acts on a card row that
+   is not the known-active bank, say so and ask them to select that bank on
+   the HCard first — it cannot be switched remotely. The sweep already
+   works this way; this generalises it to single actions.
+
+**Only open point:** the recorded limit — two banks captured with identical
+content are indistinguishable by digest and `resolve_by_digest` returns
+`None` for them rather than guessing (docs/HCARD.md §6, "Limits"). A bank
+never captured cannot be identified and a bank edited on the unit no longer
+matches its stored digest are inherent to the evidence scheme and are stated
+in the UI, not open work.
+
+**Blocked on:** nothing. It is read-only and covered by the existing
+doubles in `tests/`.
+
+## 26. Multiset selection and the browser view — hardware check pending
+
+**Status:** implemented; the mode switch is sent, the select frame itself
+still awaits a unit check.
+
+The 32 Multisets are now browser rows (keys `m` / `e`): `m` reads the SR
+Expanded Multi Mode Setup (`0x06` → `0x55`, `0x5E`, `0x62`) and jumps to
+them, `⏎` makes one current, and `e` edits it as a 16-channel table whose
+write goes through the existing fenced `write_multi` (backup + read-back).
+
+A Program Change selects a Performance only in Performance mode; in MULTI
+mode it selects a Multiset. Selecting a Multiset therefore first sets the
+MIDI mode to MULTI, and selecting a Performance first sets it to POLY,
+using a Parameter Change for global parameter 4 (Reference Appendix 4
+§2.1.14/§5.12; the value travels as ASCII, so mode 2 is `04 00 2B 32 00`,
+the same bytes Ardour's Wavestation SR MIDI name document carries). No
+memory is written.
+
+The **select** message itself is documented (Reference Appendix 4
+§2.1.20/§2.1.21: `0x5B` for 0-15, `0x63` for 16-31) and still wants a
+confirmation on the unit: select a Multiset from the browser and see it
+become current.
+
+Also confirm the editor's write round trip on hardware when the separate
+write session happens: the `0x62` dump is sent by `write_multi`, which
+already backs up and verifies.
+
+## 27. Import formats: SoundDiver wave sequences and multisets
+
+**Status:** open; wave sequences decode, multisets remain.
+
+`kws/importers.py` reads whole banks and single objects from raw SysEx,
+Standard MIDI files, SoundQuest `.sqs` (embedded Korg SysEx) and Edisyn bank
+dumps. `kwscli import` files a bank in the cache and
+`kwscli copy-perf --from-file` imports one performance with its dependent
+patches, compacted and remapped.
+
+* **SoundDiver `.LIB`** (`kws/sounddiver.py`) walks the `MROF`/`BLSS` chunks
+  and the `LENT` blocks. Patch entries are `74 + 84*n` bytes for 1, 2 or 4
+  oscillators (158/242/410); the common section is split around a two-byte
+  piece and the stored oscillator blocks use the adaptation's byte order.
+  A 2-oscillator patch stores raw oscillators 0 and 2. Performance entries
+  are `37 + 16*n` bytes (53..165): a 21-byte common in a fixed order, the
+  `n` used parts as full 18-byte records, then two-byte placeholders for
+  the rest. `RAM1-NN` comments select the slot; duplicate slots keep the
+  last entry.
+* A recursive cross-check against the 409 `.syx` files under
+  `WavestationSR` validated the layout: of the `AllBanksSoundDiver.LIB`'s
+  55 four-oscillator patches, 42 bodies match a source patch exactly; 46
+  of 55 one-oscillator and 98 of 99 two-oscillator commons match; 276 of
+  288 performance entries have their used parts match a source performance
+  (141 also have an identical common). The rest are edited versions, so
+  the LIB is a favourites/merge library, not a byte-identical bank dump.
+* **Wave sequences** (the `16 + 16*n` LIB entries) are now assembled
+  into the bank's wave-sequence bank: the last entry per `RAM1-NN` slot
+  wins, relative step links are rewritten into the shared 501-step pool,
+  loop bytes and names are copied. `copy-perf` therefore works for
+  performances whose sequences are in the LIB's RAM1 bank; references to
+  another sequence bank still need that bank supplied.
+* **Multisets** are not present in the example libraries and are not
+  converted; if a LIB with multiset entries appears, a sample is needed
+  before decoding them.
+* **All Data dumps** (`0x50`) are decoded into the two RAM banks the
+  documented structure carries. The six bank blocks are fixed size, so
+  the prefix is derived from the payload length and checked (the example's
+  is 1813 bytes). A payload with a different shape is refused.
+* **MidiQuest-native `.sqs` bodies** are skipped; bodies that carry Korg
+  SysEx are read.
+
+
+
+* **FAT12 disk images (`.img`) and `.zip` archives** are now supported
+  as import sources: their contained `.syx`/`.mid`/`.bnk` banks are
+  imported with disk/file/bank labels. KryoFlux `.7z` flux archives are
+  not decoded; the `.img` files in the same download are the decoded form.

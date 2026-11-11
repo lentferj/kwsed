@@ -82,6 +82,13 @@ __all__ = [
     "single_patch_request",
     "single_patch_dump",
     "patch_write_command",
+    "single_performance_request",
+    "single_performance_dump",
+    "performance_write_command",
+    "multi_select",
+    "parameter_change",
+    "EXECUTE_WRITE",
+    "execute_write",
     "REQUEST_FOR_DUMP",
     "DATA_OFFSET",
 ]
@@ -148,6 +155,18 @@ class Function:
     MULTI_SETUP_DUMP = 0x55  #: the three multi messages always travel
     MULTI_SETUP_EXPANDED = 0x5E  #: together, in this order
     MULTISET_DUMP = 0x62  #: ...and this one carries all 32 Multisets
+    MULTI_SELECT = 0x5B  #: make a Multiset current (0-15)
+    MULTI_SELECT_SR = 0x63  #: make a Multiset current (16-31, SR expanded)
+    #: Both sent and received. Payload: parameter number (LSB, MSB), then
+    #: the value as 7-bit ASCII, then a NUL. Reference Guide Appendix 4
+    #: section 2.1.14; the value is text, not a 14-bit word, which is why
+    #: the unit's own editors send ``+2`` as two bytes rather than 0x0002.
+    PARAMETER_CHANGE = 0x41
+    PARAMETER_CHANGE_EXPANDED = 0x42  #: parameters 380-406
+    #: Parameters 407 and up exist only on the SR: the manual says these
+    #: are "ignored by the Wavestation keyboard and A/D". This is where
+    #: EXECUTE_WRITE lives.
+    PARAMETER_CHANGE_SR = 0x43
 
     # Status replies, as Korg's Reference Guide appendix 4 lists them.
     WRITE_COMPLETED = 0x21
@@ -173,6 +192,11 @@ class Function:
         0x55: "multi mode setup dump",
         0x5E: "multi mode setup expanded dump",
         0x62: "multi mode setup SR expanded dump",
+        0x5B: "multi mode setup select",
+        0x63: "multi mode setup select SR expanded",
+        0x41: "parameter change",
+        0x42: "parameter change expanded",
+        0x43: "parameter change SR expanded",
         0x06: "multi mode setup dump request",
         0x40: "single patch dump",
         0x11: "patch write command",
@@ -210,6 +234,9 @@ DATA_OFFSET = {
     # look like data -- the names even decode -- so this is the difference
     # between a right answer and a plausible wrong one.
     Function.MULTISET_DUMP: 7,
+    # The System Setup dump carries no bank and no number, so its data
+    # starts immediately after the function byte.
+    Function.SYSTEM_SETUP_DUMP: 5,
 }
 
 
@@ -517,3 +544,115 @@ def patch_write_command(bank: int, number: int, channel: int = 0) -> bytes:
     The documented form is bank then number.
     """
     return frame(Function.PATCH_WRITE, [bank, number], channel=channel)
+
+
+def single_performance_request(bank: int, number: int, channel: int = 0) -> bytes:
+    """Ask for one performance. Read-only for memory; the reply lands
+    in the unit's performance edit buffer (Reference Appendix 4, 4.1.2)."""
+    return frame(Function.SINGLE_PERFORMANCE_REQUEST, [bank, number], channel=channel)
+
+
+def single_performance_dump(
+    bank: int, number: int, data: Sequence[int], *, channel: int = 0
+) -> bytes:
+    """One performance, addressed to a slot. **Lands in the edit buffer.**
+
+    On its own this changes nothing in memory: a single performance dump
+    is placed in the edit buffer, and it takes a separate write command
+    to put it in the slot (Appendix 4, 2.1.2)."""
+    nibbles = list(to_nibbles(data))
+    return frame(
+        Function.PERFORMANCE_DUMP,
+        [bank, number] + nibbles + [checksum(nibbles)],
+        channel=channel,
+    )
+
+
+def performance_write_command(bank: int, number: int, channel: int = 0) -> bytes:
+    """Commit the performance edit buffer to a slot. **Destructive.**
+
+    Documented in Appendix 4, 4.2.2: bank then number (the order
+    Edisyn got wrong for the patch write command)."""
+    return frame(Function.PERFORMANCE_WRITE, [bank, number], channel=channel)
+
+
+def multi_select(number: int, *, channel: int = 0) -> bytes:
+    """Make a Multiset the current one. **Changes the sound in Multi mode.**
+
+    Documented in Reference Guide Appendix 4, sections 2.1.20 and 2.1.21:
+    ``0x5B`` for Multisets 0-15, ``0x63`` for 16-31 (SR Expanded), the
+    number sent as the byte the manual shows (16 -> ``0x10``). No memory
+    write: the unit changes its current multi setup on reception.
+    """
+    value = int(number)
+    if not 0 <= value <= 31:
+        raise ProtocolError(f"Multiset {value} is outside 0-31")
+    function = Function.MULTI_SELECT if value <= 15 else Function.MULTI_SELECT_SR
+    return frame(function, [value], channel=channel)
+
+
+def parameter_change(parameter: int, value: int | str, *, channel: int = 0) -> bytes:
+    """Change one parameter. **Changes device state, not memory.**
+
+    Reference Guide Appendix 4 section 2.1.14: function ``0x41``, then the
+    parameter number as two 7-bit bytes (LSB first), then the value as
+    **7-bit ASCII** -- not a 14-bit word -- then a NUL and ``F7``. The
+    unit's own editors send a positive number with a leading ``+``, so
+    MIDI mode 2 is ``04 00 2B 32 00`` ("+2"), which is what a real
+    Wavestation SR MIDI name document carries.
+
+    Parameters 380-406 travel as function ``0x42`` (Expanded) and 407 and
+    up as ``0x43`` (SR Expanded) -- the SR-only range the keyboard and
+    A/D ignore. :data:`EXECUTE_WRITE` lives there and is what performs an
+    edit-buffer write without the unit's front-panel prompt.
+    """
+    number = int(parameter)
+    if not 0 <= number <= 484:
+        raise ProtocolError(
+            f"parameter {number} is outside 0-484, the end of the "
+            "documented parameter table"
+        )
+    if number >= 407:
+        function = Function.PARAMETER_CHANGE_SR
+    elif number >= 380:
+        function = Function.PARAMETER_CHANGE_EXPANDED
+    else:
+        function = Function.PARAMETER_CHANGE
+    if isinstance(value, str):
+        text = value
+    elif value > 0:
+        text = f"+{value}"
+    else:
+        text = str(value)
+    ascii_bytes: List[int] = []
+    for char in text:
+        code = ord(char)
+        if not 0x20 <= code <= 0x7E:
+            raise ProtocolError(f"{char!r} is not a printable ASCII value byte")
+        ascii_bytes.append(code)
+    return frame(
+        function,
+        [number & 0x7F, (number >> 7) & 0x7F, *ascii_bytes, 0x00],
+        channel=channel,
+    )
+
+
+#: The SR-only parameter whose change performs the write the unit's
+#: WRITE/COMPARE flow would do: ``+1`` commits the edit buffer (patch or
+#: performance -- the buffer that was filled last) to the bank and slot the
+#: last single dump named. Reference Guide parameter table entry 466. This
+#: is how Edisyn writes performances, and it sidesteps the front-panel
+#: "SAVE PATCH -- ARE YOU SURE?" prompt the documented patch write command
+#: (0x11) was seen to raise live on an SR.
+EXECUTE_WRITE = 466
+
+
+def execute_write(channel: int = 0) -> bytes:
+    """Commit the edit buffer to its destination, without any prompt.
+
+    The last single dump set the destination (its bank and number bytes)
+    and filled the buffer; changing :data:`EXECUTE_WRITE` to ``+1`` then
+    writes it. No confirmation on the unit: Edisyn has used exactly this
+    pair for years.
+    """
+    return parameter_change(EXECUTE_WRITE, 1, channel=channel)

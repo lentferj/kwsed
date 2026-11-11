@@ -54,8 +54,10 @@ __all__ = [
     "parse_bulk",
     "names_from_dump",
     "parse_performance",
+    "parse_patch",
     "record_name",
     "read_syx_file",
+    "read_syx_data",
 ]
 
 #: Bytes per performance in a bank dump.
@@ -149,7 +151,7 @@ def parse_bulk(packet: m.Packet) -> BulkDump:
     if len(records) != expected:
         raise m.ProtocolError(
             f"{packet.function_name} holds {len(records)} records; a bank "
-            f"has {expected} {kind}s"
+            f"has {expected} {banks.plural(kind)}"
         )
     return BulkDump(
         function=packet.function,
@@ -185,25 +187,47 @@ def parse_performance(packet: m.Packet) -> bytes:
     return data[:PERFORMANCE_RECORD]
 
 
-def read_syx_file(path: str) -> List[m.Packet]:
-    """Every Wavestation message in a ``.syx`` file, in order.
+def parse_patch(packet: m.Packet) -> bytes:
+    """One patch (function ``0x40``) as its 426 raw bytes.
+
+    Analogous to :func:`parse_performance`: the single-object dump carries a
+    bank and a number, so its data begins at :data:`kws.messages.DATA_OFFSET`.
+    """
+    if packet.function != m.Function.SINGLE_PATCH_DUMP:
+        raise m.ProtocolError(f"{packet.function_name} is not a patch dump")
+    data = packet.data()
+    if len(data) < PATCH_RECORD:
+        raise m.ProtocolError(
+            f"patch dump decoded to {len(data)} bytes, fewer than the "
+            f"{PATCH_RECORD} a patch occupies"
+        )
+    return data[:PATCH_RECORD]
+
+
+def read_syx_data(data: bytes) -> List[m.Packet]:
+    """Every Wavestation message in a SysEx byte stream, in order.
 
     Foreign messages are skipped rather than raising: a file somebody
     assembled may carry other devices' data.
     """
-    with open(path, "rb") as handle:
-        raw = handle.read()
     out: List[m.Packet] = []
     cursor = 0
     while True:
-        start = raw.find(b"\xf0", cursor)
+        start = data.find(b"\xf0", cursor)
         if start < 0:
             break
-        end = raw.find(b"\xf7", start)
+        end = data.find(b"\xf7", start)
         if end < 0:
             break
-        packet = m.parse(raw[start : end + 1])
+        packet = m.parse(data[start : end + 1])
         if packet is not None:
             out.append(packet)
         cursor = end + 1
     return out
+
+
+def read_syx_file(path: str) -> List[m.Packet]:
+    """Every Wavestation message in a ``.syx`` file, in order."""
+    with open(path, "rb") as handle:
+        raw = handle.read()
+    return read_syx_data(raw)

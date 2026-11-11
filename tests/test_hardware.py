@@ -236,3 +236,37 @@ class TestSpareCardWrite:
                 "CARD", banks.Kind.PATCH, before, backup_dir=str(tmp_path)
             )
             assert device.read_bank("CARD", banks.Kind.PATCH) == original
+
+
+class TestHardwareCardName:
+    """The HCard's name field, read-only.
+
+    The card name is the only identity signal the synth exposes for which
+    of the card's forty banks is active. This test asks for the System
+    Setup dump and accepts either a name or none -- the offset is still
+    marked ``# CONFIRM AGAINST HARDWARE``, so a mismatch must not turn into
+    a hardware failure. Nothing here writes: one request, one reply.
+    """
+
+    def test_the_system_setup_dump_comes_back(
+        self, device: bridge.WavestationBridge
+    ) -> None:
+        data = device.read_system_setup()
+        if data is None:
+            # A skip, not a pass: this unit answered an Identity Request
+            # but not a System Setup request, so the 0x51 field is still
+            # unconfirmed rather than shown absent.
+            pytest.skip(
+                "the unit answered no System Setup dump (0x51); the card-name "
+                "field is therefore still unconfirmed on hardware"
+            )
+        assert len(data) >= bridge.CARD_NAME_OFFSET + bridge.CARD_NAME_LEN
+
+    def test_the_card_name_is_none_or_the_name_the_card_shows(
+        self, device: bridge.WavestationBridge
+    ) -> None:
+        name = device.read_card_name()
+        assert name is None or isinstance(name, str)
+        if name is not None:
+            assert name == name.strip()
+            assert 0 < len(name) <= m.NAME_LEN

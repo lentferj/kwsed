@@ -221,3 +221,65 @@ class TestChecksum:
         assert packet is not None and packet.bank == 3
         # the checksum rides along in the data, so it is trimmed by length
         assert packet.data()[: len(data)] == data
+
+
+class TestMultiSelect:
+    """Appendix 4 §2.1.20/§2.1.21: 0-15 uses 0x5B, 16-31 the SR 0x63."""
+
+    @pytest.mark.parametrize(
+        ("number", "function"),
+        [(0, 0x5B), (15, 0x5B), (16, 0x63), (31, 0x63)],
+    )
+    def test_the_documented_function_and_number(self, number, function):
+        assert m.multi_select(number) == bytes(
+            [0xF0, 0x42, 0x30, 0x28, function, number, 0xF7]
+        )
+
+    def test_the_channel_rides_in_the_format_byte(self):
+        assert m.multi_select(16, channel=5)[2] == 0x35
+
+    @pytest.mark.parametrize("number", [-1, 32])
+    def test_an_unknown_multiset_is_refused(self, number):
+        with pytest.raises(m.ProtocolError, match="outside 0-31"):
+            m.multi_select(number)
+
+
+class TestParameterChange:
+    """Appendix 4 §2.1.14: parameter LSB/MSB, then the value as ASCII."""
+
+    def test_mode_two_matches_the_documented_frame(self):
+        # The Wavestation SR MIDI name document ships these exact bytes.
+        assert m.parameter_change(4, 2) == bytes(
+            [0xF0, 0x42, 0x30, 0x28, 0x41, 0x04, 0x00, 0x2B, 0x32, 0x00, 0xF7]
+        )
+
+    def test_zero_is_text_without_a_sign(self):
+        assert m.parameter_change(4, 0)[7:9] == b"0\x00"
+
+    def test_a_string_value_is_sent_verbatim(self):
+        assert m.parameter_change(4, "abc")[7:11] == b"abc\x00"
+
+    def test_the_channel_rides_in_the_format_byte(self):
+        assert m.parameter_change(4, 2, channel=5)[2] == 0x35
+
+    def test_expanded_and_sr_ranges_pick_their_functions(self):
+        assert m.parameter_change(379, 1)[4] == 0x41
+        assert m.parameter_change(380, 1)[4] == 0x42
+        assert m.parameter_change(407, 1)[4] == 0x43
+        with pytest.raises(m.ProtocolError, match="outside 0-484"):
+            m.parameter_change(485, 1)
+
+    def test_execute_write_is_the_sr_only_parameter_change(self):
+        """F0 42 3n 28 43 <LSB> <MSB> "+1" NUL F7, Edisyn's write."""
+        change = m.execute_write(channel=0)
+        assert change[4] == 0x43
+        assert change[5:7] == bytes(
+            [m.EXECUTE_WRITE & 0x7F, (m.EXECUTE_WRITE >> 7) & 0x7F]
+        )
+        assert change[7:9] == b"+1"
+        assert change[9] == 0x00, "ASCII null termination"
+        assert change[-1] == 0xF7
+
+    def test_a_non_ascii_value_is_refused(self):
+        with pytest.raises(m.ProtocolError, match="printable ASCII"):
+            m.parameter_change(4, "é")

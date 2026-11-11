@@ -24,11 +24,13 @@ against a stand-in that stores what it is sent.
 import argparse
 import json
 import os
+import pathlib
 
 import pytest
 
-from kws import banks
+from kws import banks, cards, deps, dumps
 from kws import messages as m
+from kws import records as rec
 from kwsed import cli
 from kwsed.demo import DemoDevice
 
@@ -36,11 +38,25 @@ from kwsed.demo import DemoDevice
 # and their output is the same on every machine. kws/data/catalog.json is
 # gitignored and present or absent depending on who generated it.
 NO_CATALOG = os.path.join(os.sep, "nonexistent", "kwsed-test-catalog.json")
+NO_CARDS = os.path.join(os.sep, "nonexistent", "kwsed-test-cards.json")
+# A live-names path that cannot exist, so no real machine cache is read.
+NO_LIVE_NAMES = os.path.join(os.sep, "nonexistent", "kwsed-test-live-names.json")
 
 
 def run(argv):
     """main() with the demo device, returning its exit code."""
-    return cli.main(["--demo", "--catalog", NO_CATALOG] + argv)
+    return cli.main(
+        [
+            "--demo",
+            "--catalog",
+            NO_CATALOG,
+            "--cards",
+            NO_CARDS,
+            "--live-names",
+            NO_LIVE_NAMES,
+        ]
+        + argv
+    )
 
 
 class TestTable:
@@ -180,15 +196,12 @@ class TestWhatADifferenceMeans:
         assert "saved over the factory preset" in out
         assert "the printed list is wrong" not in out
 
-    def test_select_sends_and_says_it_is_a_best_effort(self, capsys):
+    def test_select_sends_bank_select_and_program_change(self, capsys):
         device = DemoDevice()
-        args = cli.build_parser().parse_args(
-            ["dump", "CARD"]
-        )  # borrow the parser for a valid Namespace shape
-        args = cli.build_parser().parse_args(["select", "CARD", "patch", "3"])
+        args = cli.build_parser().parse_args(["select", "CARD", "performance", "3"])
         cli._cmd_select(device, args)
         out = capsys.readouterr().out
-        assert "best effort" in out
+        assert "MSB 0, LSB 1, program change 53" in out
         assert device.selected_log[0].number == 3
         assert device.selected_log[0].bank.label == "Card"
 
@@ -664,6 +677,150 @@ class TestBackupRestore:
         assert "does NOT match" in out
 
 
+def _bundle_payloads() -> dict[str, bytes]:
+    """Full-bank payloads with markers, as a staged copy would carry."""
+    from tests.test_write import PATCH_BANK, PERFORMANCE_BANK, WAVESEQ_BANK
+
+    tags = {"performances": b"Amber D", "patches": b"Kelp F", "waveseq": b"Steps 0"}
+    staged = {
+        "performances": PERFORMANCE_BANK,
+        "patches": PATCH_BANK,
+        "waveseq": WAVESEQ_BANK,
+    }
+    payloads: dict[str, bytes] = {}
+    for name, data in staged.items():
+        marked = bytearray(data)
+        tag = tags[name]
+        marked[0 : len(tag)] = tag
+        payloads[name] = bytes(marked)
+    return payloads
+
+
+class TestRestoringABundle:
+    """A bank-bundle envelope is one destination, three kinds, one write."""
+
+    def _args(self, path, tmp_path, *extra):
+        return cli.build_parser().parse_args(
+            [
+                "backup",
+                "restore",
+                str(path),
+                "--yes",
+                "--backup-dir",
+                str(tmp_path / "pre-write"),
+                *extra,
+            ]
+        )
+
+    def _bundle_envelope(
+        self,
+        tmp_path: pathlib.Path,
+        *,
+        bank: str = "Card",
+        payloads: "dict[str, bytes] | None" = None,
+    ) -> str:
+        from kws import backup
+        from kws import records as r
+
+        entry = banks.bank(bank)
+        if payloads is None:
+            payloads = {
+                "performances": bytes(banks.PERFORMANCES_PER_BANK * r.PERFORMANCE_SIZE),
+                "patches": bytes(banks.PATCHES_PER_BANK * r.PATCH_SIZE),
+                "waveseq": bytes(r.WAVESEQ_BANK_SIZE),
+            }
+        functions = {
+            "performances": m.Function.ALL_PERFORMANCE_DUMP,
+            "patches": m.Function.ALL_PATCH_DUMP,
+            "waveseq": m.Function.ALL_WAVESEQ_DUMP,
+        }
+        blocks = {
+            name: bytes(m.frame_bulk(functions[name], entry.sysex, data, channel=0))
+            for name, data in payloads.items()
+        }
+        return backup.save(
+            str(tmp_path / "store"),
+            kind="bank-bundle",
+            slot=entry.label,
+            name=entry.label,
+            device_id="0",
+            source="kwsed",
+            blocks=blocks,
+        )
+
+    def test_a_bundle_envelope_writes_through_write_bank_bundle_and_verifies(
+        self, tmp_path, capsys
+    ):
+        from kws import backup
+        from tests.test_write import Unit
+
+        unit = Unit()
+        payloads = _bundle_payloads()
+        path = self._bundle_envelope(tmp_path, payloads=payloads)
+        assert cli._cmd_backup(unit.bridge, self._args(path, tmp_path)) == 0
+
+        functions = {
+            "performances": m.Function.ALL_PERFORMANCE_DUMP,
+            "patches": m.Function.ALL_PATCH_DUMP,
+            "waveseq": m.Function.ALL_WAVESEQ_DUMP,
+        }
+        # wave sequences first and performances last, as the bundle sends
+        frames = unit.dump_frames_sent()
+        assert [f[4] for f in frames] == [
+            m.Function.ALL_WAVESEQ_DUMP,
+            m.Function.ALL_PATCH_DUMP,
+            m.Function.ALL_PERFORMANCE_DUMP,
+        ]
+        for name, function in functions.items():
+            sent = unit.sent_by_function(function)
+            assert len(sent) == 1, f"exactly one {name} dump must go out"
+            packet = m.parse(sent[0])
+            assert packet is not None
+            assert bytes(packet.data()) == payloads[name]
+        # the fence backed the destination up before anything went out
+        assert len(backup.list_backups(str(tmp_path / "pre-write"))) == 1
+        out = capsys.readouterr().out
+        assert (
+            "about to replace: Card, all performances, patches and wave sequences"
+            in out
+        )
+        assert "nothing is sent" in out
+        assert "written and verified" in out
+
+    def test_no_yes_sends_nothing_for_a_bundle_envelope(self, tmp_path, capsys):
+        from tests.test_write import Unit
+
+        unit = Unit()
+        path = self._bundle_envelope(tmp_path)
+        args = cli.build_parser().parse_args(
+            [
+                "backup",
+                "restore",
+                str(path),
+                "--backup-dir",
+                str(tmp_path / "pre-write"),
+            ]
+        )
+        assert cli._cmd_backup(unit.bridge, args) == 2
+        assert unit.midi_out.sent == []
+        err = capsys.readouterr().err
+        assert "--yes" in err
+        assert "Nothing was done" in err
+
+    def test_a_rom_bundle_envelope_is_refused_and_nothing_is_sent(
+        self, tmp_path, capsys
+    ):
+        from tests.test_write import Unit
+
+        unit = Unit()
+        path = self._bundle_envelope(tmp_path, bank="ROM4")
+        assert cli._cmd_backup(unit.bridge, self._args(path, tmp_path)) == 2
+        assert unit.midi_out.sent == [], "a refused restore must send nothing"
+        out = capsys.readouterr().out
+        assert "ROM and cannot be written" in out
+        assert "RAM 1" in out, "it should say which banks can be restored"
+
+
 class TestTheChannelArguments:
     def test_a_channel_outside_one_to_sixteen_is_refused(self):
         with pytest.raises(SystemExit):
@@ -691,7 +848,14 @@ class TestTheChannelArguments:
 
 class TestOfflineNeverBuildsADevice:
     def test_the_offline_set_is_what_it_claims(self):
-        assert set(cli._OFFLINE) == {"banks", "list", "find", "ports"}
+        assert set(cli._OFFLINE) == {
+            "banks",
+            "list",
+            "find",
+            "ports",
+            "cards",
+            "import",
+        }
 
     def test_backup_list_needs_no_unit_but_save_and_restore_do(self):
         parser = cli.build_parser()
@@ -728,3 +892,846 @@ def test_the_argparse_type_is_the_one_the_handlers_expect():
     """A guard on the annotations added when mypy went strict."""
     args = cli.build_parser().parse_args(["list", "CARD", "patch"])
     assert isinstance(args, argparse.Namespace)
+
+
+class TestCardsVerb:
+    """`kwscli cards` is the archive of the HCard's forty banks.
+
+    Offline like `banks` and `list`: it reads no unit, so it works with the
+    synthesiser off, and a `.syx` it writes holds names only.
+    """
+
+    def _archive(self, tmp_path):
+        path = str(tmp_path / "cards.json")
+        cards.save(
+            cards.capture(
+                7,
+                'Korg WPC-13 "Performance 3"',
+                {0: "Opening", 1: "Second"},
+                {0: "Bell"},
+                captured_at="2026-11-07T12:00:00+00:00",
+            ),
+            path,
+        )
+        return path
+
+    def test_the_table_lists_forty_banks(self, capsys):
+        assert run(["cards"]) == 0
+        out = capsys.readouterr().out
+        assert "WS Internal ROM" in out
+        assert "User 15" in out
+        assert out.count("not captured") == 40
+
+    def test_a_captured_bank_is_marked_in_the_table(self, tmp_path, capsys):
+        path = self._archive(tmp_path)
+        assert cli.main(["--cards", path, "cards"]) == 0
+        out = capsys.readouterr().out
+        assert 'Korg WPC-13 "Performance 3"' in out
+        assert out.count("not captured") == 39
+
+    def test_one_bank_shows_its_archive(self, tmp_path, capsys):
+        path = self._archive(tmp_path)
+        assert cli.main(["--cards", path, "cards", "07"]) == 0
+        out = capsys.readouterr().out
+        assert "Card 07" in out
+        assert "Opening" in out
+        assert "Bell" in out
+        assert "Second" in out
+
+    def test_an_uncaptured_bank_still_shows_the_table_name(self, capsys):
+        assert run(["cards", "16"]) == 0
+        out = capsys.readouterr().out
+        assert "WPC-1S" in out
+        assert "needs WSC-01" in out
+        assert "not captured" in out
+
+    def test_it_dumps_one_bank_as_syx(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "kws.bankstore.default_dir", lambda: str(tmp_path / "emptybanks")
+        )
+        path = self._archive(tmp_path)
+        out = tmp_path / "bank07.syx"
+        code = cli.main(
+            [
+                "--cards",
+                path,
+                "cards",
+                "07",
+                "--kind",
+                "patch",
+                "--syx",
+                str(out),
+            ]
+        )
+        assert code == 0
+        packets = dumps.read_syx_file(str(out))
+        assert len(packets) == 1
+        packet = packets[0]
+        assert packet.function == m.Function.ALL_PATCH_DUMP
+        assert packet.bank == banks.bank("CARD").sysex
+        dump = dumps.parse_bulk(packet)
+        assert dump.kind == banks.Kind.PATCH
+        assert dump.names()[0] == "Bell"
+
+    def test_syx_uses_real_records_when_cached(self, tmp_path, monkeypatch, capsys):
+        from kws import banks, bankstore
+        from kws import records as rec
+
+        path = self._archive(tmp_path)
+        banks_dir = tmp_path / "banks"
+        marker = b"RealData"
+        blob = (
+            marker
+            + b"\x00" * (rec.PATCH_SIZE - len(marker))
+            + b"\x00" * (rec.PATCH_SIZE * (banks.PATCHES_PER_BANK - 1))
+        )
+        # ensure exact size
+        assert len(blob) == rec.PATCH_SIZE * banks.PATCHES_PER_BANK
+        bankstore.save("CARD/07", patches=blob, directory=str(banks_dir))
+        monkeypatch.setattr("kws.bankstore.default_dir", lambda: str(banks_dir))
+
+        out = tmp_path / "real.syx"
+        code = cli.main(
+            [
+                "--cards",
+                path,
+                "cards",
+                "07",
+                "--kind",
+                "patch",
+                "--syx",
+                str(out),
+            ]
+        )
+        assert code == 0
+        err = capsys.readouterr().err
+        assert "full record data" in err
+        packets = dumps.read_syx_file(str(out))
+        packet = packets[0]
+        dump = dumps.parse_bulk(packet)
+        assert bytes(dump.records[0][:8]) == marker
+
+    def test_syx_without_a_kind_is_a_usage_error(self, tmp_path, capsys):
+        path = self._archive(tmp_path)
+        out = tmp_path / "bank.syx"
+        code = cli.main(["--cards", path, "cards", "07", "--syx", str(out)])
+        assert code != 0
+        assert "needs --kind" in capsys.readouterr().err
+        assert not out.exists()
+
+    def test_syx_of_an_uncaptured_bank_is_a_usage_error(self, tmp_path, capsys):
+        out = tmp_path / "bank.syx"
+        code = cli.main(
+            [
+                "--cards",
+                str(tmp_path / "cards.json"),
+                "cards",
+                "07",
+                "--kind",
+                "patch",
+                "--syx",
+                str(out),
+            ]
+        )
+        assert code != 0
+        assert "not captured" in capsys.readouterr().err
+        assert not out.exists()
+
+    def test_an_unknown_bank_is_a_usage_error(self, capsys):
+        assert run(["cards", "99"]) != 0
+        assert "00-39" in capsys.readouterr().err
+
+
+class TestCardsVerificationWords:
+    """`kwscli cards` says whether a capture was confirmed by content.
+
+    A capture filed on the row's say-so is `unverified` — the HCard may be
+    on another bank — and one a digest confirmed is `verified`. Both words
+    are the app's (9f97d16); the CLI repeats them so the archive can be
+    read without opening the browser. Offline like every other `cards`
+    invocation: the words come from the archive record, `--cards` points at
+    a file under tmp, and no port is opened.
+    """
+
+    def _save(self, tmp_path, *, verified, digest):
+        path = str(tmp_path / "cards.json")
+        cards.save(
+            cards.capture(
+                7,
+                'Korg WPC-13 "Performance 3"',
+                {0: "Opening"},
+                {0: "Bell"},
+                captured_at="2026-11-07T12:00:00+00:00",
+                digest=digest,
+                verified=verified,
+            ),
+            path,
+        )
+        return path
+
+    def test_one_bank_says_unverified_for_a_say_so_capture(self, tmp_path, capsys):
+        path = self._save(tmp_path, verified=False, digest="")
+        assert cli.main(["--cards", path, "cards", "07"]) == 0
+        out = capsys.readouterr().out
+        assert "unverified" in out
+        assert "digest: (none)" in out
+
+    def test_one_bank_says_verified_and_shows_the_digest_prefix(self, tmp_path, capsys):
+        digest = cards.content_digest([b"perf"], [b"patch"])
+        path = self._save(tmp_path, verified=True, digest=digest)
+        assert cli.main(["--cards", path, "cards", "07"]) == 0
+        out = capsys.readouterr().out
+        assert "unverified" not in out
+        assert "verified" in out
+        # The reference is the archive, so the line shows a short prefix —
+        # enough to eyeball two captures against each other — not the hash.
+        assert f"digest: {digest[:8]}" in out
+
+    def test_the_listing_marks_only_an_unverified_bank(self, tmp_path, capsys):
+        path = self._save(tmp_path, verified=False, digest="")
+        assert cli.main(["--cards", path, "cards"]) == 0
+        out = capsys.readouterr().out
+        assert "unverified" in out
+        assert "not captured" in out
+        assert out.count("not captured") == 39
+
+    def test_a_verified_bank_is_unmarked_in_the_listing(self, tmp_path, capsys):
+        digest = cards.content_digest([b"perf"], [b"patch"])
+        path = self._save(tmp_path, verified=True, digest=digest)
+        assert cli.main(["--cards", path, "cards"]) == 0
+        out = capsys.readouterr().out
+        assert "unverified" not in out
+        assert out.count("not captured") == 39
+
+    def test_the_verb_stays_offline(self):
+        args = cli.build_parser().parse_args(["cards"])
+        assert cli._offline(args)
+
+
+def test_one_banks_kind_filter_narrows_the_display(tmp_path, capsys):
+    path = str(tmp_path / "cards.json")
+    cards.save(
+        cards.capture(
+            7,
+            'Korg WPC-13 "Performance 3"',
+            {0: "Opening"},
+            {0: "Bell"},
+            captured_at="2026-11-07T12:00:00+00:00",
+        ),
+        path,
+    )
+    assert cli.main(["--cards", path, "cards", "07", "--kind", "patch"]) == 0
+    out = capsys.readouterr().out
+    assert "Bell" in out
+    assert "Opening" not in out
+
+
+def _perf_source(tmp_path: pathlib.Path) -> pathlib.Path:
+    """A RAM 1 source: two patches (patch 0 uses wave sequence 0), two perfs.
+
+    Both performances use patch 0 twice, so the patch is *shared* between
+    them in the source bank. Performance-first copying must give each its own
+    target slot.
+    """
+    from tests.test_bankbuild import make_patch, make_performance, make_waveseq
+
+    patch = make_patch("Kelp Forest", ((0, 0), (0, 40), (0, 40), (0, 40)))
+    second_patch = make_patch("Amber Drift", ((0, 41), (0, 41), (0, 41), (0, 41)))
+    first = make_performance("Glass Meridian", parts=((0, 0), (0, 0)))
+    second = make_performance("Amber Drift", parts=((0, 0), (0, 0)))
+    waveseq = make_waveseq({0: [40, 41]})[0]
+
+    patches = bytearray(banks.PATCHES_PER_BANK * rec.PATCH_SIZE)
+    patches[0 : rec.PATCH_SIZE] = patch
+    patches[rec.PATCH_SIZE : 2 * rec.PATCH_SIZE] = second_patch
+    # Every other slot is an empty performance: all eight parts switched off.
+    empty = make_performance("", ())
+    performances = bytearray(empty * banks.PERFORMANCES_PER_BANK)
+    performances[0 : rec.PERFORMANCE_SIZE] = first
+    performances[rec.PERFORMANCE_SIZE : 2 * rec.PERFORMANCE_SIZE] = second
+
+    path = tmp_path / "perf-source.syx"
+    path.write_bytes(
+        m.frame_bulk(
+            m.Function.ALL_PATCH_DUMP, banks.bank("RAM1").sysex, bytes(patches)
+        )
+        + m.frame_bulk(
+            m.Function.ALL_PERFORMANCE_DUMP,
+            banks.bank("RAM1").sysex,
+            bytes(performances),
+        )
+        + m.frame_bulk(m.Function.ALL_WAVESEQ_DUMP, banks.bank("RAM1").sysex, waveseq)
+    )
+    return path
+
+
+class TestDeps:
+    """`kwscli deps` shows the Perf -> Patch -> WaveSeq graph.
+
+    Offline when the bank is loaded from `--source` or the cache: the whole
+    point is to answer "what would I break?" without a unit attached.
+    """
+
+    def _run(self, tmp_path, monkeypatch, *argv):
+        from kws import bankstore
+
+        monkeypatch.setattr(
+            bankstore, "default_dir", lambda: str(tmp_path / "emptybanks")
+        )
+        return run(["deps", *argv])
+
+    def test_a_whole_bank_names_parts_and_shared_and_unused_patches(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        source = _perf_source(tmp_path)
+        assert (
+            self._run(
+                tmp_path,
+                monkeypatch,
+                "RAM1",
+                "--source",
+                f"RAM1={source}",
+            )
+            == 0
+        )
+        out = capsys.readouterr().out
+        assert 'RAM1 00 "Glass Meridian"' in out
+        assert 'RAM1 01 "Amber Drift"' in out
+        assert "0 -> RAM1:0 Kelp Forest" in out
+        assert "shared patches: 0 (used by 00, 01)" in out
+        assert "unreferenced patches:" in out
+        assert "1," in out, "patch 1 is not named by any part"
+
+    def test_one_performance_shows_its_patches_sequences_and_sharing(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        source = _perf_source(tmp_path)
+        assert (
+            self._run(
+                tmp_path,
+                monkeypatch,
+                "RAM1",
+                "performance",
+                "0",
+                "--source",
+                f"RAM1={source}",
+            )
+            == 0
+        )
+        out = capsys.readouterr().out
+        assert 'RAM1 00 "Glass Meridian"' in out
+        assert "unique patches: RAM1:0" in out
+        assert "sequences: 1" in out
+        assert "step cost: 2" in out
+        assert "patches: shared with other performances" in out
+        assert "patch 0 also used by 01" in out
+        assert "multisets: none" in out
+
+    def test_one_patch_shows_its_oscillators_and_what_uses_it(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        source = _perf_source(tmp_path)
+        assert (
+            self._run(
+                tmp_path,
+                monkeypatch,
+                "RAM1",
+                "patch",
+                "0",
+                "--source",
+                f"RAM1={source}",
+            )
+            == 0
+        )
+        out = capsys.readouterr().out
+        assert 'RAM1 00 "Kelp Forest"' in out
+        assert "Osc 1 -> wave sequence 0 in RAM1" in out
+        assert 'used by: RAM1 00 "Glass Meridian", RAM1 01 "Amber Drift"' in out
+
+    def test_it_needs_a_unit_only_when_the_bank_is_not_on_disk(
+        self, tmp_path, monkeypatch
+    ):
+        from kws import bankstore
+
+        monkeypatch.setattr(
+            bankstore, "default_dir", lambda: str(tmp_path / "emptybanks")
+        )
+        parser = cli.build_parser()
+        args = parser.parse_args(
+            ["deps", "RAM1", "--bankstore", str(tmp_path / "emptybanks")]
+        )
+        assert not cli._offline(args)
+        args = parser.parse_args(
+            [
+                "deps",
+                "RAM1",
+                "--source",
+                f"RAM1={_perf_source(tmp_path)}",
+            ]
+        )
+        assert cli._offline(args)
+
+
+class _CardSlotDevice:
+    """A unit whose one physical card slot answers all three bank dumps.
+
+    The slot is a single resource: reading it for a requested ``CARD/NN``
+    proves nothing about which bank is in it. A read is counted, and -- when
+    the test did not allow one -- refused loudly so a regression cannot pass
+    by quietly mislabelling the records.
+    """
+
+    description = "stand-in"
+    bundle_write_count = 0
+
+    def __init__(self, *, allow_card_slot=False):
+        self.allow_card_slot = allow_card_slot
+        self.card_slot_reads = 0
+        self.reads = []
+
+    def read_raw(self, bank_number, function, **_k):
+        entry = banks.by_sysex(bank_number)
+        if entry.id == "CARD":
+            self.card_slot_reads += 1
+            if not self.allow_card_slot:
+                raise AssertionError(
+                    "read the one physical card slot without knowing its bank"
+                )
+        self.reads.append((bank_number, function))
+        if function == m.Function.ALL_PERFORMANCE_DUMP:
+            payload = bytes(banks.PERFORMANCES_PER_BANK * rec.PERFORMANCE_SIZE)
+        elif function == m.Function.ALL_PATCH_DUMP:
+            payload = bytes(banks.PATCHES_PER_BANK * rec.PATCH_SIZE)
+        elif function == m.Function.ALL_WAVESEQ_DUMP:
+            payload = bytes(rec.WAVESEQ_BANK_SIZE)
+        else:  # pragma: no cover - the CLI asks for a bank, not a slot
+            raise AssertionError(f"unexpected request {function:#04x}")
+        return bytes(m.frame_bulk(function, bank_number, payload))
+
+    def write_bank_bundle(self, *_a, **_k):  # pragma: no cover - must not run
+        raise AssertionError("a card bank was written without knowing which one")
+
+    def close(self):
+        pass
+
+
+class TestCardSlotScopes:
+    """A ``CARD/NN`` read must not label whatever the slot holds as NN."""
+
+    def _no_hints(self, tmp_path, monkeypatch):
+        from kws import bankstore, physical
+
+        monkeypatch.setattr(
+            bankstore, "default_dir", lambda: str(tmp_path / "emptybanks")
+        )
+        monkeypatch.setattr(
+            physical, "default_path", lambda: str(tmp_path / "physical.json")
+        )
+
+    def _args(self, tmp_path, *argv):
+        return cli.build_parser().parse_args(
+            ["--cards", str(tmp_path / "cards.json"), *argv]
+        )
+
+    def test_deps_on_an_uncached_card_bank_refuses_before_the_slot_read(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        self._no_hints(tmp_path, monkeypatch)
+        device = _CardSlotDevice()
+        args = self._args(tmp_path, "deps", "CARD/07")
+        assert cli._cmd_deps(device, args) == 2
+        err = capsys.readouterr().err
+        assert "CARD/07" in err
+        assert "--source" in err
+        assert device.card_slot_reads == 0
+
+    def test_deps_reads_the_slot_when_the_active_bank_is_the_requested_one(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        self._no_hints(tmp_path, monkeypatch)
+        cards.set_active(7, str(tmp_path / "cards.json"))
+        device = _CardSlotDevice(allow_card_slot=True)
+        args = self._args(tmp_path, "deps", "CARD/07")
+        assert cli._cmd_deps(device, args) == 0
+        assert "CARD/07" in capsys.readouterr().out
+        assert device.card_slot_reads == 3, "all three bank dumps came from the slot"
+        assert {bank for bank, _function in device.reads} == {banks.bank("CARD").sysex}
+
+    def test_deps_refuses_a_card_bank_that_is_not_the_active_one(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        self._no_hints(tmp_path, monkeypatch)
+        cards.set_active(13, str(tmp_path / "cards.json"))
+        device = _CardSlotDevice()
+        args = self._args(tmp_path, "deps", "CARD/07")
+        assert cli._cmd_deps(device, args) == 2
+        err = capsys.readouterr().err
+        assert "CARD/07" in err and "--source" in err
+        assert device.card_slot_reads == 0
+
+    def test_copy_perf_from_an_uncached_card_bank_writes_nothing(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        self._no_hints(tmp_path, monkeypatch)
+        device = _CardSlotDevice()
+        args = self._args(
+            tmp_path,
+            "copy-perf",
+            "CARD/07:0",
+            "--to",
+            "RAM3",
+            "--yes",
+            "--backup-dir",
+            str(tmp_path / "backups"),
+        )
+        assert cli._cmd_copy_perf(device, args) != 0
+        assert device.card_slot_reads == 0
+        assert device.bundle_write_count == 0
+
+
+class TestCopyPerf:
+    """`copy-perf` gives each performance its own patches and renumbers both.
+
+    The remapping table is the contract: a performance slot and the patch
+    slots beneath it are what the destination will hold.
+    """
+
+    def _args(self, tmp_path, *extra):
+        return cli.build_parser().parse_args(
+            [
+                "copy-perf",
+                "RAM1:0",
+                "RAM1:1",
+                "--to",
+                "RAM3",
+                "--source",
+                f"RAM1={_perf_source(tmp_path)}",
+                "--backup-dir",
+                str(tmp_path / "pre-write"),
+                *extra,
+            ]
+        )
+
+    def _no_cache(self, tmp_path, monkeypatch):
+        from kws import bankstore
+
+        monkeypatch.setattr(
+            bankstore, "default_dir", lambda: str(tmp_path / "emptybanks")
+        )
+
+    def test_out_mode_writes_three_files_and_the_remapping_table(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        self._no_cache(tmp_path, monkeypatch)
+        out = tmp_path / "copied"
+        args = self._args(tmp_path, "--mode", "clean", "--out", str(out))
+        assert cli._cmd_copy_perf(None, args) == 0
+
+        printed = capsys.readouterr().out
+        assert "perf 0 <- RAM1:0 Glass Meridian" in printed
+        assert "perf 1 <- RAM1:1 Amber Drift" in printed
+        assert "patch 0 <- RAM1:0" in printed
+        assert "patch 1 <- RAM1:0" in printed
+        assert "performances 2/50" in printed
+        assert "patches      2/35" in printed
+        assert "wave seqs    1/32" in printed
+        assert "steps        2/501" in printed
+        assert "Nothing was sent to the instrument." in printed
+
+        for suffix in ("perf", "patch", "seq"):
+            assert (tmp_path / f"copied-{suffix}.syx").exists()
+
+        destination = banks.bank("RAM3")
+        assert (destination.sysex, destination.number) == (4, 2)
+        perf_packets = dumps.read_syx_file(str(out) + "-perf.syx")
+        assert len(perf_packets) == 1
+        assert perf_packets[0].bank == destination.sysex
+        dump = dumps.parse_bulk(perf_packets[0])
+        for record, expected_patch in (
+            (dump.records[0], 0),
+            (dump.records[1], 1),
+        ):
+            used = [part for part in rec.performance_parts(record) if part.used]
+            assert used
+            assert {part.patch for part in used} == {expected_patch}
+            assert {part.bank for part in used} == {destination.number}
+
+        patch_packets = dumps.read_syx_file(str(out) + "-patch.syx")
+        assert patch_packets[0].bank == destination.sysex
+
+    def test_fenced_mode_writes_once_with_all_three_kinds(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        self._no_cache(tmp_path, monkeypatch)
+        device = DemoDevice()
+        args = self._args(tmp_path, "--mode", "clean", "--yes")
+        assert cli._cmd_copy_perf(device, args) == 0
+        assert device.bundle_write_count == 1
+        written = device.bundle_writes[0]
+        assert set(written["kinds"]) == {"performances", "patches", "waveseq"}
+        out = capsys.readouterr().out
+        assert (
+            "about to replace: RAM 3, all performances, patches and wave sequences"
+            in out
+        )
+        assert "written and verified" in out
+
+    def test_without_yes_it_reads_the_destination_and_writes_nothing(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        self._no_cache(tmp_path, monkeypatch)
+        device = DemoDevice()
+        args = self._args(tmp_path, "--mode", "clean")
+        assert cli._cmd_copy_perf(device, args) == 0
+        assert device.bundle_write_count == 0
+        assert device.bank_write_count == 0
+        out = capsys.readouterr().out
+        assert "about to replace" in out
+        assert "Nothing has been sent" in out
+        assert "--yes" in out
+
+    def test_bad_spec_syntax_is_a_usage_error(self, tmp_path, monkeypatch, capsys):
+        self._no_cache(tmp_path, monkeypatch)
+        args = cli.build_parser().parse_args(["copy-perf", "RAM1", "--to", "RAM3"])
+        assert cli._cmd_copy_perf(None, args) == 2
+        assert "SCOPE:NUMBER" in capsys.readouterr().err
+
+    def test_out_mode_is_offline_and_a_bare_copy_is_not(self):
+        parser = cli.build_parser()
+        assert cli._offline(
+            parser.parse_args(["copy-perf", "RAM1:0", "--to", "RAM3", "--out", "x"])
+        )
+        assert not cli._offline(
+            parser.parse_args(["copy-perf", "RAM1:0", "--to", "RAM3"])
+        )
+
+
+class TestLoadedCardScope:
+    def test_one_card_scope_returns_it(self):
+        assert (
+            cli._loaded_card_scope(
+                {"RAM1": deps.Source("RAM1"), "CARD/07": deps.Source("CARD/07")}
+            )
+            == "CARD/07"
+        )
+
+    def test_two_card_scopes_returns_bare(self):
+        assert (
+            cli._loaded_card_scope(
+                {"CARD/07": deps.Source("CARD/07"), "CARD/13": deps.Source("CARD/13")}
+            )
+            == "CARD"
+        )
+
+    def test_no_card_scope_returns_bare(self):
+        assert cli._loaded_card_scope({"RAM1": deps.Source("RAM1")}) == "CARD"
+
+
+class TestImportCommand:
+    """`kwscli import` reads a file into the bank cache, or lists it."""
+
+    def _args(self, path, *extra):
+        return cli.build_parser().parse_args(["import", str(path), *extra])
+
+    def test_list_names_the_bank_and_its_performances(self, tmp_path, capsys):
+        args = self._args(_perf_source(tmp_path), "--list")
+        assert cli._cmd_import(None, args) == 0
+        out = capsys.readouterr().out
+        assert "RAM1" in out
+        assert "Glass Meridian" in out
+
+    def test_it_saves_a_bank_to_the_cache(self, tmp_path, capsys):
+        from kws import bankstore
+
+        cache = str(tmp_path / "banks")
+        args = self._args(_perf_source(tmp_path), "--as", "RAM1", "--bankstore", cache)
+        assert cli._cmd_import(None, args) == 0
+        loaded = bankstore.load("RAM1", cache)
+        assert loaded is not None
+        assert len(loaded.performances) == 50
+        assert len(loaded.patches) == 35
+        assert loaded.waveseq is not None
+        assert "RAM1" in capsys.readouterr().out
+
+    def test_two_banks_need_a_scope(self, tmp_path, capsys):
+        from tests.test_bankbuild import make_patch, make_performance
+
+        perf = make_performance("Glass Meridian", ((0, 0),))
+        perf_rows = b"".join([perf] + [bytes(rec.PERFORMANCE_SIZE)] * 49)
+        patch_rows = b"".join(
+            make_patch("Amber Drift") for _ in range(banks.PATCHES_PER_BANK)
+        )
+        path = tmp_path / "two.syx"
+        path.write_bytes(
+            m.frame_bulk(m.Function.ALL_PERFORMANCE_DUMP, 0, perf_rows)
+            + m.frame_bulk(m.Function.ALL_PATCH_DUMP, 0, patch_rows)
+            + m.frame_bulk(m.Function.ALL_PERFORMANCE_DUMP, 1, perf_rows)
+            + m.frame_bulk(m.Function.ALL_PATCH_DUMP, 1, patch_rows)
+        )
+        args = self._args(path, "--as", "RAM1", "--bankstore", str(tmp_path / "b"))
+        assert cli._cmd_import(None, args) == 2
+        err = capsys.readouterr().err
+        assert "RAM1" in err and "RAM2" in err
+
+    def test_an_internal_bank_keeps_its_own_scope(self, tmp_path, capsys):
+        args = self._args(
+            _perf_source(tmp_path),
+            "--as",
+            "CARD/07",
+            "--bankstore",
+            str(tmp_path / "banks"),
+        )
+        assert cli._cmd_import(None, args) == 2
+        assert "copy-perf" in capsys.readouterr().err
+
+    def test_a_card_bank_may_be_filed_under_a_card_slot(self, tmp_path, capsys):
+        from kws import bankstore
+        from tests.test_bankbuild import make_patch, make_performance
+
+        perf = make_performance("Kelp Forest", ((11, 0),))
+        perf_rows = b"".join([perf] + [bytes(rec.PERFORMANCE_SIZE)] * 49)
+        patch_rows = b"".join(
+            make_patch("Amber Drift") for _ in range(banks.PATCHES_PER_BANK)
+        )
+        path = tmp_path / "card.syx"
+        path.write_bytes(
+            m.frame_bulk(m.Function.ALL_PERFORMANCE_DUMP, 3, perf_rows)
+            + m.frame_bulk(m.Function.ALL_PATCH_DUMP, 3, patch_rows)
+        )
+        cache = str(tmp_path / "banks")
+        args = self._args(path, "--as", "CARD/07", "--bankstore", cache)
+        assert cli._cmd_import(None, args) == 0
+        loaded = bankstore.load("CARD/07", cache)
+        assert loaded is not None
+        assert m.decode_name(loaded.performances[0]) == "Kelp Forest"
+        assert "CARD/07" in capsys.readouterr().out
+
+    def test_label_selects_one_bank_from_a_zip(self, tmp_path, capsys):
+        import zipfile
+
+        from kws import bankstore
+        from tests.test_importers import _disk_bank_bytes
+
+        path = tmp_path / "set.zip"
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("a.syx", _disk_bank_bytes("Glass Meridian"))
+            archive.writestr("b.syx", _disk_bank_bytes("Amber Drift"))
+
+        assert cli._cmd_import(None, self._args(path, "--list")) == 0
+        listed = capsys.readouterr().out
+        assert "set.zip / a.syx [RAM1]" in listed
+        assert "set.zip / b.syx [RAM1]" in listed
+
+        cache = str(tmp_path / "banks")
+        args = self._args(
+            path,
+            "--label",
+            "set.zip / b.syx [RAM1]",
+            "--as",
+            "RAM1",
+            "--bankstore",
+            cache,
+        )
+        assert cli._cmd_import(None, args) == 0
+        loaded = bankstore.load("RAM1", cache)
+        assert loaded is not None
+        assert m.decode_name(loaded.performances[0]) == "Amber Drift"
+
+    def test_a_patch_lib_imports_into_the_cache(self, tmp_path, capsys):
+        from kws import bankstore
+        from tests.test_bankbuild import make_patch
+        from tests.test_importers import _lib_entry, _lib_file, _lib_patch_data
+
+        raw = make_patch("Kelp Forest")
+        path = tmp_path / "patches.lib"
+        path.write_bytes(
+            _lib_file(
+                _lib_entry(
+                    0,
+                    "Kelp Forest",
+                    data=_lib_patch_data(raw),
+                    comment="RAM1-03",
+                )
+            )
+        )
+        cache = str(tmp_path / "banks")
+        args = self._args(path, "--as", "RAM1", "--bankstore", cache)
+        assert cli._cmd_import(None, args) == 0
+        loaded = bankstore.load("RAM1", cache)
+        assert loaded is not None
+        assert m.decode_name(loaded.patches[3]) == "Kelp Forest"
+
+    def test_a_lib_lists_its_entries_but_is_not_imported(self, tmp_path, capsys):
+        from tests.test_importers import _lib_entry, _lib_file
+
+        path = tmp_path / "library.lib"
+        path.write_bytes(_lib_file(_lib_entry(0, "Glass Meridian")))
+
+        assert cli._cmd_import(None, self._args(path, "--list")) == 0
+        assert "Glass Meridian" in capsys.readouterr().out
+
+        assert cli._cmd_import(None, self._args(path, "--as", "RAM1")) == 2
+        assert "no decodable" in capsys.readouterr().err
+
+
+class TestCopyPerfFromAFile:
+    def _file_args(self, tmp_path, *extra):
+        return cli.build_parser().parse_args(
+            [
+                "copy-perf",
+                "RAM1:0",
+                "RAM1:1",
+                "--to",
+                "RAM3",
+                "--from-file",
+                str(_perf_source(tmp_path)),
+                "--backup-dir",
+                str(tmp_path / "pre-write"),
+                *extra,
+            ]
+        )
+
+    def _no_cache(self, tmp_path, monkeypatch):
+        from kws import bankstore
+
+        monkeypatch.setattr(
+            bankstore, "default_dir", lambda: str(tmp_path / "emptybanks")
+        )
+
+    def test_out_mode_reads_the_file_and_remaps(self, tmp_path, monkeypatch, capsys):
+        self._no_cache(tmp_path, monkeypatch)
+        out = tmp_path / "copied"
+        args = self._file_args(tmp_path, "--mode", "clean", "--out", str(out))
+        assert cli._cmd_copy_perf(None, args) == 0
+        printed = capsys.readouterr().out
+        assert "perf 0 <- RAM1:0 Glass Meridian" in printed
+        assert "patch 0 <- RAM1:0" in printed
+        for suffix in ("perf", "patch", "seq"):
+            assert (tmp_path / f"copied-{suffix}.syx").exists()
+
+    def test_fenced_mode_writes_the_bundle_once(self, tmp_path, monkeypatch, capsys):
+        self._no_cache(tmp_path, monkeypatch)
+        device = DemoDevice()
+        args = self._file_args(tmp_path, "--mode", "clean", "--yes")
+        assert cli._cmd_copy_perf(device, args) == 0
+        assert device.bundle_write_count == 1
+        out = capsys.readouterr().out
+        assert "about to replace: RAM 3" in out
+        assert "written and verified" in out
+
+    def test_a_missing_file_is_a_usage_error(self, tmp_path, monkeypatch, capsys):
+        self._no_cache(tmp_path, monkeypatch)
+        args = cli.build_parser().parse_args(
+            [
+                "copy-perf",
+                "RAM1:0",
+                "--to",
+                "RAM3",
+                "--from-file",
+                str(tmp_path / "missing.syx"),
+                "--out",
+                str(tmp_path / "x"),
+            ]
+        )
+        assert cli._cmd_copy_perf(None, args) == 2
+        assert "error" in capsys.readouterr().err

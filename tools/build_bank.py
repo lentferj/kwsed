@@ -17,12 +17,19 @@
 """Build a favourites bank from other banks' System Exclusive dumps.
 
 Patch first: you name the patches, this works out what they drag along and
-which performances become complete. See docs/BANK_BUILDER.md.
+which performances become complete. Performance first: you name the
+performances, and each drags along its own private copies of the patches it
+needs. See docs/BANK_BUILDER.md.
 
     python3 tools/build_bank.py \\
         --source A=dumps/cardA-*.syx --source B=dumps/cardB-*.syx \\
         --template dumps/empty-*.syx \\
         --patch A:3 --patch A:7 --patch B:12 \\
+        --out favourites
+
+    python3 tools/build_bank.py \\
+        --source A=dumps/cardA-*.syx \\
+        --perf A:3 --perf A:7 \\
         --out favourites
 
 Writes nothing to the instrument. The result is `.syx` files; loading them
@@ -39,7 +46,8 @@ from typing import List, Optional, Tuple
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from kws import bankbuild, banks, deps, messages as m, records as rec
+from kws import bankbuild, banks, deps, messages as m, perfcopy, records as rec
+from kws import relations
 
 
 def _load(spec: str) -> Tuple[str, deps.Source]:
@@ -50,6 +58,98 @@ def _load(spec: str) -> Tuple[str, deps.Source]:
     if not files:
         raise SystemExit(f"no files matched {pattern!r}")
     return bank_id, deps.load_syx(files, bank_id)
+
+
+def _parse_perf(text: str) -> relations.PerfId:
+    """``ID:N`` as a :class:`relations.PerfId`, or a clear exit."""
+    if ":" not in text:
+        raise SystemExit(f"--perf wants ID:N, got {text!r}")
+    bank_id, number = text.rsplit(":", 1)
+    try:
+        return relations.PerfId(bank_id, int(number))
+    except ValueError:
+        raise SystemExit(f"--perf wants ID:N, got {text!r}")
+
+
+def _template_source(args: argparse.Namespace) -> deps.Source:
+    """The bank to build on, or an empty one with the warning about it."""
+    if args.template:
+        files = sorted(glob.glob(os.path.expanduser(args.template)))
+        if not files:
+            raise SystemExit(f"no files matched {args.template!r}")
+        return deps.load_syx(files, "TEMPLATE")
+    print(
+        "\nno --template: building on empty records. The instrument's "
+        "own initialised records are safer -- format a bank and dump "
+        "it."
+    )
+    return deps.Source(bank_id="TEMPLATE")
+
+
+def _print_atomic_allocations(plan: perfcopy.AtomicPlan) -> None:
+    """One line per performance, and the patch slots it owns."""
+    offset = 0
+    for alloc in plan.allocations:
+        count = len(alloc.allocated_patches)
+        span = f"patches {offset}..{offset + count - 1}" if count else "(no patches)"
+        print(
+            f"perf {alloc.target_perf_slot} <- {alloc.source_perf.scope_id}:"
+            f"{alloc.source_perf.number} {alloc.name} : {span}"
+        )
+        offset += count
+    for why in plan.rejected:
+        print("  left out:", why)
+
+
+def _print_atomic_budget(plan: perfcopy.AtomicPlan) -> None:
+    print(f"performances  {len(plan.allocations):3d} / {banks.PERFORMANCES_PER_BANK}")
+    print(f"patches       {plan.patch_count:3d} / {banks.PATCHES_PER_BANK}")
+    print(f"wave seqs     {len(plan.sequence_map):3d} / {rec.SEQUENCES_PER_BANK}")
+    print(f"steps         {plan.steps_used:3d} / {rec.STEPS_PER_BANK}")
+
+
+def _perf_first(args: argparse.Namespace, sources: dict[str, deps.Source]) -> int:
+    """Performance first: each performance keeps its own private patches."""
+    destination = banks.bank(args.bank)
+    chosen = [_parse_perf(text) for text in args.perf]
+    plan = perfcopy.plan_atomic_bank(sources, chosen, destination_bank=destination)
+
+    _print_atomic_allocations(plan)
+    _print_atomic_budget(plan)
+
+    if args.out is None:
+        print("\ndry run: nothing written. Pass --out to build.")
+        return 0
+
+    template = _template_source(args)
+    built = perfcopy.build_atomic_bank(
+        sources,
+        plan,
+        template_performances=(
+            b"".join(template.performances) if template.performances else None
+        ),
+        template_patches=(b"".join(template.patches) if template.patches else None),
+        template_waveseq=template.waveseq,
+    )
+
+    channel = args.channel - 1
+    written = []
+    for suffix, function, payload in (
+        ("patch", m.Function.ALL_PATCH_DUMP, built.patches),
+        ("perf", m.Function.ALL_PERFORMANCE_DUMP, built.performances),
+        ("seq", m.Function.ALL_WAVESEQ_DUMP, built.waveseq),
+    ):
+        if payload is None:
+            continue
+        frame = m.frame_bulk(function, destination.sysex, payload, channel=channel)
+        path = f"{args.out}-{suffix}.syx"
+        with open(path, "wb") as handle:
+            handle.write(bytes(frame))
+        written.append((path, len(frame)))
+    for path, size in written:
+        print(f"wrote {path}  ({size} bytes)")
+    print("\nNothing was sent to the instrument. Load these from its front panel.")
+    return 0
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -76,6 +176,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="a patch to include, in priority order; repeatable",
     )
     ap.add_argument(
+        "--perf",
+        action="append",
+        default=[],
+        metavar="ID:N",
+        help="a performance to include, in priority order; repeatable",
+    )
+    ap.add_argument(
         "--bank",
         default="CARD",
         help="which bank the result is destined for (default CARD)",
@@ -97,6 +204,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     sources = dict(_load(s) for s in args.source)
     if not sources:
         raise SystemExit("no --source given")
+
+    if args.perf and not args.patch:
+        return _perf_first(args, sources)
 
     chosen: List[Tuple[str, int]] = []
     for spec in args.patch:
@@ -127,18 +237,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         print("\ndry run: nothing written. Pass --out to build.")
         return 0
 
-    if args.template:
-        files = sorted(glob.glob(os.path.expanduser(args.template)))
-        if not files:
-            raise SystemExit(f"no files matched {args.template!r}")
-        template = deps.load_syx(files, "TEMPLATE")
-    else:
-        print(
-            "\nno --template: building on empty records. The instrument's "
-            "own initialised records are safer -- format a bank and dump "
-            "it."
-        )
-        template = deps.Source(bank_id="TEMPLATE")
+    template = _template_source(args)
 
     built = bankbuild.build(
         sources,
@@ -154,7 +253,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             else bytes(banks.PERFORMANCES_PER_BANK * rec.PERFORMANCE_SIZE)
         ),
         template_waveseq=(template.waveseq or bytes(rec.WAVESEQ_BANK_SIZE)),
-        destination_bank=destination.sysex,
+        destination_bank=destination.number,
     )
 
     channel = args.channel - 1

@@ -48,10 +48,13 @@ silent and permanent.
 
 from __future__ import annotations
 
+import contextlib
+import re
 import signal
 import sys
+import threading
 import time
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 import rtmidi
 
@@ -68,6 +71,13 @@ __all__ = [
     "SEND_GAP",
     "DEFAULT_TIMEOUT",
     "DUMP_TIMEOUT",
+    "CARD_NAME_OFFSET",
+    "CARD_NAME_LEN",
+    "MIDI_MODE_PARAMETER",
+    "MIDI_MODE_OMNI",
+    "MIDI_MODE_POLY",
+    "MIDI_MODE_MULTI",
+    "MIDI_MODE_MONO",
     "MidiUnavailable",
     "DeviceError",
     "DeviceRefused",
@@ -98,12 +108,85 @@ SINGLE_OBJECT_TIMEOUT = 15.0
 #: about eight seconds of 31250-baud MIDI before the unit's own delay.
 DUMP_TIMEOUT = 20.0
 
+#: The global parameter that selects OMNI/POLY/MULTI/MONO reception, and
+#: its documented values (Reference Guide Appendix 4 section 5.12). The
+#: value travels as ASCII, so MIDI mode 2 is the bytes ``2B 32`` ("+2").
+MIDI_MODE_PARAMETER = 4
+MIDI_MODE_OMNI = 0
+MIDI_MODE_POLY = 1
+MIDI_MODE_MULTI = 2
+MIDI_MODE_MONO = 3
+
+#: Where the card-name field sits in the **decoded** System Setup dump
+#: (function ``0x51``), and how long it is.
+#:
+#: CONFIRM AGAINST HARDWARE: the offset is the one wire fact this feature
+#: does not yet have. It is 0 until the read-only probe
+#: (``tools/probe_card_name.py``) is compared against a real unit; until
+#: then :meth:`WavestationBridge.read_card_name` accepts the first sixteen
+#: bytes only when they look like a name, so the archive's identity
+#: resolution treats anything implausible as unknown rather than filing it
+#: under a wrong bank.
+CARD_NAME_OFFSET = 0
+CARD_NAME_LEN = 16
+
 #: Which dump a bank request for a kind draws. The manual documents both;
 #: kwsed sent only the patch one for its whole life and read the end of
 #: that history as "the unit decides what to send".
 _DUMP_FOR_KIND = {
     banks.Kind.PERFORMANCE: m.Function.ALL_PERFORMANCE_DUMP,
     banks.Kind.PATCH: m.Function.ALL_PATCH_DUMP,
+}
+
+#: Rough wire bytes per dump, for the progress estimate. Every record byte
+#: travels as two bytes (nibble encoded), so this is the payload size twice.
+_WIRE_BYTES = {
+    banks.Kind.PATCH: banks.PATCHES_PER_BANK * records.PATCH_SIZE * 2,
+    banks.Kind.PERFORMANCE: banks.PERFORMANCES_PER_BANK * records.PERFORMANCE_SIZE * 2,
+    "waveseq": records.WAVESEQ_BANK_SIZE * 2,
+}
+
+
+_FUNCTION_WIRE_BYTES = {
+    m.Function.ALL_PATCH_DUMP: _WIRE_BYTES[banks.Kind.PATCH],
+    m.Function.ALL_PERFORMANCE_DUMP: _WIRE_BYTES[banks.Kind.PERFORMANCE],
+    m.Function.ALL_WAVESEQ_DUMP: _WIRE_BYTES["waveseq"],
+}
+
+
+_BUNDLE_LABELS = {
+    "patches": "patches",
+    "performances": "performances",
+    "waveseq": "wave sequences",
+}
+
+
+def _bundle_label(kind: str) -> str:
+    return _BUNDLE_LABELS.get(kind, kind)
+
+
+def _wire_estimate(total: int) -> float:
+    """How long ``total`` wire bytes take, plus a moment to process."""
+    return total / alsa.Sender.BYTES_PER_SECOND + 0.8
+
+
+#: The three kinds a copied performance drags along, with the dump each one
+#: is written and read back as. A bundle names them in this order for the
+#: send -- wave sequences first, performances last -- so a read-back of a
+#: performance cannot precede the patches it points at.
+_BUNDLE_FUNCTIONS = {
+    "waveseq": m.Function.ALL_WAVESEQ_DUMP,
+    "patches": m.Function.ALL_PATCH_DUMP,
+    "performances": m.Function.ALL_PERFORMANCE_DUMP,
+}
+
+#: The decoded size of each kind's whole bank. Checked before anything is
+#: read or sent: a frame built from a short payload would still be a legal
+#: message, and the unit would store a bank with the tail missing.
+_BUNDLE_SIZES = {
+    "performances": banks.PERFORMANCES_PER_BANK * records.PERFORMANCE_SIZE,
+    "patches": banks.PATCHES_PER_BANK * records.PATCH_SIZE,
+    "waveseq": records.WAVESEQ_BANK_SIZE,
 }
 
 _HINTS = ("wavestation", "ws sr", "wssr", "korg")
@@ -206,7 +289,62 @@ class WavestationBridge:
         #: it, and None for the test doubles that build one directly.
         self.port: Optional[str] = None
         self.recv_port: Optional[str] = None
+        #: ``progress(label, fraction)`` while a transfer runs; ``None`` as
+        #: the fraction means it is over. Set by the TUI so a ten-second
+        #: bank dump has something to show besides a blank status line.
+        self.progress: Optional[Callable[[str, Optional[float]], None]] = None
+        self._progress_label = ""
+        self._progress_fraction = 0.0
         self._in.ignore_types(sysex=False, timing=True, active_sense=True)
+
+    def _report(self, fraction: Optional[float]) -> None:
+        """Tell the progress hook where a transfer is, if anyone listens.
+
+        A UI callback that raises must not turn into a failed write, so its
+        exceptions are swallowed: this is decoration, not protocol.
+        """
+        hook = self.progress
+        if hook is None:
+            return
+        if fraction is not None and 0.0 < fraction < 1.0:
+            # A read loop asks every few milliseconds; one-percent steps keep
+            # that from becoming a message storm on the UI's queue. The
+            # first announcement (0.0) always goes out.
+            if (
+                self._progress_fraction > 0.0
+                and fraction - self._progress_fraction < 0.01
+            ):
+                return
+            self._progress_fraction = fraction
+        try:
+            hook(self._progress_label, fraction)
+        except Exception:
+            pass
+
+    @contextlib.contextmanager
+    def _progress_scope(self, label: str, estimate: Optional[float] = None) -> "Any":
+        """Announce a transfer, and always announce its end.
+
+        ``estimate`` is the expected duration in seconds, used by the read
+        loops to move the bar while they wait for a message that arrives
+        whole and only at the end.
+        """
+        previous = self._progress_label
+        self._progress_label = label
+        self._progress_fraction = 0.0
+        self._report(0.0)
+        try:
+            yield estimate
+        finally:
+            self._report(None)
+            self._progress_label = previous
+            self._progress_fraction = 0.0
+
+    def _estimate_progress(self, started: float, estimate: Optional[float]) -> None:
+        if not estimate:
+            return
+        elapsed = time.monotonic() - started
+        self._report(min(0.95, elapsed / estimate))
 
     @classmethod
     def open(
@@ -269,8 +407,44 @@ class WavestationBridge:
     #: this large go through :mod:`kws.alsa` instead.
     RTMIDI_LIMIT = 4096
 
+    #: Sends bigger than this get a progress ticker. Below it the message is
+    #: over before a bar could move and the callers' hold covers the wait.
+    PROGRESS_SEND_BYTES = 256
+
     def _send(self, data: bytes) -> None:
         data = bytes(data)
+        stop: Optional[threading.Event] = None
+        ticker: Optional[threading.Thread] = None
+        if self.progress is not None and len(data) > self.PROGRESS_SEND_BYTES:
+            # The transport may hand the whole message to the driver in one
+            # call and never tell us how much has gone (rtmidi) or pace it
+            # chunk by chunk (ALSA). A ticker against the wire-speed estimate
+            # moves the bar either way; ALSA's exact counts still refine it.
+            stop = threading.Event()
+            ticker = threading.Thread(
+                target=self._send_estimate,
+                args=(len(data), stop),
+                name="kwsed-progress",
+                daemon=True,
+            )
+            ticker.start()
+        try:
+            self._send_now(data)
+        finally:
+            if stop is not None:
+                stop.set()
+            if ticker is not None:
+                ticker.join(timeout=0.5)
+
+    def _send_estimate(self, size: int, stop: threading.Event) -> None:
+        """Move the bar while a message is being handed to the driver."""
+        estimate = _wire_estimate(size)
+        started = time.monotonic()
+        while not stop.wait(0.1):
+            elapsed = time.monotonic() - started
+            self._report(min(0.94, elapsed / estimate))
+
+    def _send_now(self, data: bytes) -> None:
         if len(data) > self.RTMIDI_LIMIT:
             address = (
                 alsa.port_address(self.description.split(" -> ")[0])
@@ -280,7 +454,10 @@ class WavestationBridge:
             if address is not None:
                 sender = alsa.Sender(*address, name=b"kwsed")
                 try:
-                    sender.send(data)
+                    sender.send(
+                        data,
+                        progress=lambda sent, total: self._report(sent / total),
+                    )
                 finally:
                     sender.close()
                 time.sleep(SEND_GAP)
@@ -503,74 +680,110 @@ class WavestationBridge:
                 ) from None
             wanted = (dump_function,)
             request = m.bank_request(entry.sysex, dump_function, self.channel)
-        self._drain()
-        self._send(request)
-        deadline = time.time() + (DUMP_TIMEOUT if timeout is None else timeout)
-        while time.time() < deadline:
-            message = self._in.get_message()
-            if message is None:
-                time.sleep(0.003)
-                continue
-            packet = m.parse(message[0])
-            if packet is None or packet.channel != self.channel:
-                continue
-            if packet.is_error:
-                raise DeviceRefused(packet.function)
-            if packet.function not in wanted:
-                continue
-            # The bank the reply describes, not merely that it is a dump.
-            # A late answer to a request that already timed out is
-            # otherwise indistinguishable from this one's, and the caller
-            # files these names under the bank it asked for -- which is how
-            # a read came back holding another bank's contents. read_patch
-            # guards the same way.
-            if packet.bank is not None and packet.bank != entry.sysex:
-                continue
-            return dumps.parse_bulk(packet)
-        raise TimeoutError(
-            f"no dump came back for {entry.label}. The unit did not refuse "
-            f"it either, so this means one of: powered off, wrong port, "
-            f"wrong global channel (kwsed is using {self.channel + 1}), "
-            f"System Exclusive reception disabled, or an interface that "
-            f"cannot carry a message this long -- a patch bank is nearly "
-            f"30 kB."
-        )
+        kind_key = kind if kind is not None else banks.Kind.PATCH
+        wire = _WIRE_BYTES.get(kind_key, _WIRE_BYTES[banks.Kind.PATCH])
+        with self._progress_scope(
+            f"receiving {entry.label} {banks.plural(kind_key)}",
+            _wire_estimate(wire),
+        ) as estimate:
+            started = time.monotonic()
+            self._drain()
+            self._send(request)
+            deadline = time.time() + (DUMP_TIMEOUT if timeout is None else timeout)
+            while time.time() < deadline:
+                message = self._in.get_message()
+                if message is None:
+                    self._estimate_progress(started, estimate)
+                    time.sleep(0.003)
+                    continue
+                packet = m.parse(message[0])
+                if packet is None or packet.channel != self.channel:
+                    continue
+                if packet.is_error:
+                    raise DeviceRefused(packet.function)
+                if packet.function not in wanted:
+                    continue
+                # The bank the reply describes, not merely that it is a dump.
+                # A late answer to a request that already timed out is
+                # otherwise indistinguishable from this one's, and the caller
+                # files these names under the bank it asked for -- which is how
+                # a read came back holding another bank's contents. read_patch
+                # guards the same way.
+                if packet.bank is not None and packet.bank != entry.sysex:
+                    continue
+                return dumps.parse_bulk(packet)
+            # The Card is the one bank the instrument only answers when the
+            # hardware is there: with no Program Card in the slot the request is
+            # simply not served, which looks identical to every other silence.
+            # Lead with that cause rather than a list of cable faults.
+            card_hint = ""
+            if entry.id == "CARD":
+                card_hint = (
+                    " The Card bank only answers when a Program Card is in the "
+                    "slot, so an empty slot (or an HCard that is not seated) is "
+                    "the first thing to check."
+                )
+            raise TimeoutError(
+                f"no dump came back for {entry.label}.{card_hint} The unit did "
+                f"not refuse it either, so this otherwise means one of: powered "
+                f"off, wrong port, wrong global channel (kwsed is using "
+                f"{self.channel + 1}), System Exclusive reception disabled, or an "
+                f"interface that cannot carry a message this long -- a patch bank "
+                f"is nearly 30 kB."
+            )
 
     def read_patch(
-        self, bank: int | str, number: int, *, timeout: Optional[float] = None
+        self,
+        bank: int | str,
+        number: int,
+        *,
+        timeout: Optional[float] = None,
+        label: Optional[str] = None,
     ) -> bytes:
-        """One patch's 426 bytes. Read-only, and makes no sound."""
+        """One patch's 426 bytes. Read-only, and makes no sound.
+
+        ``label`` names the transfer in the progress bar; the audition
+        staging reads a slot to back it up, which is a different thing
+        from reading it to play it and worth saying so.
+        """
         entry = banks.bank(bank)
-        self._drain()
-        self._send(m.single_patch_request(entry.sysex, number, self.channel))
-        deadline = time.time() + (SINGLE_OBJECT_TIMEOUT if timeout is None else timeout)
-        while time.time() < deadline:
-            message = self._in.get_message()
-            if message is None:
-                time.sleep(0.002)
-                continue
-            packet = m.parse(message[0])
-            if packet is None or packet.channel != self.channel:
-                continue
-            if packet.is_error:
-                raise DeviceRefused(packet.function)
-            if packet.function != m.Function.SINGLE_PATCH_DUMP:
-                continue
-            # Match the bank and number the reply describes, not merely
-            # that it is a patch dump. A late answer to a request that has
-            # already timed out is otherwise indistinguishable from the
-            # answer to this one -- which is how a read of Card 12 came
-            # back holding the patch from Card 3, and a read of RAM 1 20
-            # came back holding one from the Card.
-            raw = bytes(message[0])
-            if len(raw) < 7 or raw[5] != entry.sysex or raw[6] != number:
-                continue
-            return packet.data()[: records.PATCH_SIZE]
-        raise TimeoutError(
-            f"no patch came back for {entry.label} {number}. A reply for a "
-            f"different slot does not count, so this can also mean the unit "
-            f"is still answering an earlier request."
-        )
+        label = label or f"reading {entry.label} patch {number:02d}"
+        wire = records.PATCH_SIZE * 2
+        with self._progress_scope(label, _wire_estimate(wire)) as estimate:
+            started = time.monotonic()
+            self._drain()
+            self._send(m.single_patch_request(entry.sysex, number, self.channel))
+            deadline = time.time() + (
+                SINGLE_OBJECT_TIMEOUT if timeout is None else timeout
+            )
+            while time.time() < deadline:
+                message = self._in.get_message()
+                if message is None:
+                    self._estimate_progress(started, estimate)
+                    time.sleep(0.002)
+                    continue
+                packet = m.parse(message[0])
+                if packet is None or packet.channel != self.channel:
+                    continue
+                if packet.is_error:
+                    raise DeviceRefused(packet.function)
+                if packet.function != m.Function.SINGLE_PATCH_DUMP:
+                    continue
+                # Match the bank and number the reply describes, not merely
+                # that it is a patch dump. A late answer to a request that has
+                # already timed out is otherwise indistinguishable from the
+                # answer to this one -- which is how a read of Card 12 came
+                # back holding the patch from Card 3, and a read of RAM 1 20
+                # came back holding one from the Card.
+                raw = bytes(message[0])
+                if len(raw) < 7 or raw[5] != entry.sysex or raw[6] != number:
+                    continue
+                return packet.data()[: records.PATCH_SIZE]
+            raise TimeoutError(
+                f"no patch came back for {entry.label} {number}. A reply for a "
+                f"different slot does not count, so this can also mean the unit "
+                f"is still answering an earlier request."
+            )
 
     def write_patch(
         self,
@@ -581,19 +794,36 @@ class WavestationBridge:
         backup_dir: str,
         verify: bool = True,
         timeout: Optional[float] = None,
+        wait_status: bool = True,
+        before: Optional[bytes] = None,
+        save_backup: bool = True,
     ) -> Dict[str, Any]:
         """Replace **one patch**. Destructive, and fenced like a bank write.
 
         Two messages, because one is not enough: a single patch dump lands
-        in the edit buffer, and a separate write command commits it to the
-        slot. Korg's appendix documents both. Edisyn sends the pair and
-        records that it does not work -- its write command passes the
-        function code and the bank where the bank and the number belong.
+        in the edit buffer and names the destination, then a change of the
+        SR-only EXECUTE_WRITE parameter commits it to that slot. That is
+        Edisyn's write path, and it does not raise the unit's front-panel
+        prompt. Korg's documented patch write command (0x11) does: seen
+        live on a Wavestation SR (2026-11), it shows "SAVE PATCH -- ARE
+        YOU SURE?" and waits for +1/YES, so a remote write stalls there and
+        later reads come back addressed oddly while the prompt is up.
 
         Far smaller than a bank write: 426 bytes and one slot, rather than
-        35 slots and 30 kB. The fence is the same anyway, because the thing
-        that makes a write safe is the backup and the read-back, not the
-        size.
+        35 slots and nearly 30 kB on the wire. The fence is the same
+        anyway, because the thing that makes a write safe is the backup and
+        the read-back, not the size.
+
+        ``save_backup`` is the audition's opt-out: the staging area is the
+        user's scratch and capturing it costs a read per slot. With it off
+        nothing is read before sending and no envelope is written, so the
+        write cannot be undone -- the default keeps the fence intact.
+
+        ``wait_status`` says whether to hold for the unit's WRITE_COMPLETED
+        reply. The audition staging pairs this with ``verify=True`` and
+        skips the wait: the read-back is the proof, and a unit that does
+        not answer a parameter change would otherwise cost its timeout for
+        every staged patch.
         """
         entry = banks.bank(bank)
         if not entry.writable:
@@ -606,30 +836,231 @@ class WavestationBridge:
         if len(data) != records.PATCH_SIZE:
             raise ValueError(f"a patch is {records.PATCH_SIZE} bytes; got {len(data)}")
 
+        saved: Optional[str] = None
+        if save_backup:
+            if before is not None:
+                if len(before) != records.PATCH_SIZE:
+                    raise ValueError(
+                        f"a patch is {records.PATCH_SIZE} bytes; got {len(before)}"
+                    )
+                before_bytes = bytes(before)
+            else:
+                try:
+                    before_bytes = bytes(
+                        self.read_patch(entry.sysex, number, timeout=timeout)
+                    )
+                except Exception as exc:
+                    raise DeviceError(
+                        f"could not read {entry.label} patch {number} before "
+                        f"writing it, so nothing was sent ({exc})."
+                    ) from exc
+            saved = backup.save(
+                backup_dir,
+                kind="patch",
+                slot=_patch_backup_name(entry.label, number),
+                name=_patch_backup_name(entry.label, number),
+                device_id=str(self.channel),
+                source="kwsed",
+                blocks={
+                    "dump": m.single_patch_dump(
+                        entry.sysex, number, before_bytes, channel=self.channel
+                    )
+                },
+            )
+
+        # Edisyn's write path (its performance writer pairs a dump with an
+        # EXECUTE_WRITE change): the dump fills the edit buffer and names
+        # the destination, and the SR-only parameter change performs the
+        # write without the unit's front-panel confirmation. The documented
+        # 0x11 command was seen live to stop at "SAVE PATCH -- ARE YOU
+        # SURE?" and never write unattended.
+        with self._progress_scope(f"writing {entry.label} patch {number:02d}"):
+            self._drain()
+            self._send(
+                m.single_patch_dump(entry.sysex, number, data, channel=self.channel)
+            )
+            self._send(m.execute_write(channel=self.channel))
+
+        result: Dict[str, Any] = {
+            "bank": entry.label,
+            "number": number,
+            "backup": saved,
+            "status": None,
+            "verified": None,
+            "mismatch": None,
+        }
+        if wait_status:
+            deadline = time.time() + 2.0
+            while time.time() < deadline:
+                message = self._in.get_message()
+                if message is None:
+                    time.sleep(0.002)
+                    continue
+                packet = m.parse(message[0])
+                if packet is None:
+                    continue
+                if packet.function in (
+                    m.Function.WRITE_COMPLETED,
+                    m.Function.WRITE_ERROR,
+                ):
+                    result["status"] = packet.function_name
+                    break
+        if not verify:
+            return result
+        after: Optional[bytes] = None
+        for attempt in range(2):
+            if attempt:
+                # The unit can still be committing when the first read-back
+                # is answered -- EXECUTE_WRITE is a front-panel save, not a
+                # synchronous call. One retry tells a slow write from one
+                # the unit never performed.
+                time.sleep(0.25)
+            try:
+                after = self.read_patch(entry.sysex, number, timeout=timeout)
+            except Exception as exc:
+                result["verified"] = False
+                result["mismatch"] = f"could not read it back ({exc})"
+                return result
+            if bytes(after) == bytes(data):
+                break
+        result["verified"] = after is not None and bytes(after) == bytes(data)
+        if not result["verified"] and after is not None:
+            result["mismatch"] = _first_difference(bytes(data), bytes(after))
+        return result
+
+    def read_performance(
+        self, bank: int | str, number: int, *, timeout: Optional[float] = None
+    ) -> bytes:
+        """One performance's 181 bytes. Read-only for memory, but the reply
+        lands in the performance edit buffer, so it clobbers whatever edit
+        was buffered there -- the buffer is scratch, harmless, but say it."""
+        entry = banks.bank(bank)
+        self._drain()
+        self._send(m.single_performance_request(entry.sysex, number, self.channel))
+        deadline = time.time() + (SINGLE_OBJECT_TIMEOUT if timeout is None else timeout)
+        while time.time() < deadline:
+            message = self._in.get_message()
+            if message is None:
+                time.sleep(0.002)
+                continue
+            packet = m.parse(message[0])
+            if packet is None or packet.channel != self.channel:
+                continue
+            if packet.is_error:
+                raise DeviceRefused(packet.function)
+            if packet.function != m.Function.PERFORMANCE_DUMP:
+                continue
+            raw = bytes(message[0])
+            if len(raw) < 7 or raw[5] != entry.sysex or raw[6] != number:
+                continue
+            return packet.data()[: records.PERFORMANCE_SIZE]
+        raise TimeoutError(
+            f"no performance came back for {entry.label} {number}. A reply for a "
+            f"different slot does not count, so this can also mean the unit "
+            f"is still answering an earlier request."
+        )
+
+    def send_performance_to_buffer(
+        self,
+        bank: int | str,
+        number: int,
+        data: bytes,
+        *,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Fill the edit buffer with one performance. **Nothing is written.**
+
+        A single performance dump lands in the unit's edit buffer: it is
+        audible at once, bypasses memory protect, and survives nothing.
+        The header's bank and number are where the buffer *would* go if
+        the unit's own SAVE were executed; kwsed writes for real through
+        :meth:`write_performance` instead, so the destination here only
+        has to be a bank the unit knows.
+        """
+        entry = banks.bank(bank)
+        if not 0 <= number < banks.PERFORMANCES_PER_BANK:
+            raise ValueError(
+                f"a bank holds {banks.PERFORMANCES_PER_BANK} performances, so "
+                f"{number} is not one of them"
+            )
+        if len(data) != records.PERFORMANCE_SIZE:
+            raise ValueError(
+                f"a performance is {records.PERFORMANCE_SIZE} bytes; got {len(data)}"
+            )
+
+        with self._progress_scope(f"auditioning on {entry.label} {number:02d}"):
+            self._drain()
+            self._send(
+                m.single_performance_dump(
+                    entry.sysex, number, data, channel=self.channel
+                )
+            )
+        return {"bank": entry.label, "number": number}
+
+    def write_performance(
+        self,
+        bank: int | str,
+        number: int,
+        data: bytes,
+        *,
+        backup_dir: str,
+        verify: bool = True,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Replace **one performance**. Destructive, and fenced like a patch write.
+
+        Two messages, because one is not enough: a single performance dump
+        lands in the edit buffer, and a separate write command commits it to
+        the slot. The backup covers the slot it overwrites.
+        """
+        entry = banks.bank(bank)
+        if not entry.writable:
+            raise DeviceError(f"{entry.label} is ROM and cannot be written.")
+        if not 0 <= number < banks.PERFORMANCES_PER_BANK:
+            raise ValueError(
+                f"a bank holds {banks.PERFORMANCES_PER_BANK} performances, so "
+                f"{number} is not one of them"
+            )
+        if len(data) != records.PERFORMANCE_SIZE:
+            raise ValueError(
+                f"a performance is {records.PERFORMANCE_SIZE} bytes; got {len(data)}"
+            )
+
         try:
-            before = self.read_patch(entry.sysex, number, timeout=timeout)
+            before = self.read_performance(entry.sysex, number, timeout=timeout)
         except Exception as exc:
             raise DeviceError(
-                f"could not read {entry.label} patch {number} before "
+                f"could not read {entry.label} performance {number} before "
                 f"writing it, so nothing was sent ({exc})."
             ) from exc
         saved = backup.save(
             backup_dir,
-            kind="patch",
-            slot=_patch_backup_name(entry.label, number),
-            name=_patch_backup_name(entry.label, number),
+            kind="performance",
+            slot=_performance_backup_name(entry.label, number),
+            name=_performance_backup_name(entry.label, number),
             device_id=str(self.channel),
             source="kwsed",
             blocks={
-                "dump": m.single_patch_dump(
+                "dump": m.single_performance_dump(
                     entry.sysex, number, before, channel=self.channel
                 )
             },
         )
 
-        self._drain()
-        self._send(m.single_patch_dump(entry.sysex, number, data, channel=self.channel))
-        self._send(m.patch_write_command(entry.sysex, number, self.channel))
+        # Edisyn's write, not the documented write command: the buffer's
+        # destination was set by the dump above, and an EXECUTE_WRITE change
+        # performs it without the unit's front-panel prompt. (The 0x11 patch
+        # write command was seen live to stop at "SAVE PATCH -- ARE YOU
+        # SURE?"; its 0x1A sibling is presumed to behave the same, and
+        # Edisyn never uses either.)
+        with self._progress_scope(f"writing {entry.label} performance {number:02d}"):
+            self._drain()
+            self._send(
+                m.single_performance_dump(
+                    entry.sysex, number, data, channel=self.channel
+                )
+            )
+            self._send(m.execute_write(channel=self.channel))
 
         result: Dict[str, Any] = {
             "bank": entry.label,
@@ -654,7 +1085,7 @@ class WavestationBridge:
         if not verify:
             return result
         try:
-            after = self.read_patch(entry.sysex, number, timeout=timeout)
+            after = self.read_performance(entry.sysex, number, timeout=timeout)
         except Exception as exc:
             result["verified"] = False
             result["mismatch"] = f"could not read it back ({exc})"
@@ -714,19 +1145,12 @@ class WavestationBridge:
         are not a bank.
         """
         raw = bytes(data)
-        if (
+        looks_like_frame = (
             len(raw) > 5
             and raw[0] == 0xF0
             and raw[-1] == 0xF7
             and raw[4] == m.Function.MULTISET_DUMP
-        ):
-            sent = raw
-        else:
-            sent = m.frame(
-                m.Function.MULTISET_DUMP,
-                [0, 1] + list(m.to_nibbles(raw)),
-                channel=self.channel,
-            )
+        )
 
         try:
             before = self.read_multi(timeout=timeout)
@@ -745,6 +1169,37 @@ class WavestationBridge:
             source="kwsed",
             blocks={"dump": before},
         )
+
+        # The 0x62 structure is longer than the part kwsed models: the
+        # unit's own dump decodes to 3777 bytes, of which the first 3264
+        # are the Multisets and their names. The rest is preserved from the
+        # pre-write read rather than zeroed.
+        edited = raw
+        merged = raw
+        if looks_like_frame:
+            sent = raw
+        else:
+            packet = m.parse(before)
+            if packet is None or len(packet.payload) < 2:
+                raise DeviceError(
+                    "the Multi Mode Setup read back before writing was not a "
+                    "Wavestation message, so nothing was sent. kwsed does not "
+                    "overwrite a dump it could not read."
+                )
+            header = list(packet.payload[:2])
+            full = packet.data()
+            if len(full) > len(edited):
+                merged = edited + full[len(edited) :]
+            nibbles = list(m.to_nibbles(merged))
+            # Korg's checksum covers the two header bytes and the nibble
+            # data: the unit's own dump confirms it (header 00 01 makes the
+            # header-inclusive sum differ from the nibbles-only one by one).
+            check = m.checksum([*header, *nibbles])
+            sent = m.frame(
+                m.Function.MULTISET_DUMP,
+                [*header, *nibbles, check],
+                channel=self.channel,
+            )
 
         self._drain()
         self._send(sent)
@@ -766,9 +1221,29 @@ class WavestationBridge:
                 f"read back to check it ({exc}). Whether it took is unknown."
             )
             return result
-        result["verified"] = bytes(after) == bytes(sent)
+        if looks_like_frame:
+            result["verified"] = bytes(after) == bytes(sent)
+            if not result["verified"]:
+                result["mismatch"] = _first_difference(bytes(sent), bytes(after))
+            return result
+        after_packet = m.parse(after)
+        if after_packet is None:
+            result["verified"] = False
+            result["mismatch"] = "the read-back was not a Wavestation message"
+            return result
+        got = after_packet.data()
+        # Compare the part kwsed models (the Multisets and names). The
+        # unmodelled tail is preserved from the pre-write read; if the unit
+        # returns a different one, say so without failing the write for a
+        # part this program does not claim to know.
+        result["verified"] = got[: len(edited)] == edited
         if not result["verified"]:
-            result["mismatch"] = _first_difference(bytes(sent), bytes(after))
+            result["mismatch"] = _first_difference(edited, got[: len(edited)])
+        elif got != merged:
+            result["mismatch"] = (
+                "the multisets were written; the unmodelled tail of the "
+                "Multi Mode Setup differs"
+            )
         return result
 
     def read_bank_names(
@@ -782,26 +1257,139 @@ class WavestationBridge:
         dump = self.read_bank(bank, kind, timeout=timeout)
         return dump.kind, dump.names()
 
-    def select(self, slot: banks.Slot, *, channel: Optional[int] = None) -> None:
-        """Select a performance or patch. **This changes the sound.**
+    def read_system_setup(self, *, timeout: Optional[float] = None) -> Optional[bytes]:
+        """The System Setup dump (``0x51``) as decoded bytes. Read-only.
 
-        Bank Select MSB/LSB then a Program Change. Which of the twelve banks
-        a given Bank Select reaches is **not established** -- see TODO.md --
-        so kwsed sends the bank's own number and says so rather than
-        implying it knows.
+        One small request, no selection and no sound. ``None`` rather than
+        a timeout exception: the card name this dump carries is a hint used
+        to identify which HCard bank is in front of the synth, and a unit
+        that does not answer is "unknown", not a failure of the browser.
+        An explicit refusal still raises :class:`DeviceRefused`, because
+        that is a different answer from silence.
+        """
+        self._drain()
+        self._send(m.frame(m.Function.SYSTEM_SETUP_REQUEST, [], channel=self.channel))
+        deadline = time.time() + (DEFAULT_TIMEOUT if timeout is None else timeout)
+        while time.time() < deadline:
+            message = self._in.get_message()
+            if message is None:
+                time.sleep(0.002)
+                continue
+            packet = m.parse(message[0])
+            if packet is None or packet.channel != self.channel:
+                continue
+            if packet.is_error:
+                raise DeviceRefused(packet.function)
+            if packet.function != m.Function.SYSTEM_SETUP_DUMP:
+                continue
+            return packet.data()
+        return None
+
+    def read_card_name(self, *, timeout: Optional[float] = None) -> Optional[str]:
+        """The card name the synth reports, or ``None`` when it has none.
+
+        The HCard rewrites this field whenever a bank is selected on the
+        card (docs/HCARD.md section 2), so it is the only identity signal
+        the Wavestation exposes for "which of the forty banks is active".
+
+        ``None`` is not an error: a real card may hold no name, an empty
+        field decodes to nothing, and a unit that has not answered leaves
+        the question open. The caller resolves identity from the first
+        performance and patch names in that case.
+        """
+        data = self.read_system_setup(timeout=timeout)
+        if data is None:
+            return None
+        end = CARD_NAME_OFFSET + CARD_NAME_LEN
+        if len(data) < end:
+            return None
+        name = m.decode_name(data[CARD_NAME_OFFSET:end]).strip()
+        # CONFIRM AGAINST HARDWARE: while the offset is unconfirmed, trust
+        # the field only if it reads as a name; probes belong in
+        # tools/probe_card_name.py, and garbage here is "no usable name".
+        if re.fullmatch(r"[ -~]{4,}", name) is None:
+            return None
+        return name
+
+    def set_midi_mode(self, mode: int, *, channel: Optional[int] = None) -> None:
+        """Select OMNI, POLY, MULTI or MONO reception. **Changes device state.**
+
+        The MIDI mode is global parameter 4 on the Wavestation/SR
+        (Reference Guide Appendix 4 section 5.12); it is changed with a
+        Parameter Change message whose value is ASCII. Nothing is written
+        to memory and there is no read-back, so the change is not verified.
+        ``POLY`` is the single-Performance mode; ``MULTI`` routes all
+        sixteen channels through the current Multiset.
+
+        Sending the mode first is what makes a Program Change mean a
+        Performance: in MULTI mode the same Program Change selects a
+        Multiset instead.
+        """
+        value = int(mode)
+        if value not in (
+            MIDI_MODE_OMNI,
+            MIDI_MODE_POLY,
+            MIDI_MODE_MULTI,
+            MIDI_MODE_MONO,
+        ):
+            raise ValueError(f"MIDI mode {value} is outside 0-3")
+        target = self.channel if channel is None else channel
+        if not 0 <= target <= 15:
+            raise ValueError(f"channel {target} is outside 0-15")
+        self._send(m.parameter_change(MIDI_MODE_PARAMETER, value, channel=target))
+
+    def select(self, slot: banks.Slot, *, channel: Optional[int] = None) -> None:
+        """Select a performance. **This changes the sound and the MIDI mode.**
+
+        The unit is first put into ``POLY`` (single-Performance) mode,
+        because in ``MULTI`` mode a Program Change selects a Multiset
+        instead of a Performance. Then Bank Select MSB (CC0) = 0, Bank
+        Select LSB (CC32) = the bank's MIDI bank, then a Program Change =
+        program_base + slot.number. Per Player's Guide §4.8 and Reference
+        Appendix 3 §1.3 the SR's twelve banks are six MIDI banks (CC32
+        0-5), each holding two internal banks of 50, so Program Change
+        0-49 selects the first and 50-99 the second. The SR has no patch
+        mode: a Program Change always selects a Performance, never a
+        patch, so a patch slot is refused. The SR's "Bank Select"
+        MIDI-receive parameter must be ON for this to work; kwsed cannot
+        read it.
+        """
+        if slot.kind == banks.Kind.PATCH:
+            raise ValueError(
+                "a patch is heard through a performance and cannot be "
+                "selected on its own"
+            )
+        target = self.channel if channel is None else channel
+        if not 0 <= target <= 15:
+            raise ValueError(f"channel {target} is outside 0-15")
+        bank = slot.bank
+        program = bank.program_base + slot.number
+        if program > 99:
+            raise ValueError(
+                f"program change {program} is outside 0-99 for {bank.label}"
+            )
+        self.set_midi_mode(MIDI_MODE_POLY, channel=target)
+        status = 0xB0 | target
+        self._out.send_message([status, 0x00, 0x00])
+        self._out.send_message([status, 0x20, bank.midi_bank])
+        self._out.send_message([0xC0 | target, program])
+        time.sleep(SEND_GAP)
+
+    def select_multi(self, number: int, *, channel: Optional[int] = None) -> None:
+        """Make a Multiset current. **Changes the sound and the MIDI mode.**
+
+        The unit is first put into ``MULTI`` mode, then Reference Guide
+        Appendix 4, sections 2.1.20 and 2.1.21: ``0x5B`` for Multisets
+        0-15, ``0x63`` for 16-31 (SR Expanded), the number sent as the
+        byte the manual shows (16 -> ``0x10``). The unit changes its
+        current multi setup on reception; there is no memory write and no
+        read-back, so neither message is verified.
         """
         target = self.channel if channel is None else channel
         if not 0 <= target <= 15:
             raise ValueError(f"channel {target} is outside 0-15")
-        status = 0xB0 | target
-        self._out.send_message([status, 0x00, 0x00])
-        # Which number a Bank Select wants -- the display
-        # position or the System Exclusive byte -- is NOT
-        # established. The wire byte is sent because every
-        # other place that names a bank uses it. See TODO 1.
-        self._out.send_message([status, 0x20, slot.bank.sysex])
-        self._out.send_message([0xC0 | target, slot.number])
-        time.sleep(SEND_GAP)
+        self.set_midi_mode(MIDI_MODE_MULTI, channel=target)
+        self._send(m.multi_select(number, channel=target))
 
     # --- writing, which is fenced ------------------------------------------
 
@@ -875,8 +1463,10 @@ class WavestationBridge:
         )
 
         # --- 3. send -------------------------------------------------------
-        self._drain()
-        self._send(m.frame_bulk(function, entry.sysex, data, channel=self.channel))
+        frame = m.frame_bulk(function, entry.sysex, data, channel=self.channel)
+        with self._progress_scope(f"writing {entry.label} {banks.plural(kind)}"):
+            self._drain()
+            self._send(frame)
 
         result: Dict[str, Any] = {
             "bank": entry.label,
@@ -904,36 +1494,235 @@ class WavestationBridge:
             result["mismatch"] = _first_difference(bytes(sent), bytes(after))
         return result
 
+    def write_bank_bundle(
+        self,
+        bank: int | str,
+        *,
+        performances: Optional[bytes] = None,
+        patches: Optional[bytes] = None,
+        waveseq: Optional[bytes] = None,
+        backup_dir: str,
+        verify: bool = True,
+        timeout: Optional[float] = None,
+        before_blocks: Optional[Mapping[str, bytes]] = None,
+    ) -> Dict[str, Any]:
+        """Replace several kinds in one bank as **one** undoable write.
+
+        Copying a performance into another bank rewrites its performances,
+        its patches and (when wave sequences are involved) its wave
+        sequences. Three separate :meth:`write_bank` calls would produce
+        three backups, three read-backs, and three chances to stop halfway
+        through a bank that is then neither the old one nor the new one.
+
+        So the fence is applied to the bundle as a whole:
+
+        1. **A ROM bank is refused** before any traffic, as in
+           :meth:`write_bank`.
+        2. **Every payload is checked**, and every kind being written is
+           read in full and backed up into **one** envelope. If any of those
+           reads fails, nothing is sent -- a bundle that cannot be undone is
+           not one this program performs.
+        3. The dumps go out with wave sequences first and performances last,
+           so the patches a performance names are already there when it
+           arrives.
+        4. **Every written kind is read back and compared**, and the result
+           says whether all of them match rather than only the last.
+
+        The order of the result's ``kinds`` is the send order, not the
+        caller's argument order.
+        """
+        entry = banks.bank(bank)
+        if not entry.writable:
+            raise DeviceError(
+                f"{entry.label} is ROM and cannot be written. The banks that "
+                f"can are: "
+                f"{', '.join(b.label for b in banks.writable_banks())}."
+            )
+
+        payloads: Dict[str, bytes] = {}
+        for kind, data in (
+            ("waveseq", waveseq),
+            ("patches", patches),
+            ("performances", performances),
+        ):
+            if data is None:
+                continue
+            expected = _BUNDLE_SIZES[kind]
+            if len(data) != expected:
+                raise ValueError(
+                    f"{kind} must be {expected} bytes for a whole bank; got {len(data)}"
+                )
+            payloads[kind] = bytes(data)
+        if not payloads:
+            raise ValueError("nothing to write")
+
+        # --- 1. back every destination up, or do not write any of them ------
+        # For kinds supplied in before_blocks, use the provided raw framed
+        # dump and do not read the destination. Parse it now, before anything
+        # is sent, so a malformed frame fails fast.
+        before: Dict[str, bytes] = {}
+        predecoded: Dict[str, bytes] = {}
+        for kind, function in _BUNDLE_FUNCTIONS.items():
+            if kind not in payloads:
+                continue
+            supplied = None
+            if before_blocks is not None and kind in before_blocks:
+                supplied = before_blocks[kind]
+            if supplied is not None:
+                raw = bytes(supplied)
+                packet = m.parse(raw)
+                if packet is None:
+                    raise ValueError(
+                        f"{kind} before-block is not a valid Wavestation frame"
+                    )
+                try:
+                    decoded = packet.data()
+                except Exception as exc:
+                    raise ValueError(
+                        f"{kind} before-block could not be decoded: {exc}"
+                    ) from exc
+                if len(decoded) != _BUNDLE_SIZES[kind]:
+                    raise ValueError(
+                        f"{kind} before-block decodes to {len(decoded)} bytes; "
+                        f"expected {_BUNDLE_SIZES[kind]}"
+                    )
+                before[kind] = raw
+                predecoded[kind] = decoded
+            else:
+                try:
+                    raw = self.read_raw(entry.sysex, function, timeout=timeout)
+                except Exception as exc:
+                    raise DeviceError(
+                        f"could not read {entry.label} {kind} before writing it, "
+                        f"so nothing was sent ({exc}). kwsed does not overwrite a "
+                        f"bank it has not backed up."
+                    ) from exc
+                before[kind] = raw
+                packet = m.parse(raw)
+                if packet is None:
+                    raise ValueError(
+                        f"{entry.label} {kind} read back is not a valid frame"
+                    )
+                predecoded[kind] = packet.data()
+
+        # --- unchanged kinds are skipped entirely ---------------------------
+        unchanged: List[str] = [
+            kind
+            for kind in _BUNDLE_FUNCTIONS
+            if kind in payloads and payloads[kind] == predecoded[kind]
+        ]
+        sent_kinds: List[str] = [
+            kind
+            for kind in _BUNDLE_FUNCTIONS
+            if kind in payloads and kind not in unchanged
+        ]
+
+        saved = backup.save(
+            backup_dir,
+            kind="bank-bundle",
+            slot=entry.label,
+            name=entry.label,
+            device_id=str(self.channel),
+            source="kwsed",
+            blocks=before,
+        )
+
+        # All unchanged: nothing to send or read back.
+        if not sent_kinds:
+            result: Dict[str, Any] = {
+                "bank": entry.label,
+                "kind": "bank-bundle",
+                "kinds": [],
+                "backup": saved,
+                "verified": True,
+                "mismatch": None,
+                "unchanged": unchanged,
+            }
+            return result
+
+        # --- 2. send, wave sequences first and performances last ------------
+        self._drain()
+        sent: Dict[str, bytes] = {}
+        for kind, function in _BUNDLE_FUNCTIONS.items():
+            if kind not in sent_kinds:
+                continue
+            frame = m.frame_bulk(
+                function,
+                entry.sysex,
+                payloads[kind],
+                channel=self.channel,
+            )
+            sent[kind] = frame
+            with self._progress_scope(f"writing {entry.label} {_bundle_label(kind)}"):
+                self._send(frame)
+
+        result = {
+            "bank": entry.label,
+            "kind": "bank-bundle",
+            "kinds": sent_kinds,
+            "backup": saved,
+            "verified": None,
+            "mismatch": None,
+            "unchanged": unchanged,
+        }
+        if not verify:
+            return result
+
+        # --- 3. read every sent kind back and compare -----------------------
+        mismatch: Optional[str] = None
+        for kind in sent_kinds:
+            try:
+                after = self.read_raw(
+                    entry.sysex, _BUNDLE_FUNCTIONS[kind], timeout=timeout
+                )
+            except Exception as exc:
+                mismatch = (
+                    f"the write was sent but {entry.label} {kind} could not be "
+                    f"read back to check it ({exc}). Whether it took is unknown."
+                )
+                break
+            if bytes(after) != sent[kind]:
+                mismatch = _first_difference(sent[kind], bytes(after))
+                break
+        result["verified"] = mismatch is None
+        result["mismatch"] = mismatch
+        return result
+
     def read_raw(
         self, bank_number: int, function: int, *, timeout: Optional[float] = None
     ) -> bytes:
         """One bank dump of a given kind, as the bytes that arrived."""
-        self._drain()
-        self._send(m.bank_request(bank_number, function, self.channel))
-        deadline = time.time() + (DUMP_TIMEOUT if timeout is None else timeout)
-        while time.time() < deadline:
-            message = self._in.get_message()
-            if message is None:
-                time.sleep(0.003)
-                continue
-            packet = m.parse(message[0])
-            if packet is None or packet.channel != self.channel:
-                continue
-            if packet.is_error:
-                raise DeviceRefused(packet.function)
-            if packet.function != function:
-                continue
-            # Same guard as read_bank: the reply must describe the bank
-            # that was asked for. This one feeds the write fence's backup
-            # and its read-back comparison, so a dump from the wrong bank
-            # here would back up the wrong slot and then "verify" a write
-            # against it.
-            if packet.bank is not None and packet.bank != bank_number:
-                continue
-            return bytes(message[0])
-        raise TimeoutError(
-            f"no {m.Function.name(function)} came back for bank {bank_number}"
-        )
+        wire = _FUNCTION_WIRE_BYTES.get(function, 8000)
+        label = f"receiving bank {bank_number} {m.Function.name(function)}"
+        with self._progress_scope(label, _wire_estimate(wire)) as estimate:
+            started = time.monotonic()
+            self._drain()
+            self._send(m.bank_request(bank_number, function, self.channel))
+            deadline = time.time() + (DUMP_TIMEOUT if timeout is None else timeout)
+            while time.time() < deadline:
+                message = self._in.get_message()
+                if message is None:
+                    self._estimate_progress(started, estimate)
+                    time.sleep(0.003)
+                    continue
+                packet = m.parse(message[0])
+                if packet is None or packet.channel != self.channel:
+                    continue
+                if packet.is_error:
+                    raise DeviceRefused(packet.function)
+                if packet.function != function:
+                    continue
+                # Same guard as read_bank: the reply must describe the bank
+                # that was asked for. This one feeds the write fence's backup
+                # and its read-back comparison, so a dump from the wrong bank
+                # here would back up the wrong slot and then "verify" a write
+                # against it.
+                if packet.bank is not None and packet.bank != bank_number:
+                    continue
+                return bytes(message[0])
+            raise TimeoutError(
+                f"no {m.Function.name(function)} came back for bank {bank_number}"
+            )
 
 
 def _first_difference(sent: bytes, got: bytes) -> str:
@@ -952,3 +1741,7 @@ def _multi_request(channel: int) -> bytes:
 
 def _patch_backup_name(bank_label: str, number: int) -> str:
     return f"{bank_label}-patch{number:02d}"
+
+
+def _performance_backup_name(bank_label: str, number: int) -> str:
+    return f"{bank_label}-performance{number:02d}"

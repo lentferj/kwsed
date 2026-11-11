@@ -37,6 +37,9 @@ Two things about the double that are easy to get wrong, and were:
   to produce it in response to the request.
 """
 
+import time
+from typing import Any
+
 import pytest
 
 from kws import backup, banks
@@ -90,8 +93,16 @@ def _multiset_dump():
         name = f"Invented{number}".encode()[: multi_mod.NAME_SIZE]
         at = multi_mod.NAME_BASE + number * multi_mod.NAME_SIZE
         data[at : at + len(name)] = name
+    # Like the real dump: a 513-byte unmodelled tail and the checksum over
+    # the header and the nibbles.
+    body = bytes(data) + b"\x69" * 512 + b"\x00"
+    header = [0, 1]
+    nibbles = list(m.to_nibbles(body))
     return bytes(
-        m.frame(m.Function.MULTISET_DUMP, [0, 1] + list(m.to_nibbles(bytes(data))))
+        m.frame(
+            m.Function.MULTISET_DUMP,
+            [*header, *nibbles, m.checksum([*header, *nibbles])],
+        )
     )
 
 
@@ -122,6 +133,12 @@ class Unit:
         self.contents = contents
         self.answer = answer
         self.mode = mode
+        #: The decoded System Setup payload the double answers with. Long
+        #: enough for the card-name field at the constants' current offset.
+        self.system_setup = bytearray(64)
+        #: The 0x62 message the double answers a multi request with, and
+        #: replaces when a multi write is sent (so the read-back sees it).
+        self.multi_message = _multiset_dump()
         self.bridge = WavestationBridge(self.midi_in, self.midi_out, channel=0)
         # Replacing a method on the instance is the point of this double.
         self.midi_out.send_message = self._sent  # type: ignore[method-assign]
@@ -207,17 +224,73 @@ class Unit:
             return m.frame(m.Function.WRITE_ERROR, channel=0)
         return m.frame(m.Function.WRITE_COMPLETED, channel=0)
 
+    def _performance_request(self, data):
+        if self.mode == "read_error":
+            return m.frame(m.Function.WRITE_ERROR, channel=0)
+        bank = 11 if self.mode == "wrong_slot" else data[5]
+        number = data[6]
+        at = number * r.PERFORMANCE_SIZE
+        return m.single_performance_dump(
+            bank, number, self.contents[at : at + r.PERFORMANCE_SIZE], channel=0
+        )
+
+    def _performance_dump(self, data):
+        packet = m.parse(data)
+        assert packet is not None
+        at = data[5] * r.PERFORMANCE_SIZE
+        self.contents = (
+            self.contents[:at]
+            + bytes(packet.data()[: r.PERFORMANCE_SIZE])
+            + self.contents[at + r.PERFORMANCE_SIZE :]
+        )
+
+    def _execute_write(self, data):
+        """An EXECUTE_WRITE change writes the buffer, so read-back sees it."""
+        packet = m.parse(data)
+        assert packet is not None
+        param = packet.payload[0] | (packet.payload[1] << 7)
+        assert param == m.EXECUTE_WRITE
+        if self.mode == "write_error":
+            return m.frame(m.Function.WRITE_ERROR, channel=0)
+        return m.frame(m.Function.WRITE_COMPLETED, channel=0)
+
+    def _performance_write(self, data):
+        if self.mode == "write_error":
+            return m.frame(m.Function.WRITE_ERROR, channel=0)
+        return m.frame(m.Function.WRITE_COMPLETED, channel=0)
+
     def _multi_request(self, data):
         if self.mode == "read_error":
             return m.frame(m.Function.WRITE_ERROR, channel=0)
-        return _multiset_dump()
+        return self.multi_message
+
+    def _multi_dump_write(self, data):
+        """A multi write is stored, so the read-back sees the new setup."""
+        self.multi_message = bytes(data)
+
+    def _system_setup_request(self, data):
+        if self.mode == "read_error":
+            return m.frame(m.Function.WRITE_ERROR, channel=0)
+        if self.mode == "short_setup":
+            return m.frame(m.Function.SYSTEM_SETUP_DUMP, [0, 0], channel=0)
+        return m.frame(
+            m.Function.SYSTEM_SETUP_DUMP,
+            list(m.to_nibbles(bytes(self.system_setup))),
+            channel=0,
+        )
 
     _HANDLERS = {
         0x7E: _identity,
         m.Function.SINGLE_PATCH_REQUEST: _patch_request,
         m.Function.SINGLE_PATCH_DUMP: _patch_dump,
         m.Function.PATCH_WRITE: _patch_write,
+        m.Function.SINGLE_PERFORMANCE_REQUEST: _performance_request,
+        m.Function.PERFORMANCE_DUMP: _performance_dump,
+        m.Function.PERFORMANCE_WRITE: _performance_write,
+        m.Function.PARAMETER_CHANGE_SR: _execute_write,
         m.Function.MULTI_REQUEST: _multi_request,
+        m.Function.MULTISET_DUMP: _multi_dump_write,
+        m.Function.SYSTEM_SETUP_REQUEST: _system_setup_request,
     }
 
 
@@ -296,17 +369,21 @@ class TestWritePatch:
         assert packet.data()[:8] == b"Previous", "the backup holds the old patch"
         assert backup.describe(result["backup"])["bank"] == "Card-patch03"
 
-    def test_it_sends_the_dump_then_the_write_command(self, tmp_path):
+    def test_it_sends_the_dump_then_the_execute_write(self, tmp_path):
         """Two messages, because one is not enough: the dump lands in the
-        edit buffer and the command commits it."""
+        edit buffer and the SR-only EXECUTE_WRITE change commits it."""
         unit = Unit()
         unit.bridge.write_patch("CARD", 3, ONE_PATCH, backup_dir=str(tmp_path))
         functions = [d[4] for d in unit.midi_out.sent if len(d) > 5]
         assert m.Function.SINGLE_PATCH_DUMP in functions
-        assert m.Function.PATCH_WRITE in functions
+        assert m.Function.PARAMETER_CHANGE_SR in functions
         assert functions.index(m.Function.SINGLE_PATCH_DUMP) < functions.index(
-            m.Function.PATCH_WRITE
+            m.Function.PARAMETER_CHANGE_SR
         ), "the buffer is filled before it is committed"
+        change = next(d for d in unit.midi_out.sent if len(d) > 5 and d[4] == 0x43)
+        assert change[5:8] == bytes(
+            [m.EXECUTE_WRITE & 0x7F, (m.EXECUTE_WRITE >> 7) & 0x7F, ord("+")]
+        ), "the change is EXECUTE_WRITE = +1, Edisyn's write"
 
     def test_it_reports_the_units_own_status_reply(self, tmp_path):
         result = Unit().bridge.write_patch(
@@ -324,6 +401,37 @@ class TestWritePatch:
         with pytest.raises(DeviceError, match="ROM"):
             unit.bridge.write_patch("ROM4", 3, ONE_PATCH, backup_dir=str(tmp_path))
         assert unit.midi_out.sent == []
+
+
+class TestSendPerformanceToBuffer:
+    """The audition fill: one dump, no commit, nothing written anywhere."""
+
+    def test_it_sends_one_dump_and_no_commit(self):
+        unit = Unit()
+        record = bytes(r.PERFORMANCE_SIZE)
+        unit.bridge.send_performance_to_buffer("CARD", 3, record)
+        functions = [d[4] for d in unit.midi_out.sent if len(d) > 5]
+        assert functions.count(m.Function.PERFORMANCE_DUMP) == 1
+        assert m.Function.PARAMETER_CHANGE_SR not in functions, (
+            "auditioning must not commit the buffer -- that is the write"
+        )
+        assert m.Function.PERFORMANCE_WRITE not in functions
+
+    def test_the_dump_names_the_destination_slot(self):
+        unit = Unit()
+        record = bytes(r.PERFORMANCE_SIZE)
+        unit.bridge.send_performance_to_buffer("CARD", 3, record)
+        dump = next(
+            d
+            for d in unit.midi_out.sent
+            if len(d) > 5 and d[4] == m.Function.PERFORMANCE_DUMP
+        )
+        assert dump[5] == banks.bank("CARD").sysex, "the destination bank"
+        assert dump[6] == 3, "the destination number"
+
+    def test_a_bad_length_is_refused(self):
+        with pytest.raises(ValueError, match="bytes"):
+            Unit().bridge.send_performance_to_buffer("CARD", 3, b"short")
 
     def test_a_patch_of_the_wrong_size_is_refused(self, tmp_path):
         unit = Unit()
@@ -384,6 +492,68 @@ class TestWritePatch:
         assert result["mismatch"] is None
 
 
+class _SlowOut(FakeOut):
+    """A port that takes its time, like a driver accepting a bank dump."""
+
+    def send_message(self, data):
+        time.sleep(0.3)
+        super().send_message(data)
+
+
+class TestTransferProgress:
+    """The bar under the status line is fed from here."""
+
+    def test_a_scope_announces_start_a_change_and_the_end(self):
+        unit = Unit()
+        events: list[tuple[str, Any]] = []
+        unit.bridge.progress = lambda label, fraction: events.append((label, fraction))
+        with unit.bridge._progress_scope("writing RAM 2 patches"):
+            unit.bridge._report(0.5)
+        assert events[0] == ("writing RAM 2 patches", 0.0)
+        assert ("writing RAM 2 patches", 0.5) in events
+        assert events[-1] == ("writing RAM 2 patches", None)
+
+    def test_a_sub_percent_change_is_not_reported(self):
+        unit = Unit()
+        events: list[Any] = []
+        unit.bridge.progress = lambda label, fraction: events.append(fraction)
+        with unit.bridge._progress_scope("x"):
+            unit.bridge._report(0.5)
+            unit.bridge._report(0.502)
+        assert events == [0.0, 0.5, None]
+
+    def test_a_write_moves_even_when_the_transport_counts_nothing(self):
+        """rtmidi hands over a whole message at once and reports nothing."""
+        unit = Unit()
+        unit.bridge._out = _SlowOut()
+        events: list[Any] = []
+        unit.bridge.progress = lambda label, fraction: events.append(fraction)
+        with unit.bridge._progress_scope("writing RAM 2 patches"):
+            unit.bridge._send(bytes(8000))
+        intermediate = [f for f in events if f is not None and 0.0 < f < 1.0]
+        assert intermediate, "a send must move the bar, not only start and end"
+        assert events[-1] is None
+
+    def test_a_bank_write_announces_itself(self, tmp_path):
+        unit = Unit()
+        events: list[tuple[str, Any]] = []
+        unit.bridge.progress = lambda label, fraction: events.append((label, fraction))
+        before = m.frame_bulk(
+            m.Function.ALL_PATCH_DUMP, banks.bank("CARD").sysex, PATCH_BANK, channel=0
+        )
+        fresh = bytearray(PATCH_BANK)
+        fresh[0:6] = b"Fresh!"
+        unit.bridge.write_bank_bundle(
+            "CARD",
+            patches=bytes(fresh),
+            backup_dir=str(tmp_path),
+            verify=False,
+            before_blocks={"patches": before},
+        )
+        assert any("writing" in label for label, _ in events)
+        assert events[-1][1] is None
+
+
 class TestReadMulti:
     def test_it_returns_the_raw_message(self):
         packet = m.parse(Unit().bridge.read_multi(timeout=1.0))
@@ -412,26 +582,60 @@ class TestReadMulti:
 
 
 class TestSelect:
-    def test_it_sends_bank_select_then_program_change(self):
+    def test_it_switches_to_performance_mode_then_selects(self):
         unit = Unit()
-        unit.bridge.select(banks.slot("CARD", banks.Kind.PATCH, 7))
-        assert len(unit.midi_out.sent) == 3
-        msb, lsb, pc = unit.midi_out.sent
+        unit.bridge.select(banks.slot("CARD", banks.Kind.PERFORMANCE, 7))
+        assert len(unit.midi_out.sent) == 4
+        mode, msb, lsb, pc = unit.midi_out.sent
+        # global parameter 4 (MIDI mode) = +1 (POLY, single Performance)
+        assert mode == bytes(
+            [0xF0, 0x42, 0x30, 0x28, 0x41, 0x04, 0x00, 0x2B, 0x31, 0x00, 0xF7]
+        )
         assert msb[0] == 0xB0 and msb[1] == 0x00 and msb[2] == 0x00
         assert lsb[0] == 0xB0 and lsb[1] == 0x20
-        # the wire byte, not the display position: the Card is byte 3
-        assert lsb[2] == 3
-        assert pc[0] == 0xC0 and pc[1] == 7
+        assert lsb[2] == 1
+        assert pc[0] == 0xC0 and pc[1] == 57
 
     def test_it_honours_an_explicit_channel(self):
         unit = Unit()
-        unit.bridge.select(banks.slot("RAM1", banks.Kind.PATCH, 0), channel=9)
-        assert all(d[0] in (0xB9, 0xC9) for d in unit.midi_out.sent)
+        unit.bridge.select(banks.slot("RAM1", banks.Kind.PERFORMANCE, 0), channel=9)
+        mode = unit.midi_out.sent[0]
+        assert mode[2] == 0x39, "the mode change carries the same channel"
+        assert all(d[0] in (0xB9, 0xC9) for d in unit.midi_out.sent[1:])
 
     def test_a_channel_outside_zero_to_fifteen_is_refused(self):
         unit = Unit()
         with pytest.raises(ValueError, match="outside 0-15"):
-            unit.bridge.select(banks.slot("RAM1", banks.Kind.PATCH, 0), channel=16)
+            unit.bridge.select(
+                banks.slot("RAM1", banks.Kind.PERFORMANCE, 0), channel=16
+            )
+
+    def test_multi_select_switches_to_multi_mode_then_selects(self):
+        unit = Unit()
+        unit.bridge.select_multi(16)
+        mode, select = unit.midi_out.sent
+        # global parameter 4 = +2 (MULTI, 16-channel)
+        assert mode == bytes(
+            [0xF0, 0x42, 0x30, 0x28, 0x41, 0x04, 0x00, 0x2B, 0x32, 0x00, 0xF7]
+        )
+        assert select == bytes([0xF0, 0x42, 0x30, 0x28, 0x63, 0x10, 0xF7])
+
+    def test_multi_select_refuses_an_unknown_multiset(self):
+        unit = Unit()
+        with pytest.raises(m.ProtocolError, match="outside 0-31"):
+            unit.bridge.select_multi(32)
+
+    def test_set_midi_mode_sends_the_documented_value(self):
+        unit = Unit()
+        unit.bridge.set_midi_mode(2, channel=5)
+        assert unit.midi_out.sent == [
+            bytes([0xF0, 0x42, 0x35, 0x28, 0x41, 0x04, 0x00, 0x2B, 0x32, 0x00, 0xF7])
+        ]
+
+    @pytest.mark.parametrize("mode", [-1, 4])
+    def test_set_midi_mode_refuses_an_unknown_mode(self, mode):
+        with pytest.raises(ValueError, match="outside 0-3"):
+            Unit().bridge.set_midi_mode(mode)
 
 
 class TestClose:
@@ -471,3 +675,120 @@ class TestTheDrain:
         unit.midi_in.queue.append((list(stale), 0.0))
         unit.bridge._drain()
         assert unit.midi_in.queue == [], "the stale reply is gone"
+
+
+class TestReadCardName:
+    """The System Setup dump is the only place a card's name is exposed.
+
+    Its offset is the one wire fact docs/HCARD.md leaves open, so these
+    tests pin the contract around it: a name at the constants, nothing at
+    all when the field is empty, and ``None`` rather than an exception when
+    the unit stays silent. A refusal is still a refusal.
+    """
+
+    def test_a_blank_field_is_none_not_an_empty_string(self):
+        assert Unit().bridge.read_card_name(timeout=0.1) is None
+
+    def test_the_name_at_the_constants_comes_back(self):
+        unit = Unit()
+        name = b"WPC-13 Perf 3"
+        unit.system_setup[: len(name)] = name
+        assert unit.bridge.read_card_name(timeout=0.1) == "WPC-13 Perf 3"
+
+    def test_a_garbage_field_is_none_not_a_plausible_name(self):
+        """The offset is unconfirmed, so binary in the field is "unknown".
+
+        The first sixteen decoded bytes used to be returned whatever they
+        were; a control-byte field is now no usable name rather than a
+        name that files a capture under the wrong bank.
+        """
+        unit = Unit()
+        unit.system_setup[:16] = bytes(range(1, 17))
+        assert unit.bridge.read_card_name(timeout=0.1) is None
+
+    def test_a_name_shorter_than_four_characters_is_none(self):
+        unit = Unit()
+        unit.system_setup[:2] = b"AB"
+        assert unit.bridge.read_card_name(timeout=0.1) is None
+
+    def test_the_request_is_the_system_setup_one(self):
+        unit = Unit()
+        unit.bridge.read_card_name(timeout=0.1)
+        assert unit.midi_out.sent[-1][4] == m.Function.SYSTEM_SETUP_REQUEST
+
+    def test_silence_is_none_rather_than_a_timeout_error(self):
+        assert Unit(answer=False).bridge.read_card_name(timeout=0.01) is None
+
+    def test_a_refusal_is_still_raised(self):
+        with pytest.raises(DeviceRefused):
+            Unit(mode="read_error").bridge.read_card_name(timeout=0.1)
+
+    def test_a_dump_too_short_for_the_field_is_none(self):
+        assert Unit(mode="short_setup").bridge.read_card_name(timeout=0.1) is None
+
+    def test_the_raw_setup_dump_is_available_for_the_probe(self):
+        unit = Unit()
+        unit.system_setup[0:4] = b"ABCD"
+        data = unit.bridge.read_system_setup(timeout=0.1)
+        assert data is not None
+        assert data[:4] == b"ABCD"
+
+
+class TestReadBankTimeout:
+    """The Card is the one bank that only answers when the card is fitted."""
+
+    def test_the_card_bank_names_the_empty_slot_first(self):
+        unit = Unit(answer=False)
+        with pytest.raises(TimeoutError) as caught:
+            unit.bridge.read_bank("CARD", banks.Kind.PATCH, timeout=0.05)
+        message = str(caught.value)
+        assert "Program Card" in message
+        assert "empty slot" in message
+
+    def test_another_bank_keeps_the_generic_message(self):
+        unit = Unit(answer=False)
+        with pytest.raises(TimeoutError) as caught:
+            unit.bridge.read_bank("RAM1", banks.Kind.PATCH, timeout=0.05)
+        assert "Program Card" not in str(caught.value)
+
+
+class TestWriteMulti:
+    def test_the_frame_carries_the_checksum_over_header_and_nibbles(self, tmp_path):
+        unit = Unit()
+        before = m.parse(unit.multi_message)
+        assert before is not None
+        data = before.data()
+        sets = multi_mod.parse(data)
+        encoded = multi_mod.encode(sets)
+        result = unit.bridge.write_multi(encoded, backup_dir=str(tmp_path))
+        assert result["verified"] is True
+        sent = [
+            message
+            for message in unit.midi_out.sent
+            if len(message) > 5 and message[4] == m.Function.MULTISET_DUMP
+        ][-1]
+        payload = sent[5:-1]
+        header = list(payload[:2])
+        nibbles = list(payload[2:-1])
+        assert payload[-1] == m.checksum(header + nibbles)
+        # The unit's header is 00 01, so the header-inclusive sum differs
+        # from the nibbles-only one: a checksum that omitted the header
+        # would be rejected by the unit with CHECKSUM ERROR.
+        assert payload[-1] != m.checksum(nibbles)
+        after = m.parse(sent)
+        assert after is not None
+        decoded = after.data()
+        assert decoded[: len(encoded)] == encoded
+        assert decoded[len(encoded) :] == data[len(encoded) :]
+
+    def test_a_failed_pre_write_read_sends_no_dump(self, tmp_path):
+        unit = Unit(answer=False)
+        with pytest.raises(DeviceError):
+            unit.bridge.write_multi(
+                b"\x00" * 3264, backup_dir=str(tmp_path), timeout=0.05
+            )
+        assert not [
+            message
+            for message in unit.midi_out.sent
+            if len(message) > 5 and message[4] == m.Function.MULTISET_DUMP
+        ]

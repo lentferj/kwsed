@@ -65,6 +65,12 @@ class Source:
     performances: List[bytes] = field(default_factory=list)
     patches: List[bytes] = field(default_factory=list)
     waveseq: Optional[bytes] = None
+    #: The Wavestation bank *number* this source came from. It is usually
+    #: derivable from ``bank_id`` (RAM1, CARD/07, ...), but an imported bank
+    #: can be held under a unique session alias so several RAM1 files can be
+    #: assembled into one destination bank. In that case the alias cannot be
+    #: resolved by :mod:`kws.relations`; this field carries the real number.
+    bank_number: Optional[int] = None
 
     def patch(self, number: int) -> bytes:
         try:

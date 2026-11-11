@@ -64,15 +64,23 @@ def test_keys_match_the_family() -> None:
 def test_the_legend_matches_the_family() -> None:
     # select=True here even though the binding check above says False: the
     # legend is a promise about which keys work, and this one does.
-    # "m channels" is kwsed's own hint, so it is passed as an extra and lands
+    # "m multi" is kwsed's own hint, so it is passed as an extra and lands
     # where the family leaves room for one -- after "n note", before "i device".
     assert not conformance.check_legend(
         KEY_HINTS,
         extras=(
-            "m channels",
+            "m multi",
             "e edit multi",
+            "p patches",
             "S scan",
+            "C capture card",
+            "L label card",
+            "X card sweep",
             "V rating filter",
+            "d deps",
+            "D deps pane",
+            "y copy perf",
+            "I import",
             "z undo",
             "w write gate",
         ),

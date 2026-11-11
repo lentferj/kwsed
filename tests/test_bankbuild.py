@@ -15,10 +15,14 @@
 
 """Records, dependencies and building. Every fixture here is invented."""
 
+import importlib.util
+from pathlib import Path
+
 import pytest
 
 from kws import bankbuild as bb
-from kws import deps
+from kws import banks, deps, dumps
+from kws import messages as m
 from kws import records as r
 
 
@@ -85,6 +89,52 @@ class TestRecords:
         r.set_performance_part(rec, 0, bank=bank, patch=7)
         got = r.performance_parts(rec)[0]
         assert got.bank == bank and got.patch == 7
+        if bank == 2:
+            assert rec[r.PART_BASE] == 2
+            assert (rec[r.PART_BASE + 4] >> 6) & 3 == 1
+        elif bank == 10:
+            assert rec[r.PART_BASE] == 2
+            assert (rec[r.PART_BASE + 4] >> 6) & 3 == 0
+        elif bank == 11:
+            assert rec[r.PART_BASE] == 3
+            assert (rec[r.PART_BASE + 4] >> 6) & 3 == 0
+
+    @pytest.mark.parametrize("bank", range(12))
+    def test_patch_wave_bank_survives_bank_exp_split(self, bank):
+        for i in range(4):
+            rec = bytearray(make_patch())
+            r.set_patch_wave(rec, i, bank=bank, wave=40)
+            waves = r.patch_waves(rec)
+            assert waves[i].bank == bank
+            if bank == 2:
+                at = r.OSC_BASE + i * r.OSC_SIZE
+                assert rec[r.PATCH_BANK_EXP] & (1 << i)
+                assert rec[at + 2] == 2
+
+    def test_inactive_oscillators_and_init_patches_are_not_sequences(self):
+        rec = bytearray(r.PATCH_SIZE)
+        r.set_patch_wave(rec, 2, bank=0, wave=5)
+        rec[r.PATCH_NUM_WAVES] = 0
+        waves = r.patch_waves(rec)
+        assert waves[0].used is True
+        assert waves[1].used is False
+        assert waves[2].used is False
+        assert waves[3].used is False
+        assert waves[2].is_sequence is False
+
+        rec2 = bytearray(r.PATCH_SIZE)
+        rec2[r.PATCH_NUM_WAVES] = 1
+        waves2 = r.patch_waves(rec2)
+        assert waves2[0].used is True
+        assert waves2[2].used is True
+        assert waves2[1].used is False
+        assert waves2[3].used is False
+
+        rec3 = bytearray(make_patch("Init", waves=((0, 0), (0, 0), (0, 0), (0, 0))))
+        waves3 = r.patch_waves(rec3)
+        for w in waves3:
+            assert w.used is False
+            assert w.is_sequence is False
 
     def test_rewriting_a_part_leaves_partmode_settings_alone(self):
         rec = bytearray(make_performance())
@@ -461,3 +511,165 @@ class TestAChainThatRunsOffTheEnd:
 
         chain = deps.walk_sequence(bytes(bank), 0)
         assert chain.steps == (1, 2), "the walk should stop, not raise"
+
+
+_PATH = Path(__file__).resolve().parents[1] / "tools" / "build_bank.py"
+_spec = importlib.util.spec_from_file_location("build_bank_under_test", _PATH)
+assert _spec is not None and _spec.loader is not None
+module = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(module)
+
+
+class TestBuildBankCLI:
+    """Interior (Bank.number) vs wire (Bank.sysex) distinction.
+
+    A performance part's bank field is an interior display index; the
+    framed dump's bank byte is the wire value. A wrong interior number
+    plays a different bank's patch while the file still loads and verifies.
+    """
+
+    @pytest.mark.parametrize(
+        "bank_name,wire,interior", [("CARD", 3, 11), ("RAM3", 4, 2)]
+    )
+    def test_interior_vs_wire_bank(self, tmp_path, bank_name, wire, interior):
+        patch = make_patch("Invented", ((0, 40), (0, 40), (0, 40), (0, 40)))
+        perf = make_performance("Invented", parts=((0, 0),))
+
+        pb = bytearray(banks.PATCHES_PER_BANK * r.PATCH_SIZE)
+        pb[0 : r.PATCH_SIZE] = patch
+        perfbank = bytearray(banks.PERFORMANCES_PER_BANK * r.PERFORMANCE_SIZE)
+        perfbank[0 : r.PERFORMANCE_SIZE] = perf
+
+        src_path = tmp_path / "source.syx"
+        src_path.write_bytes(
+            m.frame_bulk(m.Function.ALL_PATCH_DUMP, 0, bytes(pb))
+            + m.frame_bulk(m.Function.ALL_PERFORMANCE_DUMP, 0, bytes(perfbank))
+        )
+
+        out = tmp_path / f"out-{bank_name.lower()}"
+        rc = module.main(
+            [
+                "--source",
+                f"A={src_path}",
+                "--bank",
+                bank_name,
+                "--patch",
+                "A:0",
+                "--out",
+                str(out),
+            ]
+        )
+        assert rc == 0
+
+        perf_path = Path(f"{out}-perf.syx")
+        packets = dumps.read_syx_file(str(perf_path))
+        assert len(packets) == 1
+        packet = packets[0]
+        assert packet.bank == wire
+        dump = dumps.parse_bulk(packet)
+        rec0 = dump.records[0]
+        for part in r.performance_parts(rec0):
+            if part.used:
+                assert part.bank == interior
+                assert part.patch < 35
+
+
+class TestBuildBankPerf:
+    """Performance first: two performances never share a target patch slot.
+
+    ``--perf`` names performances rather than patches. Each one drags along
+    its own copy of every patch it uses, so editing the patch under one
+    performance cannot change what another plays -- even when both named the
+    same patch in the source bank.
+    """
+
+    def _source(self, tmp_path: Path) -> Path:
+        """One patch, used twice by each of two performances."""
+        patch = make_patch("Kelp Forest", ((0, 40), (0, 40), (0, 40), (0, 40)))
+        first = make_performance("Glass Meridian", parts=((0, 0), (0, 0)))
+        second = make_performance("Amber Drift", parts=((0, 0), (0, 0)))
+        waveseq = make_waveseq({0: [40, 41]})[0]
+
+        patches = bytearray(banks.PATCHES_PER_BANK * r.PATCH_SIZE)
+        patches[0 : r.PATCH_SIZE] = patch
+        performances = bytearray(banks.PERFORMANCES_PER_BANK * r.PERFORMANCE_SIZE)
+        performances[0 : r.PERFORMANCE_SIZE] = first
+        performances[r.PERFORMANCE_SIZE : 2 * r.PERFORMANCE_SIZE] = second
+
+        path = tmp_path / "source.syx"
+        path.write_bytes(
+            m.frame_bulk(
+                m.Function.ALL_PATCH_DUMP,
+                banks.bank("RAM1").sysex,
+                bytes(patches),
+            )
+            + m.frame_bulk(
+                m.Function.ALL_PERFORMANCE_DUMP,
+                banks.bank("RAM1").sysex,
+                bytes(performances),
+            )
+            + m.frame_bulk(
+                m.Function.ALL_WAVESEQ_DUMP,
+                banks.bank("RAM1").sysex,
+                waveseq,
+            )
+        )
+        return path
+
+    def test_each_performance_owns_a_private_contiguous_patch_slot(
+        self, tmp_path, capsys
+    ):
+        source = self._source(tmp_path)
+        out = tmp_path / "built"
+        rc = module.main(
+            [
+                "--source",
+                f"RAM1={source}",
+                "--bank",
+                "RAM3",
+                "--perf",
+                "RAM1:0",
+                "--perf",
+                "RAM1:1",
+                "--out",
+                str(out),
+            ]
+        )
+        assert rc == 0
+
+        printed = capsys.readouterr().out
+        assert "perf 0 <- RAM1:0 Glass Meridian : patches 0..0" in printed
+        assert "perf 1 <- RAM1:1 Amber Drift : patches 1..1" in printed
+        assert "performances    2 / 50" in printed
+        assert "patches         2 / 35" in printed
+        assert "wave seqs       0 / 32" in printed
+        assert "steps           0 / 501" in printed
+
+        destination = banks.bank("RAM3")
+        assert (destination.sysex, destination.number) == (4, 2)
+        packets = dumps.read_syx_file(f"{out}-perf.syx")
+        assert len(packets) == 1
+        assert packets[0].bank == destination.sysex
+        dump = dumps.parse_bulk(packets[0])
+        assert len(dump.records) == banks.PERFORMANCES_PER_BANK
+        assert dumps.record_name(dump.records[0]) == "Glass Meridian"
+        assert dumps.record_name(dump.records[1]) == "Amber Drift"
+
+        for record, expected_slot in (
+            (dump.records[0], 0),
+            (dump.records[1], 1),
+        ):
+            used = [part for part in r.performance_parts(record) if part.used]
+            assert len(used) == 2
+            assert {part.patch for part in used} == {expected_slot}, (
+                "a performance's two parts name the same patch, so it gets "
+                "one slot -- intra-performance dedup still applies"
+            )
+            assert {part.bank for part in used} == {destination.number}
+
+        patch_packets = dumps.read_syx_file(f"{out}-patch.syx")
+        assert len(patch_packets) == 1
+        assert patch_packets[0].bank == destination.sysex
+        patch_dump = dumps.parse_bulk(patch_packets[0])
+        assert dumps.record_name(patch_dump.records[0]) == "Kelp Forest"
+        assert dumps.record_name(patch_dump.records[1]) == "Kelp Forest"

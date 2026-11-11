@@ -23,6 +23,12 @@ from kws import messages as m
 
 
 class TestBanks:
+    def test_the_plural_of_patch_is_patches(self):
+        """The one irregular kind name, shared by every status line."""
+        assert banks.plural("patch") == "patches"
+        assert banks.plural("performance") == "performances"
+        assert banks.plural("waveseq") == "wave sequences"
+
     def test_there_are_twelve(self):
         assert len(banks.BANKS) == 12
         assert banks.bank_numbers() == list(range(12))

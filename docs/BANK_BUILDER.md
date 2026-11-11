@@ -127,6 +127,164 @@ bank refers to that card. This is the same trap the Hcard manual warns about
 when it tells you to MOVE rather than COPY, and it is why the builder
 rewrites references rather than copying bytes.
 
+## Performance-First Atomic Copying & Multi Staging
+
+Patch-first building (below) lets performances share patches. The
+performance-first modules are the opposite, deliberately: a copied
+performance owns its sound outright, so editing one favourite can never
+alter another. Three modules carry it.
+
+**`kws/relations.py`** reads the graph. Performance -> Patch -> WaveSeq is
+walked in both directions -- `RelationGraph.performance_relation` from a
+performance down to the unique patches and sequences it reaches, and
+`performances_using_patch` / `multisets_using_performance` back up from a
+patch or performance to everything that would change if it were edited.
+Asking whether two patches *play* the same thing despite sitting in two
+different banks is `patch_structural_digest`'s job: the walked step chains
+are hashed by content, links reduced to positions within the chain and
+quotes to places in the closure, so two copies of one patch in different
+banks compare equal while two genuinely different ones do not.
+
+**`kws/perfcopy.py`** writes it. `plan_atomic_bank` takes chosen
+performances and allocates nothing but what they need; `build_atomic_bank`
+turns a plan into bank bytes; `copy_into_bank` wraps both as one
+append/replace/removal against a destination bank.
+
+**`kws/multistage.py`** plans a whole Multiset. `plan_multi_staging`
+resolves each of the sixteen channels, stages into RAM the performances
+that need moving, and returns the built banks plus the remapped Multiset.
+
+### Same-bank locality, in two different numbers
+
+Every copied Performance's active `PartRef.bank` is rewritten to the
+destination bank's **interior display number** (`Bank.number`: RAM 3 = 2,
+CARD = 11), and every patch a part reaches *across a bank boundary* is
+copied into the destination, so after a copy the sound needs only the bank
+it now lives in. The dump **framing**, meanwhile, names the same bank with
+`Bank.sysex` (RAM 3 = 4, CARD = 3), because that is the byte a dump request
+and reply carry on the wire.
+
+Two different numbers for the same bank, on purpose: `Bank.number` is the
+position a person counts in (`RAM 1`-`RAM 3`, `ROM 4`-`ROM 11`, Card --
+display 11 is the Card), while `Bank.sysex` is what the instrument
+addresses (`ROM 11` = 2, RAM 3 = 4, the Card = 3). A part's interior record
+holds the display number; the wire holds the sysex byte. Conflating the two
+was a real bug here -- every "Card" kwsed read was really ROM 10, and
+nothing errored -- so the copy rewrites one of them and frames with the
+other, and never the reverse.
+
+### Strict isolation between performances, dedup within one
+
+Two different Performances **never share a target patch slot**. If two of
+them name the same source patch, each receives a private copy, so editing
+one cannot be heard through the other. Inside a *single* Performance the
+rule relaxes: two parts of the same Performance naming the same source
+patch share that one private slot, because a performance edits its own
+parts together. `AtomicPerfAllocation.allocated_patches` records exactly
+which source patch went to which target slot, per performance.
+
+### Zero-fragmentation contiguous packing
+
+Performance slots run `0..P-1` and patch slots `0..M-1` with no gaps in
+between. An append fills the first free slot; a replace or a removal
+compacts whatever follows it and rewrites every affected PartRef, so no
+later edit has to know where a slot once was. The budgets are unchanged:
+
+| | per bank |
+|---|---|
+| performances | 50 |
+| patches | **35**, first-come private |
+| wave sequences | 32, shared |
+| wave sequence steps | **501, shared** |
+
+### Wave sequences are shared, and their sharing is the point
+
+While patches are duplicated for isolation, the wave sequences beneath them
+are still shared: duplicated patches point at one relocated copy of each
+sequence in the destination's 32-sequence / 501-step pool, and steps the
+source banks already share are packed once. A step's `wave` below 32 names
+another sequence and is renumbered through the same map; **PCM ROM waves
+(`wave >= 32`) are not moved** -- they are firmware, and the reference
+carries over unchanged.
+
+### From the command line
+
+```sh
+kwscli deps CARD/07 performance 3
+kwscli deps RAM1 patch 12
+kwscli copy-perf CARD/07:3 CARD/13:11 --to RAM3 --mode append --out staged
+```
+
+`deps` prints the graph -- whole bank, one performance (parts, unique
+patches, sequence step cost, which patches are shared), or one patch (its
+waves, who uses it) -- and needs no unit when the banks are cached.
+`copy-perf` rewrites one destination bank from the named performances; with
+`--out` it stops at writing `{PREFIX}-perf.syx` / `-patch.syx` / `-seq.syx`
+and sends nothing, while without it the write goes through the same
+arm-then-fire fence as everything else, asking for `--yes` and backing up
+the destination first. `tools/build_bank.py --perf ID:N` is the file-only
+equivalent.
+
+### In the interface
+
+* `d` opens the **dependency inspector** for whatever is under the cursor:
+  a Performance, a Patch, or a Multiset channel.
+* `y` opens the **copy-performance** screen: it plans against the chosen
+  destination, shows the target slots and the budget, arms with `a` and
+  writes with `w`. Opening sends nothing; arming sends nothing; firing is a
+  different key and works only while armed.
+* Inside `MultiEditScreen`, `b` now accepts scoped card banks (`CARD/07`,
+  `CARD/c1`), and `s` stages the card performances into RAM (RAM 3 first,
+  spilling into RAM 1 and RAM 2 when one bank's 35-patch budget runs out)
+  because the synth has one card slot and two channels cannot hear two
+  different cards at once. `a` / `w` then writes the staged bank(s) *and*
+  the remapped Multiset together.
+
+### One logical operation is one undo
+
+Whether it is one bank written, a performance copied, or a staged Multi
+spanning several banks plus its Multiset, `z` undoes the whole thing in one
+step: the backups the write fence made are what makes that reversal
+possible, and no partial state survives between keystrokes.
+
+## Importing existing banks and performances
+
+Two CLI paths read other formats; both end in the same `deps.Source` model:
+
+* `kwscli import FILE` reads a **whole bank** into the local bank cache. It
+  understands SysEx (`.syx`/`.sysex`; one type per file, all three in one
+  file, single performance/patch dumps, and multi-bank files), Standard MIDI
+  files carrying SysEx, SoundQuest `.sqs` banks whose bodies are embedded
+  Korg SysEx, and Edisyn's standard bank dumps. `--list` shows what a file
+  holds; `--as` files a card bank under a `CARD/NN` slot. A bank keeps its
+  own interior `PartRef`/`WaveRef` bank references, so an internal bank is
+  kept under its own scope; relocating performances is `copy-perf`'s job.
+* `kwscli copy-perf SCOPE:SLOT --to BANK --from-file FILE` imports a
+  **single performance with its dependencies**. The performance goes to the
+  first free slot in the target bank (append) or into a clean bank, its
+  patches are copied privately and packed contiguously with no gaps, and
+  every part is rewritten to the new patch slots. `--out PREFIX` writes the
+  three `.syx` files offline; `--yes` writes the target bank through the
+  fenced `write_bank_bundle` (backup, send, read-back).
+
+A SoundDiver `.LIB` decodes its **patches**, **performances** and **wave sequences**. A patch
+entry is `74 + 84*n` bytes for `n` = 1, 2 or 4 oscillators (158, 242, 410):
+the common section is split around a two-byte piece and the stored
+oscillator blocks are in the adaptation's byte order (derived from real
+library/source pairs). A 2-oscillator patch's blocks are raw oscillators 0
+and 2. A performance entry is `37 + 16*n` bytes (53..165): a 21-byte
+common in a fixed order, the `n` used parts as full 18-byte raw records,
+then two-byte placeholders for the unused parts. The `RAM1-NN` comment
+selects the slot; duplicate slots keep the last entry. Wave-sequence
+entries (16 + 16*n bytes) are assembled into the bank's wave-sequence
+bank, with the last entry per slot winning and relative links rewritten;
+multiset entries are not present in the example libraries and are not
+converted. A `0x50` All Data dump is decoded
+into its two RAM banks: the six fixed bank blocks (`RAM1`/`RAM2`
+performances, patches and wave sequences) sit at the end of the payload,
+so the prefix before them is derived from the length and checked; a
+payload with any other shape is refused rather than guessed at.
+
 ## Using it
 
 ```python
@@ -141,12 +299,23 @@ print(len(made.patch_map), "patches;", len(made.performances), "performances")
 for why in made.rejected:
     print("left out:", why)
 
-built = bankbuild.build(sources, made,
-                        template_patches=empty.patches_bytes,
-                        template_performances=empty.performances_bytes,
-                        template_waveseq=empty.waveseq_bytes,
-                        destination_bank=11)
+built = bankbuild.build(
+    sources,
+    made,
+    template_patches=empty.patches_bytes,
+    template_performances=empty.performances_bytes,
+    template_waveseq=empty.waveseq_bytes,
+    destination_bank=11,
+)
 ```
 
 The template comes from dumping a freshly formatted bank off the instrument
 -- on an Hcard, create an empty bank and dump it.
+
+## Disk images and zip archives
+
+`kws.importers.read_file` also accepts FAT12 floppy images (`.img`) and
+`.zip` archives. A disk image is unpacked file by file: its `.syx`,
+`.mid` and `.bnk` members become banks, labelled `disk.img / FILE.SYX
+[RAM1]`. A zip may contain disk images and loose bank files; KryoFlux
+`.7z` flux archives are skipped (use the `.img` files they decode to).
