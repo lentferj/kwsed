@@ -1647,6 +1647,7 @@ class KwsedApp(App[None]):
         self._progress_value = 0.0
         self._progress_active = False
         self._progress_generation = 0
+        self._progress_hold = 0
         try:
             self.device.progress = self._progress_report
         except Exception:  # noqa: S110 - decoration, not protocol
@@ -2405,7 +2406,7 @@ class KwsedApp(App[None]):
             destination_bank=destination,
         )
 
-    def _device_worker(self, work: Any, done: Any) -> None:
+    def _device_worker(self, work: Any, done: Any, label: str = "working") -> None:
         """Run one device operation off the UI thread, then report back.
 
         Every long SysEx exchange belongs here: a bank dump takes the wire
@@ -2423,6 +2424,7 @@ class KwsedApp(App[None]):
                 failure = exc
             done(result, failure)
             return
+        self._progress_hold_begin(label)
         self._device_worker_thread(work, done)
 
     @work(thread=True)
@@ -2441,6 +2443,7 @@ class KwsedApp(App[None]):
             failure = exc
         try:
             self.call_from_thread(done, result, failure)
+            self.call_from_thread(self._progress_hold_end)
         except Exception:  # noqa: S110 - the app may be shutting down
             pass
 
@@ -3709,7 +3712,7 @@ class KwsedApp(App[None]):
             self._import_whole_bank_written(label, target, relocated, write_result)
 
         self.notify_status(f"writing {label} into {target.label}...")
-        self._device_worker(work, done)
+        self._device_worker(work, done, f"importing {label} into {target.label}")
 
     def _import_whole_bank_written(
         self, label: str, target: Any, relocated: Any, result: Any
@@ -4047,11 +4050,11 @@ class KwsedApp(App[None]):
         buffer_slot = perf_area[1]
 
         def work() -> Any:
-            undo_entries, seq_note = self._stage_banks(
+            undo_entries, seq_note, patch_path = self._stage_banks(
                 target_source, plan, built, fresh, patch_area, target_bank
             )
             self.device.send_performance_to_buffer(stage_bank, buffer_slot, record)
-            return undo_entries, seq_note
+            return undo_entries, seq_note, patch_path
 
         def done(result: Any, failure: BaseException | None) -> None:
             if failure is not None:
@@ -4059,7 +4062,7 @@ class KwsedApp(App[None]):
                 screen.set_status(msg)
                 self.notify_status(msg, refused=True)
                 return
-            undo_entries, seq_note = result
+            undo_entries, seq_note, patch_path = result
             if undo_entries:
                 # The staging is destructive, so it is one undo record: `z`
                 # puts both banks back the way they were.
@@ -4069,12 +4072,14 @@ class KwsedApp(App[None]):
                         payload={"backups": undo_entries},
                     )
                 )
-            msg = self._staging_message(fresh, patch_area, undo_entries, seq_note)
+            msg = self._staging_message(
+                fresh, patch_area, undo_entries, seq_note, patch_path
+            )
             screen.set_status(msg)
             self.notify_status(msg)
 
         self.notify_status("staging the audition...")
-        self._device_worker(work, done)
+        self._device_worker(work, done, "auditioning from the staging area")
 
     def _stage_banks(
         self,
@@ -4084,13 +4089,16 @@ class KwsedApp(App[None]):
         fresh: Any,
         patch_area: Any,
         target_bank: Any,
-    ) -> tuple[list[dict[str, Any]], str]:
+    ) -> tuple[list[dict[str, Any]], str, str]:
         """Write the staging patch bank, then sequences if the plan needs them.
 
-        Returns the undo entries, one per bank written, and the sentence
-        fragment that names the sequences in the status line.
+        Returns the undo entries, the sentence fragment that names the
+        sequences in the status line, and which patch path was taken
+        (``"single"`` or ``"bank"``).
         """
-        undo_entries = self._stage_patches(target_source, built, fresh, patch_area)
+        undo_entries, patch_path = self._stage_patches(
+            target_source, built, fresh, patch_area
+        )
         seq_note = ""
         if plan.sequence_map and built.waveseq is not None:
             undo_entries += self._stage_one_bank(
@@ -4100,11 +4108,11 @@ class KwsedApp(App[None]):
                 f" and staged {len(plan.sequence_map)} wave sequence(s) "
                 f"into {target_bank.label}"
             )
-        return undo_entries, seq_note
+        return undo_entries, seq_note, patch_path
 
     def _stage_patches(
         self, target_source: Any, built: Any, fresh: Any, patch_area: Any
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], str]:
         """Stage the fresh copies one patch at a time, verifying each.
 
         A whole patch bank is nearly 30 kB on the wire -- about ten seconds
@@ -4141,11 +4149,11 @@ class KwsedApp(App[None]):
             except Exception:
                 return self._stage_patches_as_bank(
                     target_source, built, fresh, patch_area, captured
-                )
+                ), "bank"
             if result.get("verified") is False or result.get("status") == "write error":
                 return self._stage_patches_as_bank(
                     target_source, built, fresh, patch_area, captured
-                )
+                ), "bank"
             entries.append(
                 {
                     "kind": "patch",
@@ -4161,7 +4169,7 @@ class KwsedApp(App[None]):
                     },
                 }
             )
-        return entries
+        return entries, "single"
 
     def _stage_patches_as_bank(
         self,
@@ -4249,7 +4257,12 @@ class KwsedApp(App[None]):
         ]
 
     def _staging_message(
-        self, fresh: Any, patch_area: Any, undo_entries: Any, seq_note: str
+        self,
+        fresh: Any,
+        patch_area: Any,
+        undo_entries: Any,
+        seq_note: str,
+        patch_path: str = "single",
     ) -> str:
         """The status line for a successful staged audition."""
         slots_text = ", ".join(f"{s:02d}" for s in patch_area[1][: len(fresh)])
@@ -4258,8 +4271,9 @@ class KwsedApp(App[None]):
             if fresh
             else "no fresh patches needed"
         )
+        how = "" if patch_path == "single" or not fresh else " (bank dump)"
         return (
-            f"{patch_note}{seq_note}; auditioning — play it; "
+            f"{patch_note}{how}{seq_note}; auditioning — play it; "
             "ctrl+s imports for real"
             + ("; z undoes the staging" if undo_entries else "")
         )
@@ -4523,7 +4537,7 @@ class KwsedApp(App[None]):
             self._import_single_written(built, target_scope, target_bank, result)
 
         self.notify_status(f"writing the import into {target_bank.label}...")
-        self._device_worker(work, done)
+        self._device_worker(work, done, f"importing into {target_bank.label}")
 
     def _import_single_written(
         self, built: Any, target_scope: str, target_bank: Any, result: Any
@@ -5729,7 +5743,9 @@ class KwsedApp(App[None]):
 
     def _progress_apply(self, label: str, fraction: Optional[float]) -> None:
         if fraction is None:
-            self._progress_finish()
+            # A step inside a held operation is not the operation's end.
+            if self._progress_hold == 0:
+                self._progress_finish()
             return
         if not self._progress_active:
             self._progress_active = True
@@ -5749,6 +5765,27 @@ class KwsedApp(App[None]):
         self._progress_paint()
         generation = self._progress_generation
         self.set_timer(0.4, lambda: self._progress_hide(generation))
+
+    def _progress_hold_begin(self, label: str) -> None:
+        """Show the bar for a whole operation, not only its messages.
+
+        A staged audition of one patch is three 426-byte exchanges; each
+        finishes inside a frame, so byte progress alone would never be
+        visible. The worker holds the bar for its whole run and the
+        bridge's own events refine the label and the fill.
+        """
+        self._progress_hold += 1
+        if self._progress_hold == 1:
+            self._progress_active = True
+            self._progress_generation += 1
+            self._progress_label = label
+            self._progress_value = 0.0
+            self._progress_paint()
+
+    def _progress_hold_end(self) -> None:
+        self._progress_hold = max(0, self._progress_hold - 1)
+        if self._progress_hold == 0:
+            self._progress_finish()
 
     def _progress_hide(self, generation: int) -> None:
         if generation != self._progress_generation:

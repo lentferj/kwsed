@@ -37,6 +37,7 @@ Two things about the double that are easy to get wrong, and were:
   to produce it in response to the request.
 """
 
+import time
 from typing import Any
 
 import pytest
@@ -491,6 +492,14 @@ class TestSendPerformanceToBuffer:
         assert result["mismatch"] is None
 
 
+class _SlowOut(FakeOut):
+    """A port that takes its time, like a driver accepting a bank dump."""
+
+    def send_message(self, data):
+        time.sleep(0.3)
+        super().send_message(data)
+
+
 class TestTransferProgress:
     """The bar under the status line is fed from here."""
 
@@ -512,6 +521,18 @@ class TestTransferProgress:
             unit.bridge._report(0.5)
             unit.bridge._report(0.502)
         assert events == [0.0, 0.5, None]
+
+    def test_a_write_moves_even_when_the_transport_counts_nothing(self):
+        """rtmidi hands over a whole message at once and reports nothing."""
+        unit = Unit()
+        unit.bridge._out = _SlowOut()
+        events: list[Any] = []
+        unit.bridge.progress = lambda label, fraction: events.append(fraction)
+        with unit.bridge._progress_scope("writing RAM 2 patches"):
+            unit.bridge._send(bytes(8000))
+        intermediate = [f for f in events if f is not None and 0.0 < f < 1.0]
+        assert intermediate, "a send must move the bar, not only start and end"
+        assert events[-1] is None
 
     def test_a_bank_write_announces_itself(self, tmp_path):
         unit = Unit()

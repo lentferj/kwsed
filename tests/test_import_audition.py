@@ -523,3 +523,28 @@ async def test_the_import_screen_shows_the_bar_while_it_covers_the_app(tmp_path)
         await pilot.pause()
         await pilot.pause(0.5)
         assert bar.display is False
+
+
+@pytest.mark.asyncio
+async def test_a_held_operation_keeps_the_bar_up_between_steps(tmp_path):
+    """`t` is several tiny exchanges; the bar must span the whole audition."""
+    device = DemoDevice()
+    app = KwsedApp(device, catalog=cat.Catalog([]), config_path=str(tmp_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        bar = app.query_one("#progress", Static)
+
+        app._progress_hold_begin("auditioning from the staging area")
+        app._progress_report("reading RAM 3 patch 27", 0.4)
+        await pilot.pause()
+        assert bar.display is True
+        assert "40%" in str(bar.content)
+
+        # One step ending must not take the bar down while the operation runs.
+        app._progress_report("reading RAM 3 patch 27", None)
+        await pilot.pause(0.5)
+        assert bar.display is True
+
+        app._progress_hold_end()
+        await pilot.pause(0.5)
+        assert bar.display is False

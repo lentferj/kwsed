@@ -52,6 +52,7 @@ import contextlib
 import re
 import signal
 import sys
+import threading
 import time
 from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
@@ -395,8 +396,44 @@ class WavestationBridge:
     #: this large go through :mod:`kws.alsa` instead.
     RTMIDI_LIMIT = 4096
 
+    #: Sends bigger than this get a progress ticker. Below it the message is
+    #: over before a bar could move and the callers' hold covers the wait.
+    PROGRESS_SEND_BYTES = 256
+
     def _send(self, data: bytes) -> None:
         data = bytes(data)
+        stop: Optional[threading.Event] = None
+        ticker: Optional[threading.Thread] = None
+        if self.progress is not None and len(data) > self.PROGRESS_SEND_BYTES:
+            # The transport may hand the whole message to the driver in one
+            # call and never tell us how much has gone (rtmidi) or pace it
+            # chunk by chunk (ALSA). A ticker against the wire-speed estimate
+            # moves the bar either way; ALSA's exact counts still refine it.
+            stop = threading.Event()
+            ticker = threading.Thread(
+                target=self._send_estimate,
+                args=(len(data), stop),
+                name="kwsed-progress",
+                daemon=True,
+            )
+            ticker.start()
+        try:
+            self._send_now(data)
+        finally:
+            if stop is not None:
+                stop.set()
+            if ticker is not None:
+                ticker.join(timeout=0.5)
+
+    def _send_estimate(self, size: int, stop: threading.Event) -> None:
+        """Move the bar while a message is being handed to the driver."""
+        estimate = _wire_estimate(size)
+        started = time.monotonic()
+        while not stop.wait(0.1):
+            elapsed = time.monotonic() - started
+            self._report(min(0.94, elapsed / estimate))
+
+    def _send_now(self, data: bytes) -> None:
         if len(data) > self.RTMIDI_LIMIT:
             address = (
                 alsa.port_address(self.description.split(" -> ")[0])
@@ -688,36 +725,43 @@ class WavestationBridge:
     ) -> bytes:
         """One patch's 426 bytes. Read-only, and makes no sound."""
         entry = banks.bank(bank)
-        self._drain()
-        self._send(m.single_patch_request(entry.sysex, number, self.channel))
-        deadline = time.time() + (SINGLE_OBJECT_TIMEOUT if timeout is None else timeout)
-        while time.time() < deadline:
-            message = self._in.get_message()
-            if message is None:
-                time.sleep(0.002)
-                continue
-            packet = m.parse(message[0])
-            if packet is None or packet.channel != self.channel:
-                continue
-            if packet.is_error:
-                raise DeviceRefused(packet.function)
-            if packet.function != m.Function.SINGLE_PATCH_DUMP:
-                continue
-            # Match the bank and number the reply describes, not merely
-            # that it is a patch dump. A late answer to a request that has
-            # already timed out is otherwise indistinguishable from the
-            # answer to this one -- which is how a read of Card 12 came
-            # back holding the patch from Card 3, and a read of RAM 1 20
-            # came back holding one from the Card.
-            raw = bytes(message[0])
-            if len(raw) < 7 or raw[5] != entry.sysex or raw[6] != number:
-                continue
-            return packet.data()[: records.PATCH_SIZE]
-        raise TimeoutError(
-            f"no patch came back for {entry.label} {number}. A reply for a "
-            f"different slot does not count, so this can also mean the unit "
-            f"is still answering an earlier request."
-        )
+        label = f"reading {entry.label} patch {number:02d}"
+        wire = records.PATCH_SIZE * 2
+        with self._progress_scope(label, _wire_estimate(wire)) as estimate:
+            started = time.monotonic()
+            self._drain()
+            self._send(m.single_patch_request(entry.sysex, number, self.channel))
+            deadline = time.time() + (
+                SINGLE_OBJECT_TIMEOUT if timeout is None else timeout
+            )
+            while time.time() < deadline:
+                message = self._in.get_message()
+                if message is None:
+                    self._estimate_progress(started, estimate)
+                    time.sleep(0.002)
+                    continue
+                packet = m.parse(message[0])
+                if packet is None or packet.channel != self.channel:
+                    continue
+                if packet.is_error:
+                    raise DeviceRefused(packet.function)
+                if packet.function != m.Function.SINGLE_PATCH_DUMP:
+                    continue
+                # Match the bank and number the reply describes, not merely
+                # that it is a patch dump. A late answer to a request that has
+                # already timed out is otherwise indistinguishable from the
+                # answer to this one -- which is how a read of Card 12 came
+                # back holding the patch from Card 3, and a read of RAM 1 20
+                # came back holding one from the Card.
+                raw = bytes(message[0])
+                if len(raw) < 7 or raw[5] != entry.sysex or raw[6] != number:
+                    continue
+                return packet.data()[: records.PATCH_SIZE]
+            raise TimeoutError(
+                f"no patch came back for {entry.label} {number}. A reply for a "
+                f"different slot does not count, so this can also mean the unit "
+                f"is still answering an earlier request."
+            )
 
     def write_patch(
         self,
@@ -784,15 +828,18 @@ class WavestationBridge:
             },
         )
 
-        self._drain()
-        self._send(m.single_patch_dump(entry.sysex, number, data, channel=self.channel))
         # Edisyn's write path (its performance writer pairs a dump with an
         # EXECUTE_WRITE change): the dump fills the edit buffer and names
         # the destination, and the SR-only parameter change performs the
         # write without the unit's front-panel confirmation. The documented
         # 0x11 command was seen live to stop at "SAVE PATCH -- ARE YOU
         # SURE?" and never write unattended.
-        self._send(m.execute_write(channel=self.channel))
+        with self._progress_scope(f"writing {entry.label} patch {number:02d}"):
+            self._drain()
+            self._send(
+                m.single_patch_dump(entry.sysex, number, data, channel=self.channel)
+            )
+            self._send(m.execute_write(channel=self.channel))
 
         result: Dict[str, Any] = {
             "bank": entry.label,
@@ -820,14 +867,24 @@ class WavestationBridge:
                     break
         if not verify:
             return result
-        try:
-            after = self.read_patch(entry.sysex, number, timeout=timeout)
-        except Exception as exc:
-            result["verified"] = False
-            result["mismatch"] = f"could not read it back ({exc})"
-            return result
-        result["verified"] = bytes(after) == bytes(data)
-        if not result["verified"]:
+        after: Optional[bytes] = None
+        for attempt in range(2):
+            if attempt:
+                # The unit can still be committing when the first read-back
+                # is answered -- EXECUTE_WRITE is a front-panel save, not a
+                # synchronous call. One retry tells a slow write from one
+                # the unit never performed.
+                time.sleep(0.25)
+            try:
+                after = self.read_patch(entry.sysex, number, timeout=timeout)
+            except Exception as exc:
+                result["verified"] = False
+                result["mismatch"] = f"could not read it back ({exc})"
+                return result
+            if bytes(after) == bytes(data):
+                break
+        result["verified"] = after is not None and bytes(after) == bytes(data)
+        if not result["verified"] and after is not None:
             result["mismatch"] = _first_difference(bytes(data), bytes(after))
         return result
 
@@ -891,10 +948,13 @@ class WavestationBridge:
                 f"a performance is {records.PERFORMANCE_SIZE} bytes; got {len(data)}"
             )
 
-        self._drain()
-        self._send(
-            m.single_performance_dump(entry.sysex, number, data, channel=self.channel)
-        )
+        with self._progress_scope(f"auditioning on {entry.label} {number:02d}"):
+            self._drain()
+            self._send(
+                m.single_performance_dump(
+                    entry.sysex, number, data, channel=self.channel
+                )
+            )
         return {"bank": entry.label, "number": number}
 
     def write_performance(
@@ -947,17 +1007,20 @@ class WavestationBridge:
             },
         )
 
-        self._drain()
-        self._send(
-            m.single_performance_dump(entry.sysex, number, data, channel=self.channel)
-        )
         # Edisyn's write, not the documented write command: the buffer's
         # destination was set by the dump above, and an EXECUTE_WRITE change
         # performs it without the unit's front-panel prompt. (The 0x11 patch
         # write command was seen live to stop at "SAVE PATCH -- ARE YOU
         # SURE?"; its 0x1A sibling is presumed to behave the same, and
         # Edisyn never uses either.)
-        self._send(m.execute_write(channel=self.channel))
+        with self._progress_scope(f"writing {entry.label} performance {number:02d}"):
+            self._drain()
+            self._send(
+                m.single_performance_dump(
+                    entry.sysex, number, data, channel=self.channel
+                )
+            )
+            self._send(m.execute_write(channel=self.channel))
 
         result: Dict[str, Any] = {
             "bank": entry.label,
