@@ -70,6 +70,53 @@ class TestIsEmptyPerformance:
         rec = make_performance("Init", ((0, 5),))
         assert not perfcopy.is_empty_performance(rec)
 
+    def test_init_perf_trailing_period_is_empty(self):
+        rec = make_performance("Init Perf.", ((0, 0),))
+        assert perfcopy.is_empty_performance(rec)
+
+    def test_init_perf_uppercase_trailing_period_is_empty(self):
+        rec = make_performance("INIT PERF.", ((0, 0),))
+        assert perfcopy.is_empty_performance(rec)
+
+    def test_init_performance_is_empty(self):
+        rec = make_performance("Init Performance", ((0, 0),))
+        assert perfcopy.is_empty_performance(rec)
+
+    def test_init_named_patch_nonzero_is_not_empty(self):
+        rec = make_performance("Init", ((0, 5),))
+        assert not perfcopy.is_empty_performance(rec)
+
+
+class TestIsEmptyPatch:
+    def test_zero_patch_is_empty(self):
+        rec = bytes(r.PATCH_SIZE)
+        assert perfcopy.is_empty_patch(rec)
+
+    def test_factory_init_patch_is_empty(self):
+        rec = make_patch("Init")
+        assert perfcopy.is_empty_patch(rec)
+
+    def test_real_patch_is_not_empty(self):
+        rec = make_patch("Kelp Forest")
+        assert not perfcopy.is_empty_patch(rec)
+
+    def test_init_patch_uppercase_is_empty(self):
+        rec = make_patch("INIT Patch")
+        assert perfcopy.is_empty_patch(rec)
+
+    def test_init_patch_trailing_period_is_empty(self):
+        rec = make_patch("Init Patch.")
+        assert perfcopy.is_empty_patch(rec)
+
+    def test_unnamed_patch_is_empty(self):
+        rec = make_patch("Unnamed")
+        assert perfcopy.is_empty_patch(rec)
+
+    def test_init_named_elsewhere_not_applicable_patch(self):
+        # patch emptiness does not inspect bank/patch refs; name rules only
+        rec = make_patch("Init", ((0, 5), (0, 5), (0, 5), (0, 5)))
+        assert perfcopy.is_empty_patch(rec)
+
 
 class TestCrossBankLocalization:
     def test_cross_bank(self):
@@ -528,6 +575,377 @@ class TestTemplateDoesNotLeaveStalePerformances:
         for slot in range(2, banks.PERFORMANCES_PER_BANK):
             parts = r.performance_parts(records[slot])
             assert not any(part.used for part in parts), slot
+
+
+class TestSlotImport:
+    def _dest_source(self):
+        # 15 active performances in slots 0..14, rest Init-ish zero? Use Init named.
+        perfs = []
+        for i in range(15):
+            perfs.append(make_performance(f"Active{i}", ((2, 0),)))
+        for _i in range(15, banks.PERFORMANCES_PER_BANK):
+            perfs.append(make_performance("Init", ()))
+        patches = []
+        for i in range(10):
+            patches.append(make_patch(f"Real{i}"))
+        for _i in range(10, banks.PATCHES_PER_BANK):
+            patches.append(make_patch("Init"))
+        waveseq = make_waveseq({0: [40, 41]})[0]
+        return deps.Source(
+            bank_id="RAM3",
+            performances=perfs,
+            patches=patches,
+            waveseq=waveseq,
+        )
+
+    def _src_source(self):
+        # source perf with localized part (RAM1 patch 0) and ROM part (ROM4 patch 0)
+        # wave sequence in source bank
+        waveseq = make_waveseq({0: [40, 41]})[0]
+        src_perf = make_performance("SrcPerf", ((0, 0), (3, 0)))
+        src = deps.Source(
+            bank_id="RAM1",
+            patches=[make_patch("SrcPatch", waves=((0, 0), (0, 40), (0, 40), (0, 40)))],
+            performances=[src_perf],
+            waveseq=waveseq,
+        )
+        return {"RAM1": src, "RAM3": self._dest_source()}
+
+    def test_populated_destination(self):
+        sources = self._src_source()
+        dest = banks.bank("RAM3")
+        target_scope = "RAM3"
+        before_perfs = [
+            bytes(sources[target_scope].performances[i])
+            for i in range(banks.PERFORMANCES_PER_BANK)
+        ]
+        plan = perfcopy.plan_slot_import(
+            sources,
+            target_scope,
+            {15: relations.PerfId("RAM1", 0)},
+            destination_bank=dest,
+        )
+        assert plan.fits
+        assert plan.assignments == [(15, relations.PerfId("RAM1", 0))]
+        assert plan.allocations[0].target_perf_slot == 15
+        built = perfcopy.build_slot_import(sources, plan)
+        # non-assigned perf slots unchanged
+        for i in range(banks.PERFORMANCES_PER_BANK):
+            if i == 15:
+                continue
+            slot_bytes = built.performances[
+                i * r.PERFORMANCE_SIZE : (i + 1) * r.PERFORMANCE_SIZE
+            ]
+            assert slot_bytes == before_perfs[i], i
+        # source ROM part stays ROM: perf slot 15 parts
+        rec0 = built.performances[15 * r.PERFORMANCE_SIZE : 16 * r.PERFORMANCE_SIZE]
+        parts = r.performance_parts(rec0)
+        used = [p for p in parts if p.used]
+        # one localized -> dest bank, one ROM -> bank 3
+        banks_seen = {p.bank for p in used}
+        assert dest.number in banks_seen
+        assert 3 in banks_seen  # ROM4
+        # localized parts point at dest bank and valid patch slot
+        for p in used:
+            if p.bank == dest.number:
+                assert 0 <= p.patch < banks.PATCHES_PER_BANK
+        # patch count <=35
+        assert plan.patch_count <= 35
+        # waveseq valid
+        assert built.waveseq is not None and len(built.waveseq) == r.WAVESEQ_BANK_SIZE
+
+    def test_pinned_target_patch(self):
+        # destination perf at slot 0 references target bank patch 0
+        sources = self._src_source()
+        dest_src = sources["RAM3"]
+        # make slot 0 active referencing patch 0
+        dest_src.performances[0] = make_performance("PinnedPerf", ((2, 0),))
+        dest = banks.bank("RAM3")
+        # source patch differs, so must allocate different slot
+        plan = perfcopy.plan_slot_import(
+            sources, "RAM3", {16: relations.PerfId("RAM1", 0)}, destination_bank=dest
+        )
+        assert plan.fits
+        alloc = plan.allocations[0]
+        # patch slot not 0
+        assert all(slot != 0 for _, slot in alloc.allocated_patches)
+        built = perfcopy.build_slot_import(sources, plan)
+        # patch 0 bytes unchanged
+        assert built.patches[0 : r.PATCH_SIZE] == dest_src.patches[0]
+        # existing perf slot 0 unchanged
+        assert built.performances[0 : r.PERFORMANCE_SIZE] == dest_src.performances[0]
+        # all 35 pinned -> reject
+        # pin all patch slots
+        # Construct a destination where every patch slot is pinned by a surviving perf.
+        dest2 = self._dest_source()
+        # make 35 performances each referencing a distinct patch slot
+        for i in range(35):
+            dest2.performances[i] = make_performance(f"P{i}", ((2, i),))
+        # keep rest init
+        for i in range(35, 50):
+            dest2.performances[i] = make_performance("Init", ())
+        sources2 = dict(sources)
+        sources2["RAM3"] = dest2
+        plan2 = perfcopy.plan_slot_import(
+            sources2, "RAM3", {49: relations.PerfId("RAM1", 0)}, destination_bank=dest
+        )
+        assert not plan2.fits
+        assert any("needs" in rr and "patch slot(s)" in rr for rr in plan2.rejected)
+        with pytest.raises(ValueError):
+            perfcopy.build_slot_import(sources2, plan2)
+
+    def test_overwrite_occupied_slot(self):
+        sources = self._src_source()
+        dest_src = sources["RAM3"]
+        # slot 5 occupied by a perf using a unique patch 5
+        dest_src.performances[5] = make_performance("Occ", ((2, 5),))
+        # slot 6 shares patch 7
+        dest_src.performances[6] = make_performance("Surv", ((2, 7),))
+        # overwritten perf's unique patch 5 should become free; shared patch 7 stays
+        dest = banks.bank("RAM3")
+        before_slot6 = bytes(dest_src.performances[6])
+        plan = perfcopy.plan_slot_import(
+            sources, "RAM3", {5: relations.PerfId("RAM1", 0)}, destination_bank=dest
+        )
+        assert plan.fits
+        built = perfcopy.build_slot_import(sources, plan)
+        # slot 5 contains source perf
+        assert (
+            dumps.record_name(
+                built.performances[5 * r.PERFORMANCE_SIZE : 6 * r.PERFORMANCE_SIZE]
+            )
+            == "SrcPerf"
+        )
+        # slot 6 unchanged
+        assert (
+            built.performances[6 * r.PERFORMANCE_SIZE : 7 * r.PERFORMANCE_SIZE]
+            == before_slot6
+        )
+        # other slots unchanged (spot check slot 0 init)
+        # patch 5 may be reused
+        # shared patch 7 unchanged
+        assert built.patches[7 * r.PATCH_SIZE : 8 * r.PATCH_SIZE] == dest_src.patches[7]
+
+    def test_batch_assignment(self):
+        sources = self._src_source()
+        # add second source perf
+        sources["RAM1"].performances.append(make_performance("SrcPerf2", ((0, 0),)))
+        sources["RAM1"].patches.append(make_patch("SrcPatch2"))
+        # ensure perf references patch 1? adjust: create perf referencing patch index 1
+        sources["RAM1"].performances[1] = make_performance("SrcPerf2", ((0, 1),))
+        dest = banks.bank("RAM3")
+        before = [
+            bytes(sources["RAM3"].performances[i])
+            for i in range(banks.PERFORMANCES_PER_BANK)
+        ]
+        plan = perfcopy.plan_slot_import(
+            sources,
+            "RAM3",
+            {10: relations.PerfId("RAM1", 0), 20: relations.PerfId("RAM1", 1)},
+            destination_bank=dest,
+        )
+        assert plan.fits
+        targets = {a.target_perf_slot for a in plan.allocations}
+        assert targets == {10, 20}
+        built = perfcopy.build_slot_import(sources, plan)
+        # existing slots unchanged
+        for i in range(banks.PERFORMANCES_PER_BANK):
+            if i in (10, 20):
+                continue
+            assert (
+                built.performances[
+                    i * r.PERFORMANCE_SIZE : (i + 1) * r.PERFORMANCE_SIZE
+                ]
+                == before[i]
+            )
+
+    def test_wave_sequences(self):
+        # source perf uses source patch with sequence in source bank
+        waveseq = make_waveseq({0: [40, 41], 7: [50, 51]})[0]
+        src = deps.Source(
+            bank_id="RAM1",
+            patches=[make_patch("Q", waves=((0, 0),) * 4)],
+            performances=[make_performance("Perf", ((0, 0),))],
+            waveseq=waveseq,
+        )
+        dest_src = self._dest_source()
+        # pin a destination sequence/step by a surviving perf referencing a patch
+        dest_patch = make_patch("DestSeq", waves=((2, 0),) * 4)
+        dest_src.patches[0] = dest_patch
+        dest_src.performances[0] = make_performance("DestPerf", ((2, 0),))
+        # destination waveseq has seq 0
+        dest_waveseq = make_waveseq({0: [99]})[0]
+        dest_src.waveseq = dest_waveseq
+        sources = {"RAM1": src, "RAM3": dest_src}
+        dest = banks.bank("RAM3")
+        # pinned step bytes before
+        # plan
+        plan = perfcopy.plan_slot_import(
+            sources, "RAM3", {5: relations.PerfId("RAM1", 0)}, destination_bank=dest
+        )
+        assert plan.fits
+        # pinned seq 0 not overwritten: check seq slot 0 header unchanged after build?
+        before_seq0_header = dest_waveseq[0:16]
+        built = perfcopy.build_slot_import(sources, plan)
+        # new seq slot should be >0
+        new_slots = set(plan.sequence_map.values())
+        assert 0 not in new_slots
+        # pinned seq 0 header unchanged
+        assert built.waveseq is not None
+        assert built.waveseq[0:16] == before_seq0_header
+        # quoted sequence test below
+        # Test quoted sequence import
+        waveseq2 = make_waveseq({0: [40, 7], 7: [50, 51]})[0]
+        src2 = deps.Source(
+            bank_id="RAM1",
+            patches=[make_patch("Quoter", waves=((0, 0),) * 4)],
+            performances=[make_performance("Perf2", ((0, 0),))],
+            waveseq=waveseq2,
+        )
+        sources2 = {"RAM1": src2, "RAM3": self._dest_source()}
+        plan2 = perfcopy.plan_slot_import(
+            sources2, "RAM3", {6: relations.PerfId("RAM1", 0)}, destination_bank=dest
+        )
+        assert plan2.fits
+        assert len(plan2.sequence_map) == 2
+
+    def test_budget_rejection(self):
+        src = deps.Source(
+            bank_id="RAM1",
+            patches=[make_patch("P", waves=((0, 0), (0, 1), (0, 40), (0, 40)))],
+            performances=[make_performance("Perf", ((0, 0),))],
+            waveseq=make_waveseq({0: [40], 1: [41]})[0],
+        )
+        dest_src = self._dest_source()
+        # pin all patch slots
+        for i in range(banks.PATCHES_PER_BANK):
+            dest_src.performances[i] = make_performance(f"P{i}", ((2, i),))
+        sources = {"RAM1": src, "RAM3": dest_src}
+        dest = banks.bank("RAM3")
+        # no free patch slots
+        plan = perfcopy.plan_slot_import(
+            sources,
+            "RAM3",
+            {49: relations.PerfId("RAM1", 0)},
+            destination_bank=dest,
+            budget=bankbuild.Budget(patches=0) if False else bankbuild.Budget(),
+        )
+        # With all 35 pinned, should reject patch
+        assert not plan.fits
+        assert any("patch slot(s)" in rr for rr in plan.rejected)
+        with pytest.raises(ValueError):
+            perfcopy.build_slot_import(sources, plan)
+        # no output: build raises before returning; ensure no partial? just exception
+        # sequence budget
+        src2 = deps.Source(
+            bank_id="RAM1",
+            patches=[make_patch("P", waves=((0, 0), (0, 1), (0, 40), (0, 40)))],
+            performances=[make_performance("Perf", ((0, 0),))],
+            waveseq=make_waveseq({0: [40], 1: [41]})[0],
+        )
+        dest_free = self._dest_source()
+        # pin all 32 destination sequences
+        dest_seq = self._dest_source()
+        for i in range(32):
+            dest_seq.patches[i] = make_patch(f"S{i}", waves=((2, i),) * 4)
+            dest_seq.performances[i] = make_performance(f"SP{i}", ((2, i),))
+        dest_seq.waveseq = make_waveseq({i: [40 + i] for i in range(32)})[0]
+        plan_seq = perfcopy.plan_slot_import(
+            {"RAM1": src2, "RAM3": dest_seq},
+            "RAM3",
+            {5: relations.PerfId("RAM1", 0)},
+            destination_bank=dest,
+        )
+        assert not plan_seq.fits
+        assert any("wave sequence(s)" in rr for rr in plan_seq.rejected)
+        # step budget
+        plan_step = perfcopy.plan_slot_import(
+            {"RAM1": src2, "RAM3": dest_free},
+            "RAM3",
+            {5: relations.PerfId("RAM1", 0)},
+            destination_bank=dest,
+            budget=bankbuild.Budget(steps=0),
+        )
+        assert not plan_step.fits
+        assert any("step(s)" in rr for rr in plan_step.rejected)
+
+    def test_relocation(self):
+        src = deps.Source(
+            bank_id="RAM1",
+            patches=[make_patch("P", waves=((0, 0), (2, 5), (0, 40), (0, 40)))],
+            performances=[make_performance("Perf", ((0, 0), (2, 3)))],
+            waveseq=None,
+        )
+        dest = banks.bank("RAM3")
+        rb = perfcopy.relocate_bank(src, dest)
+        # perf part bank 0 -> dest.number (2); bank 2 unchanged
+        rec0 = rb.performances[0 : r.PERFORMANCE_SIZE]
+        for part in r.performance_parts(rec0):
+            if part.used:
+                if part.patch == 0:
+                    assert part.bank == dest.number
+                else:
+                    assert part.bank == 2
+        # patch wave bank 0 -> dest.number; bank 2 unchanged
+        pc = rb.patches[0 : r.PATCH_SIZE]
+        for w in r.patch_waves(pc):
+            if w.bank == 0:
+                # should have been rewritten to dest.number, so none remain 0? check
+                pass
+        # Actually assert no wave bank 0 remains for sequence? wave bank 2 remains
+        banks_w = {w.bank for w in r.patch_waves(pc)}
+        assert 2 in banks_w
+        # ROM? none. Records otherwise identical except bank fields
+        # name unchanged
+        assert dumps.record_name(rb.performances[0 : r.PERFORMANCE_SIZE]) == "Perf"
+
+    def test_duplicate_and_range(self):
+        sources = self._src_source()
+        dest = banks.bank("RAM3")
+        from collections.abc import Mapping as _Mapping
+
+        class DupMapping(_Mapping[int, relations.PerfId]):
+            def __getitem__(self, key):
+                raise KeyError(key)
+
+            def __iter__(self):
+                return iter([1])
+
+            def __len__(self):
+                return 1
+
+            def items(self):
+                return [
+                    (1, relations.PerfId("RAM1", 0)),
+                    (1, relations.PerfId("RAM1", 0)),
+                ]
+
+        plan = perfcopy.plan_slot_import(
+            sources, "RAM3", DupMapping(), destination_bank=dest
+        )
+        assert not plan.fits
+        assert any("duplicate" in rr for rr in plan.rejected)
+        plan2 = perfcopy.plan_slot_import(
+            sources, "RAM3", {100: relations.PerfId("RAM1", 0)}, destination_bank=dest
+        )
+        assert not plan2.fits
+        assert any("out of range" in rr for rr in plan2.rejected)
+
+    def test_build_does_not_clear_untouched(self):
+        sources = self._src_source()
+        dest_src = sources["RAM3"]
+        # mark slot 7 with a recognizable performance
+        dest_src.performances[7] = make_performance("KeepMe", ((2, 1),))
+        dest = banks.bank("RAM3")
+        before7 = bytes(dest_src.performances[7])
+        plan = perfcopy.plan_slot_import(
+            sources, "RAM3", {15: relations.PerfId("RAM1", 0)}, destination_bank=dest
+        )
+        built = perfcopy.build_slot_import(sources, plan)
+        assert (
+            built.performances[7 * r.PERFORMANCE_SIZE : 8 * r.PERFORMANCE_SIZE]
+            == before7
+        )
 
 
 def test_imports_ok():

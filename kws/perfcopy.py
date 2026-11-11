@@ -39,6 +39,7 @@ _DEFAULT_BUDGET = bankbuild.Budget()
 
 __all__ = [
     "is_empty_performance",
+    "is_empty_patch",
     "AtomicPerfAllocation",
     "AtomicPlan",
     "AtomicBuilt",
@@ -46,6 +47,13 @@ __all__ = [
     "build_atomic_bank",
     "active_performances",
     "copy_into_bank",
+    "SlotImportPlan",
+    "RelocatedBank",
+    "SlotImportBuilt",
+    "plan_slot_import",
+    "build_slot_import",
+    "copy_slots_into_bank",
+    "relocate_bank",
 ]
 
 
@@ -62,12 +70,36 @@ def is_empty_performance(record: Sequence[int]) -> bool:
     if not any(p.used for p in parts):
         return True
     name = dumps.record_name(record).strip().lower()
-    if name not in ("", "init", "init perf", "unnamed"):
+    if name not in (
+        "",
+        "init",
+        "init perf",
+        "init perf.",
+        "init performance",
+        "unnamed",
+    ):
         return False
     for part in parts:
         if part.used and (part.bank != 0 or part.patch != 0):
             return False
     return True
+
+
+def is_empty_patch(record: Sequence[int]) -> bool:
+    """True when a patch slot is unused or a factory Init patch.
+
+    A patch slot that is all zero bytes is unused. A patch whose trimmed
+    lower-case name is one of the init placeholders (``""``, ``"init"``,
+    ``"init patch"``, ``"init patch."``, ``"unnamed"``) is also treated as
+    free, even if its common/oscillator bytes are nonzero: the factory
+    ``Init`` patch carries a nonzero default and must still be seen as
+    available by the import planner. A user patch named ``Init`` is
+    therefore treated as free by design.
+    """
+    if not any(record):
+        return True
+    name = dumps.record_name(record).strip().lower()
+    return name in ("", "init", "init patch", "init patch.", "unnamed")
 
 
 @dataclass
@@ -514,4 +546,632 @@ def copy_into_bank(
         template_performances=template_performances,
         template_patches=template_patches,
         template_waveseq=template_waveseq,
+    )
+
+
+@dataclass
+class SlotImportPlan:
+    destination_bank: banks.Bank
+    assignments: List[Tuple[int, relations.PerfId]] = field(default_factory=list)
+    allocations: List[AtomicPerfAllocation] = field(default_factory=list)
+    patch_count: int = 0
+    sequence_map: Dict[deps.SequenceKey, int] = field(default_factory=dict)
+    sequence_count: int = 0
+    steps_used: int = 0
+    rejected: List[str] = field(default_factory=list)
+
+    @property
+    def fits(self) -> bool:
+        return not self.rejected
+
+
+@dataclass
+class RelocatedBank:
+    performances: bytes
+    patches: bytes
+    waveseq: Optional[bytes]
+
+
+@dataclass
+class SlotImportBuilt:
+    performances: bytes
+    patches: bytes
+    waveseq: Optional[bytes]
+    plan: SlotImportPlan
+
+
+def _source_bank_number(scope_id: str) -> Optional[int]:
+    if scope_id.startswith("CARD/"):
+        return banks.bank("CARD").number
+    try:
+        return banks.bank(scope_id).number
+    except LookupError:
+        return None
+
+
+def _find_target_scope(
+    sources: Mapping[str, deps.Source], destination_bank: banks.Bank
+) -> Optional[str]:
+    for scope, src in sources.items():
+        if not (
+            src.performances and len(src.performances) == banks.PERFORMANCES_PER_BANK
+        ):
+            continue
+        if not (src.patches and len(src.patches) == banks.PATCHES_PER_BANK):
+            continue
+        if scope == destination_bank.id:
+            return scope
+        if destination_bank.id == "CARD" and scope.startswith("CARD/"):
+            return scope
+    return None
+
+
+def _compute_pinned(  # noqa: C901
+    sources: Mapping[str, deps.Source],
+    target_scope: str,
+    destination_bank: banks.Bank,
+    target_src: deps.Source,
+    assigned_slots: Set[int],
+) -> Tuple[Set[int], Dict[int, bytes], Set[int], Set[int], List[deps.SequenceKey]]:
+    srcs = dict(sources)
+    pinned_patches: Set[int] = set()
+    for slot in range(banks.PERFORMANCES_PER_BANK):
+        if slot in assigned_slots:
+            continue
+        rec_bytes = target_src.performances[slot]
+        if is_empty_performance(rec_bytes):
+            continue
+        for part in rec.performance_parts(rec_bytes):
+            if not part.used:
+                continue
+            if relations.resolve_part_scope(part.bank, target_scope) != target_scope:
+                continue
+            pinned_patches.add(part.patch)
+    pinned_patch_bytes: Dict[int, bytes] = {}
+    for ps in pinned_patches:
+        if 0 <= ps < len(target_src.patches):
+            pinned_patch_bytes[ps] = target_src.patches[ps]
+    seeds: List[deps.SequenceKey] = []
+    for ps in pinned_patches:
+        if ps >= len(target_src.patches):
+            continue
+        patch_rec = target_src.patches[ps]
+        for wave in rec.patch_waves(patch_rec):
+            if wave.is_sequence and wave.bank == destination_bank.number:
+                seeds.append((target_scope, wave.bank, wave.wave))
+    # dedup
+    seen: Set[deps.SequenceKey] = set()
+    uniq: List[deps.SequenceKey] = []
+    for s in seeds:
+        if s not in seen:
+            seen.add(s)
+            uniq.append(s)
+    order, chains, unresolved = deps.quoted_closure(srcs, uniq)
+    if unresolved:
+        return (
+            pinned_patches,
+            pinned_patch_bytes,
+            set(),
+            set(),
+            [],
+        )  # caller checks via separate? handle below
+    pinned_seqs: Set[int] = {key[2] for key in order}
+    pinned_steps: Set[int] = set()
+    for key in order:
+        for step in chains[key].steps:
+            pinned_steps.add(step)
+    return pinned_patches, pinned_patch_bytes, pinned_seqs, pinned_steps, unresolved
+
+
+def plan_slot_import(  # noqa: C901
+    sources: Mapping[str, deps.Source],
+    target_scope: str,
+    assignments: Mapping[int, relations.PerfId],
+    *,
+    destination_bank: Optional[banks.Bank] = None,
+    budget: bankbuild.Budget = _DEFAULT_BUDGET,
+) -> SlotImportPlan:
+    if destination_bank is not None:
+        dest = destination_bank
+    elif target_scope.startswith("CARD/") or target_scope == "CARD":
+        dest = banks.bank("CARD")
+    else:
+        dest = banks.bank(target_scope)
+
+    srcs = dict(sources)
+    plan = SlotImportPlan(
+        destination_bank=dest, assignments=sorted(assignments.items())
+    )
+
+    # duplicate / range check
+    seen_slots: Set[int] = set()
+    for slot, _ in plan.assignments:
+        if slot in seen_slots:
+            plan.rejected.append(f"duplicate assignment target slot {slot}")
+        seen_slots.add(slot)
+        if not (0 <= slot < banks.PERFORMANCES_PER_BANK):
+            plan.rejected.append(f"target slot {slot} out of range")
+    if plan.rejected:
+        return plan
+
+    target_src = srcs.get(target_scope)
+    if (
+        target_src is None
+        or len(target_src.performances) != banks.PERFORMANCES_PER_BANK
+        or len(target_src.patches) != banks.PATCHES_PER_BANK
+    ):
+        plan.rejected.append("destination bank is not loaded")
+        return plan
+
+    assigned_slots: Set[int] = {slot for slot, _ in plan.assignments}
+
+    # pinned
+    pinned_patches, pinned_patch_bytes, pinned_seqs, pinned_steps, unresolved = (
+        _compute_pinned(srcs, target_scope, dest, target_src, assigned_slots)
+    )
+    # detect unresolved: unresolved is list; if non-empty reject
+    # _compute_pinned returns unresolved as 5th.
+    # Re-evaluate cleanly:
+    seeds_check: List[deps.SequenceKey] = []
+    for ps in pinned_patches:
+        if ps >= len(target_src.patches):
+            continue
+        for wave in rec.patch_waves(target_src.patches[ps]):
+            if wave.is_sequence and wave.bank == dest.number:
+                seeds_check.append((target_scope, wave.bank, wave.wave))
+    seen_s = set()
+    uniq_s = []
+    for s in seeds_check:
+        if s not in seen_s:
+            seen_s.add(s)
+            uniq_s.append(s)
+    _order, _chains, unresolved_list = deps.quoted_closure(srcs, uniq_s)
+    if unresolved_list:
+        u = unresolved_list[0]
+        plan.rejected.append(
+            f"{target_scope} pinned patch uses wave sequence {u[2]} from bank "
+            f"{u[1]}, whose wave sequence bank is not loaded"
+        )
+        return plan
+
+    free_patch_slots = [
+        s for s in range(banks.PATCHES_PER_BANK) if s not in pinned_patches
+    ]
+    free_seq_slots = [s for s in range(rec.SEQUENCES_PER_BANK) if s not in pinned_seqs]
+
+    used_new_seq_slots: Set[int] = set()
+    used_new_patch_slots: Set[int] = set()
+    new_steps_count = 0
+    patch_bytes_to_slot: Dict[bytes, int] = {
+        b: s for s, b in pinned_patch_bytes.items()
+    }
+    new_patch_slots_used: Set[int] = set()
+
+    for slot, perf_id in plan.assignments:
+        scope = perf_id.scope_id
+        num = perf_id.number
+        source = srcs.get(scope)
+        if source is None or num >= len(source.performances):
+            plan.rejected.append(f"{scope}:{num:02d} - performance not loaded")
+            continue
+        record = source.performances[num]
+        name = dumps.record_name(record)
+        parts = [p for p in rec.performance_parts(record) if p.used]
+
+        # localized unique patches
+        local_map: Dict[relations.PatchId, int] = {}
+        unique_patches: List[relations.PatchId] = []
+        for part in parts:
+            if relations.resolve_part_scope(part.bank, scope) != scope:
+                continue
+            pid = relations.PatchId(scope, part.patch)
+            if pid not in local_map:
+                local_map[pid] = len(unique_patches)
+                unique_patches.append(pid)
+
+        missing = False
+        for pid in unique_patches:
+            psrc = srcs.get(pid.scope_id)
+            if psrc is None or pid.number >= len(psrc.patches):
+                plan.rejected.append(
+                    f"{scope}:{num:02d} ({name}) patch "
+                    f"{pid.scope_id}:{pid.number:03d} is not loaded"
+                )
+                missing = True
+                break
+        if missing:
+            continue
+
+        source_bank_number = _source_bank_number(scope)
+
+        # source seq seeds filtered
+        seeds = []
+        for pid in unique_patches:
+            psrc = srcs[pid.scope_id]
+            patch_rec = psrc.patches[pid.number]
+            for dep in deps.patch_dependencies(patch_rec, pid.scope_id):
+                if dep[1] == source_bank_number:
+                    seeds.append(dep)
+        seen_seed = set()
+        uniq_seed = []
+        for s in seeds:
+            if s not in seen_seed:
+                seen_seed.add(s)
+                uniq_seed.append(s)
+        order, chains, unresolved = deps.quoted_closure(srcs, uniq_seed)
+        if unresolved:
+            u = unresolved[0]
+            plan.rejected.append(
+                f"{scope}:{num:02d} ({name}) needs wave sequence "
+                f"{u[2]} from bank {u[1]}, not loaded"
+            )
+            continue
+
+        new_seqs = [key for key in order if key not in plan.sequence_map]
+
+        # sequence slots availability
+        free_seq_left = len(free_seq_slots) - len(used_new_seq_slots)
+        if len(new_seqs) > free_seq_left:
+            plan.rejected.append(
+                f"{scope}:{num:02d} ({name}) needs {len(new_seqs)} "
+                f"wave sequence(s), only {free_seq_left} free"
+            )
+            continue
+        # fresh steps
+        fresh = 0
+        seen_fresh: Set[Tuple[deps.SequenceKey, int]] = set()
+        for key in new_seqs:
+            for step in chains[key].steps:
+                if step in pinned_steps:
+                    continue
+                tag = (key, step)
+                if tag in seen_fresh:
+                    continue
+                seen_fresh.add(tag)
+                fresh += 1
+        free_steps_left = (budget.steps - len(pinned_steps)) - new_steps_count
+        if fresh > free_steps_left:
+            plan.rejected.append(
+                f"{scope}:{num:02d} ({name}) needs {fresh} "
+                f"more step(s); only {free_steps_left} free"
+            )
+            continue
+
+        # tentative seq slot map
+        seq_slot_map = dict(plan.sequence_map)
+        avail_seq_slots = [s for s in free_seq_slots if s not in used_new_seq_slots]
+        for i, key in enumerate(new_seqs):
+            seq_slot_map[key] = avail_seq_slots[i]
+
+        # patch bytes
+        pid_to_slot: Dict[relations.PatchId, int] = {}
+        allocated: List[Tuple[relations.PatchId, int]] = []
+        needed_new_patches = 0
+        part_patch_slots: Dict[int, int] = {}
+        # first determine reuse/new for each unique patch
+        patch_slot_for_pid: Dict[relations.PatchId, int] = {}
+        new_patch_bytes_list: List[Tuple[relations.PatchId, bytes]] = []
+        for pid in unique_patches:
+            psrc = srcs[pid.scope_id]
+            src_bytes = psrc.patches[pid.number]
+            record_b = bytearray(src_bytes)
+            for wave in rec.patch_waves(record_b):
+                if not wave.is_sequence:
+                    continue
+                if wave.bank != source_bank_number:
+                    continue
+                key = (pid.scope_id, wave.bank, wave.wave)
+                if key in seq_slot_map:
+                    rec.set_patch_wave(
+                        record_b, wave.index, bank=dest.number, wave=seq_slot_map[key]
+                    )
+            dest_bytes = bytes(record_b)
+            if dest_bytes in patch_bytes_to_slot:
+                patch_slot_for_pid[pid] = patch_bytes_to_slot[dest_bytes]
+            else:
+                needed_new_patches += 1
+                new_patch_bytes_list.append((pid, dest_bytes))
+
+        free_patch_left = len(free_patch_slots) - len(used_new_patch_slots)
+        if needed_new_patches > free_patch_left:
+            plan.rejected.append(
+                f"{scope}:{num:02d} ({name}) needs {needed_new_patches} "
+                f"patch slot(s), only {free_patch_left} free"
+            )
+            continue
+        # performance budget
+        if len(plan.allocations) + 1 > budget.performances:
+            plan.rejected.append(f"{scope}:{num:02d} ({name}) no performance slot left")
+            continue
+
+        # commit sequences
+        for i, key in enumerate(new_seqs):
+            plan.sequence_map[key] = avail_seq_slots[i]
+            used_new_seq_slots.add(avail_seq_slots[i])
+        new_steps_count += fresh
+
+        # commit patches
+        avail_patch_slots = [
+            s for s in free_patch_slots if s not in used_new_patch_slots
+        ]
+        pi = 0
+        for pid in unique_patches:
+            psrc = srcs[pid.scope_id]
+            src_bytes = psrc.patches[pid.number]
+            record_b = bytearray(src_bytes)
+            for wave in rec.patch_waves(record_b):
+                if not wave.is_sequence:
+                    continue
+                if wave.bank != source_bank_number:
+                    continue
+                key = (pid.scope_id, wave.bank, wave.wave)
+                if key in seq_slot_map:
+                    rec.set_patch_wave(
+                        record_b, wave.index, bank=dest.number, wave=seq_slot_map[key]
+                    )
+            dest_bytes = bytes(record_b)
+            if dest_bytes in patch_bytes_to_slot:
+                slot_p = patch_bytes_to_slot[dest_bytes]
+            else:
+                slot_p = avail_patch_slots[pi]
+                pi += 1
+                patch_bytes_to_slot[dest_bytes] = slot_p
+                used_new_patch_slots.add(slot_p)
+                new_patch_slots_used.add(slot_p)
+            patch_slot_for_pid[pid] = slot_p
+            allocated.append((pid, slot_p))
+
+        for pid in unique_patches:
+            pid_to_slot[pid] = patch_slot_for_pid[pid]
+
+        for part in parts:
+            if not part.used:
+                continue
+            if relations.resolve_part_scope(part.bank, scope) != scope:
+                continue
+            pid = relations.PatchId(scope, part.patch)
+            part_patch_slots[part.index] = pid_to_slot[pid]
+
+        alloc = AtomicPerfAllocation(
+            request_index=len(plan.allocations),
+            source_perf=perf_id,
+            target_perf_slot=slot,
+            name=name,
+            part_patch_slots=part_patch_slots,
+            allocated_patches=tuple(allocated),
+        )
+        plan.allocations.append(alloc)
+
+    # totals
+    all_new_patch_slots = set()
+    for alloc in plan.allocations:
+        for item in alloc.allocated_patches:
+            all_new_patch_slots.add(item[1])
+    plan.patch_count = len(pinned_patches | all_new_patch_slots)
+    plan.sequence_count = len(pinned_seqs | set(plan.sequence_map.values()))
+    plan.steps_used = len(pinned_steps) + new_steps_count
+    return plan
+
+
+def build_slot_import(  # noqa: C901
+    sources: Mapping[str, deps.Source],
+    made: SlotImportPlan,
+) -> SlotImportBuilt:
+    srcs = dict(sources)
+    scope = _find_target_scope(srcs, made.destination_bank)
+    if scope is None:
+        raise ValueError("destination bank is not loaded")
+    target_src = srcs[scope]
+    if (
+        len(target_src.performances) != banks.PERFORMANCES_PER_BANK
+        or len(target_src.patches) != banks.PATCHES_PER_BANK
+    ):
+        raise ValueError("destination bank is not loaded")
+
+    if not made.fits:
+        raise ValueError("plan does not fit")
+
+    assigned_slots = {slot for slot, _ in made.assignments}
+    (_pinned_patches, _pinned_patch_bytes, pinned_seqs, pinned_steps, _) = (
+        _compute_pinned(srcs, scope, made.destination_bank, target_src, assigned_slots)
+    )
+
+    template_performances = b"".join(target_src.performances)
+    template_patches = b"".join(target_src.patches)
+    template_waveseq = target_src.waveseq
+
+    performances = bytearray(template_performances)
+    patches = bytearray(template_patches)
+
+    waveseq: Optional[bytearray]
+    if made.sequence_map:
+        if template_waveseq is None:
+            template_waveseq = bytes(rec.WAVESEQ_BANK_SIZE)
+        waveseq = bytearray(template_waveseq)
+    elif template_waveseq is not None:
+        waveseq = bytearray(template_waveseq)
+    else:
+        waveseq = None
+
+    # Wave sequences (new only)
+    if waveseq is not None and made.sequence_map:
+        free_steps_sorted = [
+            s for s in range(1, rec.STEPS_PER_BANK) if s not in pinned_steps
+        ]
+        used_step_numbers: Set[int] = set()
+        step_cursor = 0
+        moved: Dict[Tuple[deps.SequenceKey, int], int] = {}
+        for key, slot in sorted(made.sequence_map.items(), key=lambda kv: kv[1]):
+            holder = srcs[key[0]]
+            if holder.waveseq is None:
+                raise ValueError(f"{key[0]} has no wave sequence bank")
+            chain = deps.walk_sequence(holder.waveseq, key[2], bank_id=key[0])
+            for old in chain.steps:
+                tag = (key, old)
+                if tag in moved:
+                    continue
+                while (
+                    step_cursor < len(free_steps_sorted)
+                    and free_steps_sorted[step_cursor] in used_step_numbers
+                ):
+                    step_cursor += 1
+                if step_cursor >= len(free_steps_sorted):
+                    raise ValueError("no free step")
+                new_step = free_steps_sorted[step_cursor]
+                used_step_numbers.add(new_step)
+                moved[tag] = new_step
+                at_new = rec.STEP_BASE + new_step * rec.STEP_SIZE
+                at_old = rec.STEP_BASE + old * rec.STEP_SIZE
+                waveseq[at_new : at_new + rec.STEP_SIZE] = holder.waveseq[
+                    at_old : at_old + rec.STEP_SIZE
+                ]
+                step_cursor += 1
+            for old in chain.steps:
+                info = rec.step(holder.waveseq, old)
+                rec.set_step_links(
+                    waveseq,
+                    moved[(key, old)],
+                    forward=moved.get((key, info["forward"]), 0),
+                    back=moved.get((key, info["back"]), 0),
+                    loop=moved.get((key, info["loop"]), 0),
+                )
+                if info["wave"] < rec.ROM_WAVE_BASE:
+                    quoted = (key[0], key[1], info["wave"])
+                    if quoted not in made.sequence_map:
+                        raise ValueError(
+                            f"{key[0]} sequence {key[2]} quotes "
+                            f"sequence {info['wave']}, not carried"
+                        )
+                    rec.set_step_wave(
+                        waveseq, moved[(key, old)], made.sequence_map[quoted]
+                    )
+            head = rec.SEQ_BASE + slot * rec.SEQ_SIZE
+            old_head = rec.SEQ_BASE + key[2] * rec.SEQ_SIZE
+            waveseq[head : head + rec.SEQ_SIZE] = holder.waveseq[
+                old_head : old_head + rec.SEQ_SIZE
+            ]
+            first = rec.sequence_header(holder.waveseq, key[2])["link"]
+            waveseq[head] = (moved.get((key, first), 0) >> 8) & 0xFF
+            waveseq[head + 1] = moved.get((key, first), 0) & 0xFF
+            name_at = rec.SEQNAME_BASE + slot * rec.SEQNAME_SIZE
+            old_name = rec.SEQNAME_BASE + key[2] * rec.SEQNAME_SIZE
+            waveseq[name_at : name_at + rec.SEQNAME_SIZE] = holder.waveseq[
+                old_name : old_name + rec.SEQNAME_SIZE
+            ]
+
+        taken_seq_slots = pinned_seqs | set(made.sequence_map.values())
+        for slot in range(rec.SEQUENCES_PER_BANK):
+            if slot in taken_seq_slots:
+                continue
+            head = rec.SEQ_BASE + slot * rec.SEQ_SIZE
+            waveseq[head : head + rec.SEQ_SIZE] = bytes(rec.SEQ_SIZE)
+            name_at = rec.SEQNAME_BASE + slot * rec.SEQNAME_SIZE
+            waveseq[name_at : name_at + rec.SEQNAME_SIZE] = bytes(rec.SEQNAME_SIZE)
+
+    # Patches
+    for alloc in made.allocations:
+        for patch_id, target_slot in alloc.allocated_patches:
+            holder = srcs[patch_id.scope_id]
+            record = bytearray(holder.patches[patch_id.number])
+            source_bank_number = _source_bank_number(patch_id.scope_id)
+            for wave in rec.patch_waves(record):
+                if not wave.is_sequence:
+                    continue
+                if source_bank_number is None or wave.bank != source_bank_number:
+                    continue
+                key = (patch_id.scope_id, wave.bank, wave.wave)
+                if key not in made.sequence_map:
+                    raise ValueError(
+                        f"{patch_id.scope_id} patch {patch_id.number} "
+                        f"uses wave sequence {wave.wave}, not carried"
+                    )
+                rec.set_patch_wave(
+                    record,
+                    wave.index,
+                    bank=made.destination_bank.number,
+                    wave=made.sequence_map[key],
+                )
+            at = target_slot * rec.PATCH_SIZE
+            patches[at : at + rec.PATCH_SIZE] = record
+
+    # Performances
+    for alloc in made.allocations:
+        holder = srcs[alloc.source_perf.scope_id]
+        record = bytearray(holder.performances[alloc.source_perf.number])
+        parts = rec.performance_parts(record)
+        for part in parts:
+            if not part.used:
+                continue
+            if part.index in alloc.part_patch_slots:
+                rec.set_performance_part(
+                    record,
+                    part.index,
+                    bank=made.destination_bank.number,
+                    patch=alloc.part_patch_slots[part.index],
+                )
+        at = alloc.target_perf_slot * rec.PERFORMANCE_SIZE
+        performances[at : at + rec.PERFORMANCE_SIZE] = record
+
+    return SlotImportBuilt(
+        performances=bytes(performances),
+        patches=bytes(patches),
+        waveseq=bytes(waveseq) if waveseq is not None else None,
+        plan=made,
+    )
+
+
+def copy_slots_into_bank(
+    sources: Mapping[str, deps.Source],
+    target_scope: str,
+    assignments: Mapping[int, relations.PerfId],
+    *,
+    destination_bank: Optional[banks.Bank] = None,
+    budget: bankbuild.Budget = _DEFAULT_BUDGET,
+) -> SlotImportBuilt:
+    plan = plan_slot_import(
+        sources,
+        target_scope,
+        assignments,
+        destination_bank=destination_bank,
+        budget=budget,
+    )
+    return build_slot_import(sources, plan)
+
+
+def relocate_bank(source: deps.Source, destination_bank: banks.Bank) -> RelocatedBank:
+    sbn = _source_bank_number(source.bank_id)
+    perf_bytes = bytearray(b"".join(source.performances))
+    if sbn is not None:
+        for i in range(len(source.performances)):
+            at = i * rec.PERFORMANCE_SIZE
+            rec_bytes = bytearray(perf_bytes[at : at + rec.PERFORMANCE_SIZE])
+            for part in rec.performance_parts(rec_bytes):
+                if not part.used:
+                    continue
+                if part.bank == sbn:
+                    rec.set_performance_part(
+                        rec_bytes,
+                        part.index,
+                        bank=destination_bank.number,
+                        patch=part.patch,
+                    )
+            perf_bytes[at : at + rec.PERFORMANCE_SIZE] = rec_bytes
+    patch_bytes = bytearray(b"".join(source.patches))
+    if sbn is not None:
+        for i in range(len(source.patches)):
+            at = i * rec.PATCH_SIZE
+            rec_bytes = bytearray(patch_bytes[at : at + rec.PATCH_SIZE])
+            for wave in rec.patch_waves(rec_bytes):
+                if wave.is_sequence and wave.bank == sbn:
+                    rec.set_patch_wave(
+                        rec_bytes,
+                        wave.index,
+                        bank=destination_bank.number,
+                        wave=wave.wave,
+                    )
+            patch_bytes[at : at + rec.PATCH_SIZE] = rec_bytes
+    return RelocatedBank(
+        performances=bytes(perf_bytes),
+        patches=bytes(patch_bytes),
+        waveseq=source.waveseq,
     )
