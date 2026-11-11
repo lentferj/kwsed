@@ -693,14 +693,19 @@ async def test_p_toggles_patch_mode() -> None:
         host.push_screen_cb(screen)
         await settle(pilot)
         assert screen._share_patches is True
+        # the mode is always visible in the header, not only after toggling
+        header = screen.query_one("#header", Static)
+        assert "patches: shared" in str(header.render())
         await pilot.press("p")
         await settle(pilot)
         assert screen._share_patches is False
         assert "fresh" in screen._status_message.lower()
+        assert "patches: fresh" in str(header.render())
         await pilot.press("p")
         await settle(pilot)
         assert screen._share_patches is True
         assert "shared" in screen._status_message.lower()
+        assert "patches: shared" in str(header.render())
 
 
 @pytest.mark.asyncio

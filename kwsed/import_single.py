@@ -432,7 +432,8 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
             scope = getattr(bank, "scope", "") if bank is not None else ""
             header_text = (
                 f"{self._path}  ·  source: {label} ({scope})  ·  "
-                f"target: {self._target_bank.label}"
+                f"target: {self._target_bank.label}  ·  "
+                f"patches: {'shared' if self._share_patches else 'fresh'}"
             )
             self.query_one(f"#{self.HEADER_ID}", Static).update(header_text)
         with suppress(Exception):
@@ -587,7 +588,8 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
             hint = (
                 "Space assign · type 00-49 + Enter exact slot (inline) · "
                 "u unassign · A all · U clear\n"
-                "s source banks/add · w gate · ctrl+s import · ? help · Esc cancel"
+                "s source banks/add · p patches · w gate · "
+                "ctrl+s import · ? help · Esc cancel"
             )
             yield Static(hint, classes="hint", markup=False)
             yield DataTable(
