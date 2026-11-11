@@ -1539,6 +1539,10 @@ class KwsedApp(App[None]):
     #status {
         height: auto; max-height: 3; background: $boost; color: $text; padding: 0 1;
     }
+    #progress {
+        height: 1; background: $boost; color: $accent; padding: 0 1;
+        display: none;
+    }
     """
 
     BINDINGS = [
@@ -1636,6 +1640,17 @@ class KwsedApp(App[None]):
         self._current_physical: Optional[str] = None
         self._current_physical_kind: Optional[str] = None
         self._lock = threading.RLock()
+        #: Transfer progress for the bar under the status line. The hook is
+        #: installed on the device so a dump crossing the wire has something
+        #: to show, whether the call runs on a worker thread or not.
+        self._progress_label = ""
+        self._progress_value = 0.0
+        self._progress_active = False
+        self._progress_generation = 0
+        try:
+            self.device.progress = self._progress_report
+        except Exception:  # noqa: S110 - decoration, not protocol
+            pass
         #: Whether the bank list also shows patch rows. Patches cannot be
         #: auditioned or copied on their own, so a viewer that only wants
         #: performances can hide them without losing any action. Remembered
@@ -2390,6 +2405,45 @@ class KwsedApp(App[None]):
             destination_bank=destination,
         )
 
+    def _device_worker(self, work: Any, done: Any) -> None:
+        """Run one device operation off the UI thread, then report back.
+
+        Every long SysEx exchange belongs here: a bank dump takes the wire
+        about ten seconds each way, and on the UI thread the bar could not
+        move and the app could not repaint. ``done(result, failure)`` runs
+        on the main thread, so it may touch widgets. Without a running app
+        -- unit tests call these flows directly -- the work runs inline.
+        """
+        if not getattr(self, "is_running", False):
+            failure: BaseException | None = None
+            result: Any = None
+            try:
+                result = work()
+            except BaseException as exc:
+                failure = exc
+            done(result, failure)
+            return
+        self._device_worker_thread(work, done)
+
+    @work(thread=True)
+    def _device_worker_thread(self, work: Any, done: Any) -> None:
+        failure: BaseException | None = None
+        result: Any = None
+        try:
+            if not self._exchange.acquire(blocking=False):
+                raise RuntimeError("busy")
+            try:
+                with self._busy_gate, self._lock:
+                    result = work()
+            finally:
+                self._exchange.release()
+        except BaseException as exc:
+            failure = exc
+        try:
+            self.call_from_thread(done, result, failure)
+        except Exception:  # noqa: S110 - the app may be shutting down
+            pass
+
     @work(thread=True)
     def _copy_perf_write_worker(
         self,
@@ -2684,6 +2738,7 @@ class KwsedApp(App[None]):
                 yield Static("", id="deps-pane-body")
         yield Static("", id="detail")
         yield Static("", id="status")
+        yield Static("", id="progress")
         # The library's widget takes the blocks; the local one read this
         # module's KEY_HINTS global, which a library cannot do.
         yield KeyHints(KEY_HINTS)
@@ -3628,12 +3683,14 @@ class KwsedApp(App[None]):
 
         target = _banks.bank(choice.target_bank)
         sources = self._sources_with_store()
-        target_source = sources.get(target.id)
-        if target_source is None:
-            target_source = self._read_source_offline(target.id)
-        relocated = perfcopy.relocate_bank(bank.source, target)
-        before = self._before_blocks(target_source, target)
-        try:
+        label = getattr(bank, "label", "")
+
+        def work() -> Any:
+            target_source = sources.get(target.id)
+            if target_source is None:
+                target_source = self._read_source_offline(target.id)
+            relocated = perfcopy.relocate_bank(bank.source, target)
+            before = self._before_blocks(target_source, target)
             result = self.device.write_bank_bundle(
                 target.number,
                 performances=relocated.performances,
@@ -3642,12 +3699,24 @@ class KwsedApp(App[None]):
                 backup_dir=_backup.default_dir(),
                 before_blocks=before if before else None,
             )
-        except Exception as exc:
-            self.notify_status(f"import: {exc}", refused=True)
-            return
+            return relocated, result
+
+        def done(result: Any, failure: BaseException | None) -> None:
+            if failure is not None:
+                self.notify_status(f"import: {failure}", refused=True)
+                return
+            relocated, write_result = result
+            self._import_whole_bank_written(label, target, relocated, write_result)
+
+        self.notify_status(f"writing {label} into {target.label}...")
+        self._device_worker(work, done)
+
+    def _import_whole_bank_written(
+        self, label: str, target: Any, relocated: Any, result: Any
+    ) -> None:
+        """Book-keeping after a whole-bank import has landed."""
         if hasattr(self, "_record_write"):
             self._record_write(result)
-        # update sources
         perfs = [
             relocated.performances[
                 i * rec.PERFORMANCE_SIZE : (i + 1) * rec.PERFORMANCE_SIZE
@@ -3678,7 +3747,7 @@ class KwsedApp(App[None]):
                 pass
         self._refresh_written_bank(target.id, relocated)
         self.notify_status(
-            f"imported {bank.label} into {target.label}: {len(perfs)} performances"
+            f"imported {label} into {target.label}: {len(perfs)} performances"
         )
 
     def _complete_source_file(self, path: str, bank: Any) -> tuple[Any, str]:
@@ -3893,6 +3962,35 @@ class KwsedApp(App[None]):
         screen.set_status(msg)
         self.notify_status(msg, refused=True)
 
+    def _audition_staging_areas(
+        self, screen: Any, fresh: Any
+    ) -> Optional[Tuple[Any, Any]]:
+        """The configured staging areas, or a refusal already shown."""
+        from kws import config as _cfg
+
+        perf_area = _cfg.load_preaudit_target(self._config_path)
+        patch_area = _cfg.load_preaudit_patch_area(self._config_path)
+        if perf_area is None or patch_area is None:
+            self._refuse_audition(
+                screen,
+                "pre-audit staging not configured (see README: "
+                "preaudit_target_perf / preaudit_target_patches)",
+            )
+            return None
+        if len(fresh) > len(patch_area[1]):
+            self._refuse_audition(
+                screen,
+                f"staging patch area too small: {len(fresh)} needed, "
+                f"{len(patch_area[1])} configured",
+            )
+            return None
+        if not self._write_gate.armed:
+            self._refuse_audition(
+                screen, "write gate locked (press w) — staging writes need it"
+            )
+            return None
+        return perf_area, patch_area
+
     def _audition_staged(
         self,
         screen: Any,
@@ -3918,29 +4016,10 @@ class KwsedApp(App[None]):
         already in the target bank, and the auditioned record points at
         them there.
         """
-        from kws import config as _cfg
-
-        perf_area = _cfg.load_preaudit_target(self._config_path)
-        patch_area = _cfg.load_preaudit_patch_area(self._config_path)
-        if perf_area is None or patch_area is None:
-            self._refuse_audition(
-                screen,
-                "pre-audit staging not configured (see README: "
-                "preaudit_target_perf / preaudit_target_patches)",
-            )
+        areas = self._audition_staging_areas(screen, fresh)
+        if areas is None:
             return
-        if len(fresh) > len(patch_area[1]):
-            self._refuse_audition(
-                screen,
-                f"staging patch area too small: {len(fresh)} needed, "
-                f"{len(patch_area[1])} configured",
-            )
-            return
-        if not self._write_gate.armed:
-            self._refuse_audition(
-                screen, "write gate locked (press w) — staging writes need it"
-            )
-            return
+        perf_area, patch_area = areas
         planned_to_staging = {
             planned_slot: staging_slot
             for (_pid, planned_slot), staging_slot in zip(fresh, patch_area[1])
@@ -3951,9 +4030,36 @@ class KwsedApp(App[None]):
                 slot_override[idx] = planned_to_staging[s]
         try:
             built = perfcopy.build_slot_import(sources, plan)
-            undo_entries, seq_note = self._stage_banks(
-                screen, plan, built, fresh, patch_area, target_bank
+            record = perfcopy.planned_performance_record(
+                sources,
+                allocation,
+                target_bank,
+                slot_override=slot_override,
+                bank_override=patch_area[0].number,
             )
+        except Exception as exc:
+            msg = f"audition failed: {exc}"
+            screen.set_status(msg)
+            self.notify_status(msg, refused=True)
+            return
+        target_source = getattr(screen, "_target_source", None)
+        stage_bank = patch_area[0].number
+        buffer_slot = perf_area[1]
+
+        def work() -> Any:
+            undo_entries, seq_note = self._stage_banks(
+                target_source, plan, built, fresh, patch_area, target_bank
+            )
+            self.device.send_performance_to_buffer(stage_bank, buffer_slot, record)
+            return undo_entries, seq_note
+
+        def done(result: Any, failure: BaseException | None) -> None:
+            if failure is not None:
+                msg = f"audition failed: {failure}"
+                screen.set_status(msg)
+                self.notify_status(msg, refused=True)
+                return
+            undo_entries, seq_note = result
             if undo_entries:
                 # The staging is destructive, so it is one undo record: `z`
                 # puts both banks back the way they were.
@@ -3963,27 +4069,16 @@ class KwsedApp(App[None]):
                         payload={"backups": undo_entries},
                     )
                 )
-            record = perfcopy.planned_performance_record(
-                sources,
-                allocation,
-                target_bank,
-                slot_override=slot_override,
-                bank_override=patch_area[0].number,
-            )
-            self.device.send_performance_to_buffer(
-                patch_area[0].number, perf_area[1], record
-            )
             msg = self._staging_message(fresh, patch_area, undo_entries, seq_note)
             screen.set_status(msg)
             self.notify_status(msg)
-        except Exception as exc:
-            msg = f"audition failed: {exc}"
-            screen.set_status(msg)
-            self.notify_status(msg, refused=True)
+
+        self.notify_status("staging the audition...")
+        self._device_worker(work, done)
 
     def _stage_banks(
         self,
-        screen: Any,
+        target_source: Any,
         plan: Any,
         built: Any,
         fresh: Any,
@@ -3995,11 +4090,11 @@ class KwsedApp(App[None]):
         Returns the undo entries, one per bank written, and the sentence
         fragment that names the sequences in the status line.
         """
-        undo_entries = self._stage_patches(screen, built, fresh, patch_area)
+        undo_entries = self._stage_patches(target_source, built, fresh, patch_area)
         seq_note = ""
         if plan.sequence_map and built.waveseq is not None:
             undo_entries += self._stage_one_bank(
-                screen, target_bank, "waveseq", bytes(built.waveseq)
+                target_source, target_bank, "waveseq", bytes(built.waveseq)
             )
             seq_note = (
                 f" and staged {len(plan.sequence_map)} wave sequence(s) "
@@ -4008,7 +4103,7 @@ class KwsedApp(App[None]):
         return undo_entries, seq_note
 
     def _stage_patches(
-        self, screen: Any, built: Any, fresh: Any, patch_area: Any
+        self, target_source: Any, built: Any, fresh: Any, patch_area: Any
     ) -> list[dict[str, Any]]:
         """Stage the fresh copies one patch at a time, verifying each.
 
@@ -4045,11 +4140,11 @@ class KwsedApp(App[None]):
                 )
             except Exception:
                 return self._stage_patches_as_bank(
-                    screen, built, fresh, patch_area, captured
+                    target_source, built, fresh, patch_area, captured
                 )
             if result.get("verified") is False or result.get("status") == "write error":
                 return self._stage_patches_as_bank(
-                    screen, built, fresh, patch_area, captured
+                    target_source, built, fresh, patch_area, captured
                 )
             entries.append(
                 {
@@ -4069,7 +4164,12 @@ class KwsedApp(App[None]):
         return entries
 
     def _stage_patches_as_bank(
-        self, screen: Any, built: Any, fresh: Any, patch_area: Any, captured: Any
+        self,
+        target_source: Any,
+        built: Any,
+        fresh: Any,
+        patch_area: Any,
+        captured: Any,
     ) -> list[dict[str, Any]]:
         """Stage the fresh copies as one whole patch bank.
 
@@ -4100,12 +4200,12 @@ class KwsedApp(App[None]):
             ],
         )
         return self._stage_one_bank(
-            screen, patch_area[0], "patches", bytes(staged_bank), source
+            target_source, patch_area[0], "patches", bytes(staged_bank), source
         )
 
     def _stage_one_bank(
         self,
-        screen: Any,
+        target_source: Any,
         bank: Any,
         kind: str,
         data: bytes,
@@ -4119,7 +4219,7 @@ class KwsedApp(App[None]):
         """
         from kws import backup as _backup
 
-        holder = screen._target_source if source is None else source
+        holder = target_source if source is None else source
         before = self._before_blocks(holder, bank)
         before_blocks = {kind: before[kind]} if kind in before else None
         if kind == "patches":
@@ -4405,8 +4505,9 @@ class KwsedApp(App[None]):
             if target_source is not None
             else {}
         )
-        try:
-            result = self.device.write_bank_bundle(
+
+        def work() -> Any:
+            return self.device.write_bank_bundle(
                 target_bank.number,
                 performances=built.performances,
                 patches=built.patches,
@@ -4414,9 +4515,20 @@ class KwsedApp(App[None]):
                 backup_dir=_backup.default_dir(),
                 before_blocks=before if before else None,
             )
-        except Exception as exc:
-            self.notify_status(f"import: {exc}", refused=True)
-            return
+
+        def done(result: Any, failure: BaseException | None) -> None:
+            if failure is not None:
+                self.notify_status(f"import: {failure}", refused=True)
+                return
+            self._import_single_written(built, target_scope, target_bank, result)
+
+        self.notify_status(f"writing the import into {target_bank.label}...")
+        self._device_worker(work, done)
+
+    def _import_single_written(
+        self, built: Any, target_scope: str, target_bank: Any, result: Any
+    ) -> None:
+        """Book-keeping after a single import has landed."""
         if hasattr(self, "_record_write"):
             self._record_write(result)
         new_source = self._source_from_built(target_scope, built)
@@ -5598,6 +5710,77 @@ class KwsedApp(App[None]):
     def notify_status(self, message: str, *, refused: bool = False) -> None:
         prefix = "[b]refused[/b] · " if refused else ""
         self.query_one("#status", Static).update(prefix + message)
+
+    # --- transfer progress --------------------------------------------------
+
+    def _progress_report(self, label: str, fraction: Optional[float]) -> None:
+        """Take one transfer event from the device, from any thread.
+
+        The bridge calls this while a dump is on the wire. ``fraction`` is
+        None when the transfer is over, however it ended.
+        """
+        if threading.current_thread() is threading.main_thread():
+            self._progress_apply(label, fraction)
+            return
+        try:
+            self.call_from_thread(self._progress_apply, label, fraction)
+        except Exception:  # noqa: S110 - the app may be shutting down
+            pass
+
+    def _progress_apply(self, label: str, fraction: Optional[float]) -> None:
+        if fraction is None:
+            self._progress_finish()
+            return
+        if not self._progress_active:
+            self._progress_active = True
+            self._progress_generation += 1
+        if label and label != self._progress_label:
+            self._progress_label = label
+            self._progress_value = 0.0
+        self._progress_value = max(
+            self._progress_value, min(1.0, max(0.0, float(fraction)))
+        )
+        self._progress_paint()
+
+    def _progress_finish(self) -> None:
+        if not self._progress_active:
+            return
+        self._progress_value = 1.0
+        self._progress_paint()
+        generation = self._progress_generation
+        self.set_timer(0.4, lambda: self._progress_hide(generation))
+
+    def _progress_hide(self, generation: int) -> None:
+        if generation != self._progress_generation:
+            return
+        self._progress_active = False
+        self._progress_label = ""
+        self._progress_value = 0.0
+        self._progress_paint()
+
+    def _progress_paint(self) -> None:
+        text = self._progress_text()
+        screen = self.screen
+        setter = getattr(screen, "set_progress", None)
+        if callable(setter):
+            setter(text)
+            return
+        try:
+            widget = self.query_one("#progress", Static)
+        except Exception:
+            return
+        widget.update(text)
+        widget.display = bool(text)
+
+    def _progress_text(self) -> str:
+        if not self._progress_active:
+            return ""
+        width = 22
+        filled = round(width * self._progress_value)
+        bar = "█" * filled + "░" * (width - filled)
+        percent = f"{self._progress_value * 100:3.0f}%"
+        label = self._progress_label or "working"
+        return f"{bar} {percent}  {label}"
 
     # --- navigation ---------------------------------------------------------
 

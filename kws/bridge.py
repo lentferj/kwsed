@@ -48,6 +48,7 @@ silent and permanent.
 
 from __future__ import annotations
 
+import contextlib
 import re
 import signal
 import sys
@@ -135,6 +136,27 @@ _DUMP_FOR_KIND = {
     banks.Kind.PERFORMANCE: m.Function.ALL_PERFORMANCE_DUMP,
     banks.Kind.PATCH: m.Function.ALL_PATCH_DUMP,
 }
+
+#: Rough wire bytes per dump, for the progress estimate. Every record byte
+#: travels as two bytes (nibble encoded), so this is the payload size twice.
+_WIRE_BYTES = {
+    banks.Kind.PATCH: banks.PATCHES_PER_BANK * records.PATCH_SIZE * 2,
+    banks.Kind.PERFORMANCE: banks.PERFORMANCES_PER_BANK * records.PERFORMANCE_SIZE * 2,
+    "waveseq": records.WAVESEQ_BANK_SIZE * 2,
+}
+
+
+_FUNCTION_WIRE_BYTES = {
+    m.Function.ALL_PATCH_DUMP: _WIRE_BYTES[banks.Kind.PATCH],
+    m.Function.ALL_PERFORMANCE_DUMP: _WIRE_BYTES[banks.Kind.PERFORMANCE],
+    m.Function.ALL_WAVESEQ_DUMP: _WIRE_BYTES["waveseq"],
+}
+
+
+def _wire_estimate(total: int) -> float:
+    """How long ``total`` wire bytes take, plus a moment to process."""
+    return total / alsa.Sender.BYTES_PER_SECOND + 0.8
+
 
 #: The three kinds a copied performance drags along, with the dump each one
 #: is written and read back as. A bundle names them in this order for the
@@ -255,7 +277,62 @@ class WavestationBridge:
         #: it, and None for the test doubles that build one directly.
         self.port: Optional[str] = None
         self.recv_port: Optional[str] = None
+        #: ``progress(label, fraction)`` while a transfer runs; ``None`` as
+        #: the fraction means it is over. Set by the TUI so a ten-second
+        #: bank dump has something to show besides a blank status line.
+        self.progress: Optional[Callable[[str, Optional[float]], None]] = None
+        self._progress_label = ""
+        self._progress_fraction = 0.0
         self._in.ignore_types(sysex=False, timing=True, active_sense=True)
+
+    def _report(self, fraction: Optional[float]) -> None:
+        """Tell the progress hook where a transfer is, if anyone listens.
+
+        A UI callback that raises must not turn into a failed write, so its
+        exceptions are swallowed: this is decoration, not protocol.
+        """
+        hook = self.progress
+        if hook is None:
+            return
+        if fraction is not None and 0.0 < fraction < 1.0:
+            # A read loop asks every few milliseconds; one-percent steps keep
+            # that from becoming a message storm on the UI's queue. The
+            # first announcement (0.0) always goes out.
+            if (
+                self._progress_fraction > 0.0
+                and fraction - self._progress_fraction < 0.01
+            ):
+                return
+            self._progress_fraction = fraction
+        try:
+            hook(self._progress_label, fraction)
+        except Exception:
+            pass
+
+    @contextlib.contextmanager
+    def _progress_scope(self, label: str, estimate: Optional[float] = None) -> "Any":
+        """Announce a transfer, and always announce its end.
+
+        ``estimate`` is the expected duration in seconds, used by the read
+        loops to move the bar while they wait for a message that arrives
+        whole and only at the end.
+        """
+        previous = self._progress_label
+        self._progress_label = label
+        self._progress_fraction = 0.0
+        self._report(0.0)
+        try:
+            yield estimate
+        finally:
+            self._report(None)
+            self._progress_label = previous
+            self._progress_fraction = 0.0
+
+    def _estimate_progress(self, started: float, estimate: Optional[float]) -> None:
+        if not estimate:
+            return
+        elapsed = time.monotonic() - started
+        self._report(min(0.95, elapsed / estimate))
 
     @classmethod
     def open(
@@ -329,7 +406,10 @@ class WavestationBridge:
             if address is not None:
                 sender = alsa.Sender(*address, name=b"kwsed")
                 try:
-                    sender.send(data)
+                    sender.send(
+                        data,
+                        progress=lambda sent, total: self._report(sent / total),
+                    )
                 finally:
                     sender.close()
                 time.sleep(SEND_GAP)
@@ -552,49 +632,56 @@ class WavestationBridge:
                 ) from None
             wanted = (dump_function,)
             request = m.bank_request(entry.sysex, dump_function, self.channel)
-        self._drain()
-        self._send(request)
-        deadline = time.time() + (DUMP_TIMEOUT if timeout is None else timeout)
-        while time.time() < deadline:
-            message = self._in.get_message()
-            if message is None:
-                time.sleep(0.003)
-                continue
-            packet = m.parse(message[0])
-            if packet is None or packet.channel != self.channel:
-                continue
-            if packet.is_error:
-                raise DeviceRefused(packet.function)
-            if packet.function not in wanted:
-                continue
-            # The bank the reply describes, not merely that it is a dump.
-            # A late answer to a request that already timed out is
-            # otherwise indistinguishable from this one's, and the caller
-            # files these names under the bank it asked for -- which is how
-            # a read came back holding another bank's contents. read_patch
-            # guards the same way.
-            if packet.bank is not None and packet.bank != entry.sysex:
-                continue
-            return dumps.parse_bulk(packet)
-        # The Card is the one bank the instrument only answers when the
-        # hardware is there: with no Program Card in the slot the request is
-        # simply not served, which looks identical to every other silence.
-        # Lead with that cause rather than a list of cable faults.
-        card_hint = ""
-        if entry.id == "CARD":
-            card_hint = (
-                " The Card bank only answers when a Program Card is in the "
-                "slot, so an empty slot (or an HCard that is not seated) is "
-                "the first thing to check."
+        kind_key = kind if kind is not None else banks.Kind.PATCH
+        wire = _WIRE_BYTES.get(kind_key, _WIRE_BYTES[banks.Kind.PATCH])
+        with self._progress_scope(
+            f"receiving {entry.label} {kind_key}s", _wire_estimate(wire)
+        ) as estimate:
+            started = time.monotonic()
+            self._drain()
+            self._send(request)
+            deadline = time.time() + (DUMP_TIMEOUT if timeout is None else timeout)
+            while time.time() < deadline:
+                message = self._in.get_message()
+                if message is None:
+                    self._estimate_progress(started, estimate)
+                    time.sleep(0.003)
+                    continue
+                packet = m.parse(message[0])
+                if packet is None or packet.channel != self.channel:
+                    continue
+                if packet.is_error:
+                    raise DeviceRefused(packet.function)
+                if packet.function not in wanted:
+                    continue
+                # The bank the reply describes, not merely that it is a dump.
+                # A late answer to a request that already timed out is
+                # otherwise indistinguishable from this one's, and the caller
+                # files these names under the bank it asked for -- which is how
+                # a read came back holding another bank's contents. read_patch
+                # guards the same way.
+                if packet.bank is not None and packet.bank != entry.sysex:
+                    continue
+                return dumps.parse_bulk(packet)
+            # The Card is the one bank the instrument only answers when the
+            # hardware is there: with no Program Card in the slot the request is
+            # simply not served, which looks identical to every other silence.
+            # Lead with that cause rather than a list of cable faults.
+            card_hint = ""
+            if entry.id == "CARD":
+                card_hint = (
+                    " The Card bank only answers when a Program Card is in the "
+                    "slot, so an empty slot (or an HCard that is not seated) is "
+                    "the first thing to check."
+                )
+            raise TimeoutError(
+                f"no dump came back for {entry.label}.{card_hint} The unit did "
+                f"not refuse it either, so this otherwise means one of: powered "
+                f"off, wrong port, wrong global channel (kwsed is using "
+                f"{self.channel + 1}), System Exclusive reception disabled, or an "
+                f"interface that cannot carry a message this long -- a patch bank "
+                f"is nearly 30 kB."
             )
-        raise TimeoutError(
-            f"no dump came back for {entry.label}.{card_hint} The unit did "
-            f"not refuse it either, so this otherwise means one of: powered "
-            f"off, wrong port, wrong global channel (kwsed is using "
-            f"{self.channel + 1}), System Exclusive reception disabled, or an "
-            f"interface that cannot carry a message this long -- a patch bank "
-            f"is nearly 30 kB."
-        )
 
     def read_patch(
         self, bank: int | str, number: int, *, timeout: Optional[float] = None
@@ -1273,8 +1360,10 @@ class WavestationBridge:
         )
 
         # --- 3. send -------------------------------------------------------
-        self._drain()
-        self._send(m.frame_bulk(function, entry.sysex, data, channel=self.channel))
+        frame = m.frame_bulk(function, entry.sysex, data, channel=self.channel)
+        with self._progress_scope(f"writing {entry.label} {kind}"):
+            self._drain()
+            self._send(frame)
 
         result: Dict[str, Any] = {
             "bank": entry.label,
@@ -1461,7 +1550,8 @@ class WavestationBridge:
                 channel=self.channel,
             )
             sent[kind] = frame
-            self._send(frame)
+            with self._progress_scope(f"writing {entry.label} {kind}"):
+                self._send(frame)
 
         result = {
             "bank": entry.label,
@@ -1499,32 +1589,37 @@ class WavestationBridge:
         self, bank_number: int, function: int, *, timeout: Optional[float] = None
     ) -> bytes:
         """One bank dump of a given kind, as the bytes that arrived."""
-        self._drain()
-        self._send(m.bank_request(bank_number, function, self.channel))
-        deadline = time.time() + (DUMP_TIMEOUT if timeout is None else timeout)
-        while time.time() < deadline:
-            message = self._in.get_message()
-            if message is None:
-                time.sleep(0.003)
-                continue
-            packet = m.parse(message[0])
-            if packet is None or packet.channel != self.channel:
-                continue
-            if packet.is_error:
-                raise DeviceRefused(packet.function)
-            if packet.function != function:
-                continue
-            # Same guard as read_bank: the reply must describe the bank
-            # that was asked for. This one feeds the write fence's backup
-            # and its read-back comparison, so a dump from the wrong bank
-            # here would back up the wrong slot and then "verify" a write
-            # against it.
-            if packet.bank is not None and packet.bank != bank_number:
-                continue
-            return bytes(message[0])
-        raise TimeoutError(
-            f"no {m.Function.name(function)} came back for bank {bank_number}"
-        )
+        wire = _FUNCTION_WIRE_BYTES.get(function, 8000)
+        label = f"receiving bank {bank_number} {m.Function.name(function)}"
+        with self._progress_scope(label, _wire_estimate(wire)) as estimate:
+            started = time.monotonic()
+            self._drain()
+            self._send(m.bank_request(bank_number, function, self.channel))
+            deadline = time.time() + (DUMP_TIMEOUT if timeout is None else timeout)
+            while time.time() < deadline:
+                message = self._in.get_message()
+                if message is None:
+                    self._estimate_progress(started, estimate)
+                    time.sleep(0.003)
+                    continue
+                packet = m.parse(message[0])
+                if packet is None or packet.channel != self.channel:
+                    continue
+                if packet.is_error:
+                    raise DeviceRefused(packet.function)
+                if packet.function != function:
+                    continue
+                # Same guard as read_bank: the reply must describe the bank
+                # that was asked for. This one feeds the write fence's backup
+                # and its read-back comparison, so a dump from the wrong bank
+                # here would back up the wrong slot and then "verify" a write
+                # against it.
+                if packet.bank is not None and packet.bank != bank_number:
+                    continue
+                return bytes(message[0])
+            raise TimeoutError(
+                f"no {m.Function.name(function)} came back for bank {bank_number}"
+            )
 
 
 def _first_difference(sent: bytes, got: bytes) -> str:

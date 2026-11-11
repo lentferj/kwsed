@@ -37,6 +37,8 @@ Two things about the double that are easy to get wrong, and were:
   to produce it in response to the request.
 """
 
+from typing import Any
+
 import pytest
 
 from kws import backup, banks
@@ -487,6 +489,48 @@ class TestSendPerformanceToBuffer:
         )
         assert result["verified"] is None
         assert result["mismatch"] is None
+
+
+class TestTransferProgress:
+    """The bar under the status line is fed from here."""
+
+    def test_a_scope_announces_start_a_change_and_the_end(self):
+        unit = Unit()
+        events: list[tuple[str, Any]] = []
+        unit.bridge.progress = lambda label, fraction: events.append((label, fraction))
+        with unit.bridge._progress_scope("writing RAM 2 patches"):
+            unit.bridge._report(0.5)
+        assert events[0] == ("writing RAM 2 patches", 0.0)
+        assert ("writing RAM 2 patches", 0.5) in events
+        assert events[-1] == ("writing RAM 2 patches", None)
+
+    def test_a_sub_percent_change_is_not_reported(self):
+        unit = Unit()
+        events: list[Any] = []
+        unit.bridge.progress = lambda label, fraction: events.append(fraction)
+        with unit.bridge._progress_scope("x"):
+            unit.bridge._report(0.5)
+            unit.bridge._report(0.502)
+        assert events == [0.0, 0.5, None]
+
+    def test_a_bank_write_announces_itself(self, tmp_path):
+        unit = Unit()
+        events: list[tuple[str, Any]] = []
+        unit.bridge.progress = lambda label, fraction: events.append((label, fraction))
+        before = m.frame_bulk(
+            m.Function.ALL_PATCH_DUMP, banks.bank("CARD").sysex, PATCH_BANK, channel=0
+        )
+        fresh = bytearray(PATCH_BANK)
+        fresh[0:6] = b"Fresh!"
+        unit.bridge.write_bank_bundle(
+            "CARD",
+            patches=bytes(fresh),
+            backup_dir=str(tmp_path),
+            verify=False,
+            before_blocks={"patches": before},
+        )
+        assert any("writing" in label for label, _ in events)
+        assert events[-1][1] is None
 
 
 class TestReadMulti:

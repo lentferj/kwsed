@@ -151,6 +151,7 @@ async def test_t_auditions_in_the_edit_buffer_when_nothing_is_new(tmp_path):
         assert assigned is not None
 
         await pilot.press("t")
+        await app.workers.wait_for_complete()
         await _settle(pilot)
 
         assert device.buffer_log == [("RAM 3", assigned)]
@@ -183,6 +184,7 @@ async def test_t_auditions_an_unassigned_row_through_a_scratch_slot(tmp_path):
         assert screen._target_slot_for_source(0) is None
 
         await pilot.press("t")
+        await app.workers.wait_for_complete()
         await _settle(pilot)
 
         assert device.buffer_log, "the audition still happened"
@@ -214,6 +216,7 @@ async def test_t_stages_fresh_patches_into_the_reserved_area(tmp_path, monkeypat
         await _settle(pilot)
 
         await pilot.press("t")
+        await app.workers.wait_for_complete()
         await _settle(pilot)
 
         assert device.patch_write_count == 1, (
@@ -267,6 +270,7 @@ async def test_a_refused_single_write_falls_back_to_the_bank_dump(
         monkeypatch.setattr(device, "write_patch", refused)
 
         await pilot.press("t")
+        await app.workers.wait_for_complete()
         await _settle(pilot)
 
         assert device.bundle_write_count == 1, "the slow path still stages"
@@ -296,6 +300,7 @@ async def test_staged_parts_name_the_staging_bank_not_the_target(tmp_path):
         await _settle(pilot)
 
         await pilot.press("t")
+        await app.workers.wait_for_complete()
         await _settle(pilot)
 
         assert device.read_patch("RAM3", 27) == _pcm_patch()
@@ -331,6 +336,7 @@ async def test_t_stages_wave_sequences_when_configured(tmp_path, monkeypatch):
         await _settle(pilot)
 
         await pilot.press("t")
+        await app.workers.wait_for_complete()
         await _settle(pilot)
 
         assert device.bundle_write_count == 1, (
@@ -373,6 +379,7 @@ async def test_t_refuses_when_a_sequence_is_needed_but_staging_is_unconfigured(
         await _settle(pilot)
 
         await pilot.press("t")
+        await app.workers.wait_for_complete()
         await _settle(pilot)
 
         assert "not configured" in _status(screen)
@@ -414,6 +421,7 @@ async def test_t_stages_only_the_fresh_patch_of_a_mixed_plan(tmp_path, monkeypat
         await _settle(pilot)
 
         await pilot.press("t")
+        await app.workers.wait_for_complete()
         await _settle(pilot)
 
         assert device.patch_write_count == 1, "only the fresh copy is written"
@@ -441,6 +449,7 @@ async def test_t_refuses_when_staging_is_not_configured(tmp_path):
         await _settle(pilot)
 
         await pilot.press("t")
+        await app.workers.wait_for_complete()
         await _settle(pilot)
 
         assert "not configured" in _status(screen)
@@ -462,8 +471,55 @@ async def test_t_refuses_when_the_write_gate_is_locked(tmp_path):
         # No `w`: the gate stays locked.
 
         await pilot.press("t")
+        await app.workers.wait_for_complete()
         await _settle(pilot)
 
         assert "write gate locked" in _status(screen)
         assert device.patch_write_count == 0
         assert device.buffer_log == []
+
+
+@pytest.mark.asyncio
+async def test_the_progress_bar_shows_a_transfer_then_hides(tmp_path):
+    device = DemoDevice()
+    app = KwsedApp(device, catalog=cat.Catalog([]), config_path=str(tmp_path))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        bar = app.query_one("#progress", Static)
+        assert bar.display is False
+
+        app._progress_report("receiving RAM 2 patches", 0.5)
+        await pilot.pause()
+        assert bar.display is True
+        assert "50%" in str(bar.content)
+        assert "RAM 2 patches" in str(bar.content)
+
+        app._progress_report("receiving RAM 2 patches", None)
+        await pilot.pause()
+        await pilot.pause(0.5)
+        assert bar.display is False
+
+
+@pytest.mark.asyncio
+async def test_the_import_screen_shows_the_bar_while_it_covers_the_app(tmp_path):
+    """The screen is modal, so the app's own bar is underneath it."""
+    device = DemoDevice()
+    app = KwsedApp(
+        device, catalog=cat.Catalog([]), config_path=_staging_config(tmp_path)
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._sources["RAM1"] = _pcm_source()
+        app._sources["RAM3"] = _target_source(keep=False)
+        screen = await _open_import_screen(app, pilot)
+
+        app._progress_report("receiving RAM 3 patches", 0.25)
+        await pilot.pause()
+        bar = screen.query_one("#progress", Static)
+        assert bar.display is True
+        assert "25%" in str(bar.content)
+
+        app._progress_report("receiving RAM 3 patches", None)
+        await pilot.pause()
+        await pilot.pause(0.5)
+        assert bar.display is False

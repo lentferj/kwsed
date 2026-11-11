@@ -47,7 +47,7 @@ where ALSA reads it from 4, and the library dereferences whatever is there.
 import ctypes
 import ctypes.util
 import time
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 __all__ = ["Sender", "available", "port_address"]
 
@@ -229,13 +229,24 @@ class Sender:
     #: costs a second on a bank and is not worth arguing about.
     BYTES_PER_SECOND = 2800
 
-    def send(self, data: bytes) -> None:
-        """Send one message, paced to the speed of the wire."""
+    def send(
+        self,
+        data: bytes,
+        progress: Optional[Callable[[int, int], None]] = None,
+    ) -> None:
+        """Send one message, paced to the speed of the wire.
+
+        ``progress(sent, total)`` is called after each chunk, so a caller
+        can put a bar under a dump that is about to take ten seconds.
+        """
         data = bytes(data)
-        for start in range(0, len(data), self.CHUNK):
+        total = len(data)
+        for start in range(0, total, self.CHUNK):
             chunk = data[start : start + self.CHUNK]
             self._send_one(chunk)
-            if start + self.CHUNK < len(data):
+            if progress is not None:
+                progress(min(start + len(chunk), total), total)
+            if start + self.CHUNK < total:
                 time.sleep(len(chunk) / self.BYTES_PER_SECOND)
 
     def _send_one(self, data: bytes) -> None:

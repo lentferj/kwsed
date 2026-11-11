@@ -128,6 +128,11 @@ unit or emulator **before** connecting irreplaceable equipment.
   names-only `.syx`. Banks 16-18 say when they need a WSC PCM card.
 - **Reads names off the unit, silently.** `r` asks for a whole bank in one
   System Exclusive message. Nothing is selected and nothing sounds.
+- **Shows transfer progress in the app, not on the unit.** Every System
+  Exclusive exchange — bank reads, imports, staging, undo — runs off the UI
+  thread with a bar under the status line and the operation's name, so a
+  ten-second bank dump does not freeze the app and does not need anyone
+  watching the instrument's display.
 - **Names from two sources, kept distinct**: a catalog built from your own
   `.syx` dumps, and what the unit says. A name read from hardware shows in
   bold; one that *disagrees* with the catalog gets a `*`.

@@ -161,6 +161,7 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
         background: $surface;
     }
     SingleImportScreen DataTable { height: 1fr; }
+    .progress { height: 1; color: $accent; display: none; }
     """
 
     BINDINGS = [
@@ -433,6 +434,13 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
         """Show an app-generated source warning/merge note."""
         self._set_status(message)
 
+    def set_progress(self, text: str) -> None:
+        """Show the app's transfer bar: this screen covers the app's own."""
+        with suppress(Exception):
+            widget = self.query_one("#progress", Static)
+            widget.update(text)
+            widget.display = bool(text)
+
     def _refresh(self) -> None:
         self._active_sources = self._active_source_slots()
         with suppress(Exception):
@@ -610,6 +618,7 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
             yield Static("", id=self.BUDGET_ID, classes="budget", markup=False)
             yield Static("", id=self.GATE_ID, classes="gate", markup=False)
             yield Static("", id=self.STATUS_ID, classes="status", markup=False)
+            yield Static("", id="progress", classes="progress", markup=False)
 
     def on_mount(self) -> None:
         with suppress(Exception):
