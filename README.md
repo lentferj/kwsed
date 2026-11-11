@@ -362,7 +362,10 @@ so the same slot number on two cards cannot collide.
 open and remembers that choice. `kwscli deps BANK [KIND NUMBER]` prints the
 same graph, using `--source ID=GLOB` or the local cache and needing no unit
 when the bank is cached. The graph is Performance → Patch → WaveSeq; identical
-patches are deduplicated structurally, not by name.
+patches are deduplicated structurally, not by name. When a part points at a
+writable bank's patch that other performances also use, the line names them
+(`also RAM 2:04`): editing that patch changes every performance listed. ROM
+patches are read-only, so no `also` list is shown for them.
 
 `y`, or `kwscli copy-perf SCOPE:NUMBER...`, copies a performance atomically:
 
@@ -556,6 +559,8 @@ Space        assign the focused source to the first free/Init target slot
 Enter        commit a one-digit target (no dialog opens)
 u / Backspace / Delete   unassign
 A / U        assign all unassigned / clear all
+p            toggle shared/fresh patches (fresh = the import gets its
+             own patch copies, independent of the target bank)
 s            choose a source bank already in the session, or add another file
 w            toggle the write gate
 ctrl+s       write the whole assignment in one batch
