@@ -136,6 +136,7 @@ class DemoDevice:
         self.bundle_write_count: int = 0
         self.edit_buffer: Optional[bytes] = None
         self.buffer_log: List[Any] = []
+        self.buffer_target: Optional[Tuple[str, int]] = None
         self.patch_write_count: int = 0
         self.performance_write_count: int = 0
         self.received: List[bytes] = []
@@ -210,6 +211,26 @@ class DemoDevice:
             )
         if packet.function in (m.Function.PATCH_WRITE, m.Function.PERFORMANCE_WRITE):
             return m.frame(m.Function.WRITE_COMPLETED, channel=self.channel)
+        if (
+            packet.function == m.Function.PARAMETER_CHANGE_SR
+            and len(packet.payload) >= 2
+        ):
+            # EXECUTE_WRITE commits the buffer to where the last dump sent
+            # it -- the wire-level form of the write, as Edisyn uses.
+            param = packet.payload[0] | (packet.payload[1] << 7)
+            if (
+                param == m.EXECUTE_WRITE
+                and self.edit_buffer is not None
+                and self.buffer_target is not None
+            ):
+                bank_id, number = self.buffer_target
+                bank_bytes = bytearray(
+                    self._bank_payload(banks.bank(bank_id), banks.Kind.PERFORMANCE)
+                )
+                at = number * records.PERFORMANCE_SIZE
+                bank_bytes[at : at + records.PERFORMANCE_SIZE] = self.edit_buffer
+                self._written[(bank_id, banks.Kind.PERFORMANCE)] = bytes(bank_bytes)
+                return m.frame(m.Function.WRITE_COMPLETED, channel=self.channel)
         return m.frame(m.Function.DATA_LOAD_ERROR, channel=self.channel)
 
     def _bank_dump(self, number: int, kind: str) -> bytes:
@@ -650,5 +671,6 @@ class DemoDevice:
         self._tick()
         entry = banks.bank(bank)
         self.edit_buffer = bytes(data)
+        self.buffer_target = (entry.id, number)
         self.buffer_log.append((entry.label, number))
         return {"bank": entry.label, "number": number}

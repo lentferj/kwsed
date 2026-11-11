@@ -1040,5 +1040,69 @@ class TestSlotImport:
         assert built.patches[2 * r.PATCH_SIZE : 3 * r.PATCH_SIZE] == pinned_before
 
 
+def _audition_sources():
+    """A PCM-only source performance and an empty RAM3 to receive it."""
+    patch = make_patch("SrcPatch", ((0, 40), (0, 40), (0, 40), (0, 40)))
+    src = deps.Source(
+        bank_id="RAM1",
+        patches=[patch],
+        performances=[make_performance("SrcPerf", ((0, 0), (0, 0)))],
+        waveseq=None,
+    )
+    dest_src = deps.Source(
+        bank_id="RAM3",
+        patches=[make_patch("Init") for _ in range(banks.PATCHES_PER_BANK)],
+        performances=[
+            make_performance("Init", ()) for _ in range(banks.PERFORMANCES_PER_BANK)
+        ],
+        waveseq=None,
+    )
+    return {"RAM1": src, "RAM3": dest_src}
+
+
+def test_planned_performance_record_equals_the_built_bank_record():
+    """The audition record is byte-for-byte what build_slot_import writes."""
+    sources = _audition_sources()
+    plan = perfcopy.plan_slot_import(
+        sources,
+        "RAM3",
+        {0: relations.PerfId("RAM1", 0)},
+        destination_bank=RAM3,
+    )
+    assert plan.fits, plan.rejected
+    alloc = plan.allocations[0]
+    record = perfcopy.planned_performance_record(sources, alloc, RAM3)
+    built = perfcopy.build_slot_import(sources, plan)
+    at = alloc.target_perf_slot * r.PERFORMANCE_SIZE
+    assert record == bytes(built.performances[at : at + r.PERFORMANCE_SIZE])
+    used = [part for part in r.performance_parts(record) if part.used]
+    assert {part.patch for part in used} == set(alloc.part_patch_slots.values())
+    assert all(part.bank == RAM3.number for part in used)
+
+
+def test_planned_performance_record_slot_override_remaps_parts():
+    """slot_override points the parts at staging slots, for audition."""
+    sources = _audition_sources()
+    plan = perfcopy.plan_slot_import(
+        sources,
+        "RAM3",
+        {0: relations.PerfId("RAM1", 0)},
+        destination_bank=RAM3,
+    )
+    assert plan.fits, plan.rejected
+    alloc = plan.allocations[0]
+    override = dict.fromkeys(alloc.part_patch_slots, 27)
+    record = perfcopy.planned_performance_record(
+        sources, alloc, RAM3, slot_override=override
+    )
+    used = [part for part in r.performance_parts(record) if part.used]
+    assert {part.patch for part in used} == {27}
+    assert all(part.bank == RAM3.number for part in used)
+    # The unoverridden record pointed somewhere else, so this is a real remap.
+    plain = perfcopy.planned_performance_record(sources, alloc, RAM3)
+    plain_used = [part for part in r.performance_parts(plain) if part.used]
+    assert {part.patch for part in plain_used} != {27}
+
+
 def test_imports_ok():
     assert True

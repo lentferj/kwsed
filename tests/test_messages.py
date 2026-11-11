@@ -262,9 +262,23 @@ class TestParameterChange:
     def test_the_channel_rides_in_the_format_byte(self):
         assert m.parameter_change(4, 2, channel=5)[2] == 0x35
 
-    def test_a_parameter_above_379_is_refused(self):
-        with pytest.raises(m.ProtocolError, match="outside 0-379"):
-            m.parameter_change(380, 1)
+    def test_expanded_and_sr_ranges_pick_their_functions(self):
+        assert m.parameter_change(379, 1)[4] == 0x41
+        assert m.parameter_change(380, 1)[4] == 0x42
+        assert m.parameter_change(407, 1)[4] == 0x43
+        with pytest.raises(m.ProtocolError, match="outside 0-484"):
+            m.parameter_change(485, 1)
+
+    def test_execute_write_is_the_sr_only_parameter_change(self):
+        """F0 42 3n 28 43 <LSB> <MSB> "+1" NUL F7, Edisyn's write."""
+        change = m.execute_write(channel=0)
+        assert change[4] == 0x43
+        assert change[5:7] == bytes(
+            [m.EXECUTE_WRITE & 0x7F, (m.EXECUTE_WRITE >> 7) & 0x7F]
+        )
+        assert change[7:9] == b"+1"
+        assert change[9] == 0x00, "ASCII null termination"
+        assert change[-1] == 0xF7
 
     def test_a_non_ascii_value_is_refused(self):
         with pytest.raises(m.ProtocolError, match="printable ASCII"):

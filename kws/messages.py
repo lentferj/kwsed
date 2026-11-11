@@ -87,6 +87,8 @@ __all__ = [
     "performance_write_command",
     "multi_select",
     "parameter_change",
+    "EXECUTE_WRITE",
+    "execute_write",
     "REQUEST_FOR_DUMP",
     "DATA_OFFSET",
 ]
@@ -160,6 +162,11 @@ class Function:
     #: section 2.1.14; the value is text, not a 14-bit word, which is why
     #: the unit's own editors send ``+2`` as two bytes rather than 0x0002.
     PARAMETER_CHANGE = 0x41
+    PARAMETER_CHANGE_EXPANDED = 0x42  #: parameters 380-406
+    #: Parameters 407 and up exist only on the SR: the manual says these
+    #: are "ignored by the Wavestation keyboard and A/D". This is where
+    #: EXECUTE_WRITE lives.
+    PARAMETER_CHANGE_SR = 0x43
 
     # Status replies, as Korg's Reference Guide appendix 4 lists them.
     WRITE_COMPLETED = 0x21
@@ -188,6 +195,8 @@ class Function:
         0x5B: "multi mode setup select",
         0x63: "multi mode setup select SR expanded",
         0x41: "parameter change",
+        0x42: "parameter change expanded",
+        0x43: "parameter change SR expanded",
         0x06: "multi mode setup dump request",
         0x40: "single patch dump",
         0x11: "patch write command",
@@ -583,7 +592,7 @@ def multi_select(number: int, *, channel: int = 0) -> bytes:
 
 
 def parameter_change(parameter: int, value: int | str, *, channel: int = 0) -> bytes:
-    """Change one global parameter. **Changes device state, not memory.**
+    """Change one parameter. **Changes device state, not memory.**
 
     Reference Guide Appendix 4 section 2.1.14: function ``0x41``, then the
     parameter number as two 7-bit bytes (LSB first), then the value as
@@ -592,15 +601,23 @@ def parameter_change(parameter: int, value: int | str, *, channel: int = 0) -> b
     MIDI mode 2 is ``04 00 2B 32 00`` ("+2"), which is what a real
     Wavestation SR MIDI name document carries.
 
-    Parameters 380 and above use the expanded forms (``0x42``/``0x43``);
-    this helper covers the documented 0-379 range.
+    Parameters 380-406 travel as function ``0x42`` (Expanded) and 407 and
+    up as ``0x43`` (SR Expanded) -- the SR-only range the keyboard and
+    A/D ignore. :data:`EXECUTE_WRITE` lives there and is what performs an
+    edit-buffer write without the unit's front-panel prompt.
     """
     number = int(parameter)
-    if not 0 <= number <= 379:
+    if not 0 <= number <= 484:
         raise ProtocolError(
-            f"parameter {number} is outside 0-379; expanded parameters use "
-            "the 0x42/0x43 forms"
+            f"parameter {number} is outside 0-484, the end of the "
+            "documented parameter table"
         )
+    if number >= 407:
+        function = Function.PARAMETER_CHANGE_SR
+    elif number >= 380:
+        function = Function.PARAMETER_CHANGE_EXPANDED
+    else:
+        function = Function.PARAMETER_CHANGE
     if isinstance(value, str):
         text = value
     elif value > 0:
@@ -614,7 +631,28 @@ def parameter_change(parameter: int, value: int | str, *, channel: int = 0) -> b
             raise ProtocolError(f"{char!r} is not a printable ASCII value byte")
         ascii_bytes.append(code)
     return frame(
-        Function.PARAMETER_CHANGE,
+        function,
         [number & 0x7F, (number >> 7) & 0x7F, *ascii_bytes, 0x00],
         channel=channel,
     )
+
+
+#: The SR-only parameter whose change performs the write the unit's
+#: WRITE/COMPARE flow would do: ``+1`` commits the edit buffer (patch or
+#: performance -- the buffer that was filled last) to the bank and slot the
+#: last single dump named. Reference Guide parameter table entry 466. This
+#: is how Edisyn writes performances, and it sidesteps the front-panel
+#: "SAVE PATCH -- ARE YOU SURE?" prompt the documented patch write command
+#: (0x11) was seen to raise live on an SR.
+EXECUTE_WRITE = 466
+
+
+def execute_write(channel: int = 0) -> bytes:
+    """Commit the edit buffer to its destination, without any prompt.
+
+    The last single dump set the destination (its bank and number bytes)
+    and filled the buffer; changing :data:`EXECUTE_WRITE` to ``+1`` then
+    writes it. No confirmation on the unit: Edisyn has used exactly this
+    pair for years.
+    """
+    return parameter_change(EXECUTE_WRITE, 1, channel=channel)

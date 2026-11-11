@@ -464,7 +464,10 @@ preaudit_target_patches = "RAM3:27-34"
 valid). Both must point at a writable bank (RAM 1-3 or the Card). It is the
 user's job to keep those slots free; the app still backs up whatever it
 overwrites there. A malformed value or a ROM bank silently turns the feature
-off.
+off. Staged auditions write whole banks (one patch bank, plus the target's
+sequence bank when the plan needs wave sequences), so **memory protect must
+be off** on the unit for those banks -- with protect on the unit refuses the
+bank dump. The ordinary `ctrl+s` import needs no audition and is unaffected.
 
 ### Multisets and multi-card staging
 
@@ -581,6 +584,16 @@ p            toggle shared/fresh patches (fresh = the import gets its
 s            choose a source bank already in the session, or add another file
 w            toggle the write gate
 ctrl+s       write the whole assignment in one batch
+t            audition the focused row in the unit's edit buffer before
+             anything is written; an unassigned row borrows the first free
+             slot without committing an assignment. When the plan needs
+             fresh patch copies they are staged into the configured
+             pre-audit area (preaudit_target_perf / preaudit_target_patches);
+             wave sequences are staged into the target bank's sequence
+             memory as one fenced write, backed up and one `z` to undo.
+             Without a configured staging area -> refused, use ctrl+s;
+             staging writes need the armed write gate and are backed up;
+             the staging slots are the user's to keep free
 ```
 
 The lower table has a `patch slots` column: it lists the destination patch

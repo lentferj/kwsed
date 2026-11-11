@@ -755,3 +755,39 @@ async def test_fresh_patch_mode_changes_planned_patch_slot() -> None:
         plan_fresh = screen._plan()
         fresh_slot = next(iter(plan_fresh.allocations[0].part_patch_slots.values()))
         assert fresh_slot != 2
+
+
+@pytest.mark.asyncio
+async def test_audition_routes_to_the_app_even_without_an_assignment() -> None:
+    """`t` needs only a focused row; an unassigned row is fine."""
+    screen = _screen(active_slots=[0, 1])
+    seen: list[Any] = []
+    screen._on_audition_request = seen.append
+    host = _host()
+    async with host.run_test() as pilot:
+        host.push_screen_cb(screen)
+        await settle(pilot)
+        src = screen.query_one("#source-table", DataTable)
+        src.move_cursor(row=0)
+        await settle(pilot)
+        await pilot.press("t")
+        await settle(pilot)
+        assert seen == [screen], "the app decides everything; the screen only routes"
+        assert "assign" not in str(screen.query_one("#status", Static).content)
+
+
+@pytest.mark.asyncio
+async def test_audition_without_a_focused_row_refuses() -> None:
+    screen = _screen(active_slots=[0, 1])
+    seen: list[Any] = []
+    screen._on_audition_request = seen.append
+    host = _host()
+    async with host.run_test() as pilot:
+        host.push_screen_cb(screen)
+        await settle(pilot)
+        screen.query_one("#target-table", DataTable).focus()
+        await settle(pilot)
+        await pilot.press("t")
+        await settle(pilot)
+        assert seen == []
+        assert "focus a source row" in str(screen.query_one("#status", Static).content)

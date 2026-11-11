@@ -3301,6 +3301,7 @@ class KwsedApp(App[None]):
                 gate=self._write_gate,
                 initial_assignments=initial,
                 on_source_request=self._single_source_menu,
+                on_audition_request=self._audition_focused,
             ),
             lambda choice: self._import_single_chosen(
                 choice,
@@ -3458,6 +3459,7 @@ class KwsedApp(App[None]):
                 target_source=target_source,
                 gate=self._write_gate,
                 on_source_request=self._single_source_menu,
+                on_audition_request=self._audition_focused,
             ),
             lambda choice: self._import_single_chosen(
                 choice, target, entry, sources, origin, [entry], writable
@@ -3809,6 +3811,7 @@ class KwsedApp(App[None]):
                 target_source=target_source,
                 gate=self._write_gate,
                 on_source_request=self._single_source_menu,
+                on_audition_request=self._audition_focused,
                 initial_status=note,
             ),
             lambda choice: self._import_single_chosen(
@@ -3826,6 +3829,251 @@ class KwsedApp(App[None]):
         self.push_screen(
             ImportMenuScreen("Source bank", choices, screen.source_index),
             lambda index: self._single_source_menu_chosen(screen, index),
+        )
+
+    def _audition_buffer(
+        self,
+        screen: Any,
+        sources: Any,
+        allocation: Any,
+        target_bank: Any,
+        target_slot: int,
+    ) -> None:
+        try:
+            record = perfcopy.planned_performance_record(
+                sources, allocation, target_bank
+            )
+            self.device.send_performance_to_buffer(
+                target_bank.number, target_slot, record
+            )
+            msg = (
+                "auditioning — nothing written; play it on the unit; "
+                "ctrl+s imports for real"
+            )
+            screen.set_status(msg)
+            self.notify_status(msg)
+        except Exception as exc:
+            msg = f"audition failed: {exc}"
+            screen.set_status(msg)
+            self.notify_status(msg, refused=True)
+
+    def _refuse_audition(self, screen: Any, msg: str) -> None:
+        """Say no in both places: the screen's line and the app's."""
+        screen.set_status(msg)
+        self.notify_status(msg, refused=True)
+
+    def _audition_staged(
+        self,
+        screen: Any,
+        sources: Any,
+        plan: Any,
+        allocation: Any,
+        target_bank: Any,
+        target_slot: int,
+        fresh: Any,
+    ) -> None:
+        """Stage what the plan needs, then put the record in the buffer.
+
+        Fresh patch copies are spliced into the user-reserved staging slots
+        and sent as the staging bank's whole patch bank; wave sequences go
+        to the target bank's sequence memory as its whole bank -- the very
+        bank the real import would install. Whole banks because the unit's
+        single-patch write command pops its front-panel "SAVE PATCH — ARE
+        YOU SURE?" prompt (seen live on the SR), while a bank dump loads
+        silently once memory protect is off. Both writes are fenced and
+        backed up, and together they are one undo record: `z` takes the
+        staging back out. Reused patches need no write: they are already
+        in the target bank, and the auditioned record points at them
+        there.
+        """
+        from kws import config as _cfg
+
+        perf_area = _cfg.load_preaudit_target(self._config_path)
+        patch_area = _cfg.load_preaudit_patch_area(self._config_path)
+        if perf_area is None or patch_area is None:
+            self._refuse_audition(
+                screen,
+                "pre-audit staging not configured (see README: "
+                "preaudit_target_perf / preaudit_target_patches)",
+            )
+            return
+        if len(fresh) > len(patch_area[1]):
+            self._refuse_audition(
+                screen,
+                f"staging patch area too small: {len(fresh)} needed, "
+                f"{len(patch_area[1])} configured",
+            )
+            return
+        if not self._write_gate.armed:
+            self._refuse_audition(
+                screen, "write gate locked (press w) — staging writes need it"
+            )
+            return
+        planned_to_staging = {
+            planned_slot: staging_slot
+            for (_pid, planned_slot), staging_slot in zip(fresh, patch_area[1])
+        }
+        slot_override = {}
+        for idx, s in allocation.part_patch_slots.items():
+            if s in planned_to_staging:
+                slot_override[idx] = planned_to_staging[s]
+        try:
+            built = perfcopy.build_slot_import(sources, plan)
+            undo_entries, seq_note = self._stage_banks(
+                screen, plan, built, fresh, patch_area, target_bank
+            )
+            if undo_entries:
+                # The staging is destructive, so it is one undo record: `z`
+                # puts both banks back the way they were.
+                self._undo_log.push(
+                    _undo.Record(
+                        label="pre-audit staging",
+                        payload={"backups": undo_entries},
+                    )
+                )
+            record = perfcopy.planned_performance_record(
+                sources, allocation, target_bank, slot_override=slot_override
+            )
+            self.device.send_performance_to_buffer(
+                patch_area[0].number, perf_area[1], record
+            )
+            msg = self._staging_message(fresh, patch_area, undo_entries, seq_note)
+            screen.set_status(msg)
+            self.notify_status(msg)
+        except Exception as exc:
+            msg = f"audition failed: {exc}"
+            screen.set_status(msg)
+            self.notify_status(msg, refused=True)
+
+    def _stage_banks(
+        self,
+        screen: Any,
+        plan: Any,
+        built: Any,
+        fresh: Any,
+        patch_area: Any,
+        target_bank: Any,
+    ) -> tuple[list[dict[str, Any]], str]:
+        """Write the staging patch bank, then sequences if the plan needs them.
+
+        Returns the undo entries, one per bank written, and the sentence
+        fragment that names the sequences in the status line.
+        """
+        staged_bank = bytearray(b"".join(screen._target_source.patches))
+        for (_pid, planned_slot), staging_slot in zip(fresh, patch_area[1]):
+            src_at = planned_slot * rec.PATCH_SIZE
+            dst_at = staging_slot * rec.PATCH_SIZE
+            staged_bank[dst_at : dst_at + rec.PATCH_SIZE] = built.patches[
+                src_at : src_at + rec.PATCH_SIZE
+            ]
+        undo_entries = self._stage_one_bank(
+            screen, patch_area[0], "patches", bytes(staged_bank)
+        )
+        seq_note = ""
+        if plan.sequence_map and built.waveseq is not None:
+            undo_entries += self._stage_one_bank(
+                screen, target_bank, "waveseq", bytes(built.waveseq)
+            )
+            seq_note = (
+                f" and staged {len(plan.sequence_map)} wave sequence(s) "
+                f"into {target_bank.label}"
+            )
+        return undo_entries, seq_note
+
+    def _stage_one_bank(
+        self, screen: Any, bank: Any, kind: str, data: bytes
+    ) -> list[dict[str, Any]]:
+        """Write one kind of one bank; return its undo entry, if any."""
+        from kws import backup as _backup
+
+        before = self._before_blocks(screen._target_source, bank)
+        before_blocks = {kind: before[kind]} if kind in before else None
+        if kind == "patches":
+            result = self.device.write_bank_bundle(
+                bank.number,
+                patches=data,
+                backup_dir=_backup.default_dir(),
+                verify=False,
+                before_blocks=before_blocks,
+            )
+        else:
+            result = self.device.write_bank_bundle(
+                bank.number,
+                waveseq=data,
+                backup_dir=_backup.default_dir(),
+                verify=False,
+                before_blocks=before_blocks,
+            )
+        verified = result.get("verified")
+        status = result.get("status")
+        if verified is False or status == "write error":
+            raise RuntimeError(f"staging write failed: {status or 'not verified'}")
+        if kind not in before:
+            return []
+        return [
+            {"kind": "bank-bundle", "slot": bank.number, "blocks": {kind: before[kind]}}
+        ]
+
+    def _staging_message(
+        self, fresh: Any, patch_area: Any, undo_entries: Any, seq_note: str
+    ) -> str:
+        """The status line for a successful staged audition."""
+        slots_text = ", ".join(f"{s:02d}" for s in patch_area[1][: len(fresh)])
+        patch_note = (
+            f"staged {len(fresh)} patch(es) into {patch_area[0].label} {slots_text}"
+            if fresh
+            else "no fresh patches needed"
+        )
+        return (
+            f"{patch_note}{seq_note}; auditioning — play it; "
+            "ctrl+s imports for real"
+            + ("; z undoes the staging" if undo_entries else "")
+        )
+
+    def _audition_focused(self, screen: Any) -> None:
+        """Send the focused row's planned performance to the edit buffer."""
+        slot = screen._focused_source_slot()
+        if slot is None:
+            screen.set_status("focus a source row to audition")
+            self.notify_status("focus a source row to audition", refused=True)
+            return
+        target_slot = screen._target_slot_for_source(slot)
+        if target_slot is None:
+            # Audition through a scratch slot; no assignment is committed.
+            target_slot = screen._first_free_target_slot()
+            if target_slot is None:
+                msg = "no free target slot to audition into"
+                screen.set_status(msg)
+                self.notify_status(msg, refused=True)
+                return
+        sources = screen.sources
+        # resolve target scope from screen state
+        target_bank = screen._target_bank
+        from kwsed.import_single import _target_scope as _ts
+
+        target_scope = _ts(sources, target_bank, screen._target_source)
+        plan = perfcopy.plan_slot_import(
+            sources,
+            target_scope,
+            {target_slot: relations.PerfId(screen._source_scope(), slot)},
+            destination_bank=target_bank,
+            share_existing=screen._share_patches,
+        )
+        if not plan.fits or not plan.allocations:
+            reasons = "; ".join(plan.rejected) if plan.rejected else "plan does not fit"
+            screen.set_status(reasons)
+            self.notify_status(reasons, refused=True)
+            return
+        allocation = plan.allocations[0]
+        # "allocated" lists every placement; the reused ones are already in
+        # the target bank, and only the rest need a staging write.
+        reused = set(allocation.reused_patch_slots)
+        fresh = [item for item in allocation.allocated_patches if item[1] not in reused]
+        if not fresh and not plan.sequence_map:
+            self._audition_buffer(screen, sources, allocation, target_bank, target_slot)
+            return
+        self._audition_staged(
+            screen, sources, plan, allocation, target_bank, target_slot, fresh
         )
 
     def _single_source_menu_chosen(self, screen: Any, index: Optional[int]) -> None:

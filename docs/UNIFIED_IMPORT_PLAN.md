@@ -105,6 +105,15 @@ for **Whole bank** and feed the selected unit snapshot to
   on `plan_slot_import`/`copy_slots_into_bank` controls whether byte-identical
   patches already in the target bank are reused (default) or the import gets
   its own fresh patch copies.
+- [x] 9. Pre-audit audition (`t`) in the unified import screen: sends the
+  planned performance to the unit's edit buffer without writing memory when
+  nothing new is needed (an unassigned row borrows the first free slot).
+  Fresh patch copies are staged into the configured pre-audit area
+  (`preaudit_target_perf`/`preaudit_target_patches`); wave sequences are
+  staged into the target bank's sequence memory as one fenced bundle write,
+  backed up and recorded as one undo step. Refuses when staging is
+  unconfigured/undersized or the write gate is locked. Staging writes
+  require the armed write gate and are backed up.
 - [ ] Korg Legacy VST `.wsram`/`.fxb` native files remain unsupported; the
   `.syx`/`.MID` files in the same packages are the supported route.
 

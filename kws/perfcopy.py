@@ -52,6 +52,7 @@ __all__ = [
     "SlotImportBuilt",
     "plan_slot_import",
     "build_slot_import",
+    "planned_performance_record",
     "copy_slots_into_bank",
     "relocate_bank",
 ]
@@ -110,6 +111,10 @@ class AtomicPerfAllocation:
     name: str
     part_patch_slots: Dict[int, int] = field(default_factory=dict)
     allocated_patches: Tuple[Tuple[relations.PatchId, int], ...] = ()
+    # Slots from ``allocated_patches`` whose planned content is already in
+    # the target bank (byte-identical reuse). The rest need a real write,
+    # which is what audition staging works out from this split.
+    reused_patch_slots: Tuple[int, ...] = ()
 
 
 @dataclass
@@ -939,6 +944,7 @@ def plan_slot_import(  # noqa: C901
             s for s in free_patch_slots if s not in used_new_patch_slots
         ]
         pi = 0
+        reused: List[int] = []
         for pid in unique_patches:
             psrc = srcs[pid.scope_id]
             src_bytes = psrc.patches[pid.number]
@@ -956,6 +962,7 @@ def plan_slot_import(  # noqa: C901
             dest_bytes = bytes(record_b)
             if dest_bytes in patch_bytes_to_slot:
                 slot_p = patch_bytes_to_slot[dest_bytes]
+                reused.append(slot_p)
             else:
                 slot_p = avail_patch_slots[pi]
                 pi += 1
@@ -983,6 +990,7 @@ def plan_slot_import(  # noqa: C901
             name=name,
             part_patch_slots=part_patch_slots,
             allocated_patches=tuple(allocated),
+            reused_patch_slots=tuple(reused),
         )
         plan.allocations.append(alloc)
 
@@ -995,6 +1003,38 @@ def plan_slot_import(  # noqa: C901
     plan.sequence_count = len(pinned_seqs | set(plan.sequence_map.values()))
     plan.steps_used = len(pinned_steps) + new_steps_count
     return plan
+
+
+def planned_performance_record(
+    sources: Mapping[str, deps.Source],
+    allocation: AtomicPerfAllocation,
+    destination_bank: banks.Bank,
+    *,
+    slot_override: Optional[Mapping[int, int]] = None,
+) -> bytes:
+    """The performance record as the import would write it.
+
+    ``slot_override`` remaps part index -> patch slot, for auditioning
+    through a staging area whose slots differ from the final plan's.
+    """
+    srcs = dict(sources)
+    holder = srcs[allocation.source_perf.scope_id]
+    record = bytearray(holder.performances[allocation.source_perf.number])
+    parts = rec.performance_parts(record)
+    for part in parts:
+        if not part.used:
+            continue
+        if part.index in allocation.part_patch_slots:
+            planned_slot = allocation.part_patch_slots[part.index]
+            if slot_override and part.index in slot_override:
+                planned_slot = slot_override[part.index]
+            rec.set_performance_part(
+                record,
+                part.index,
+                bank=destination_bank.number,
+                patch=planned_slot,
+            )
+    return bytes(record)
 
 
 def build_slot_import(  # noqa: C901
@@ -1140,21 +1180,9 @@ def build_slot_import(  # noqa: C901
 
     # Performances
     for alloc in made.allocations:
-        holder = srcs[alloc.source_perf.scope_id]
-        record = bytearray(holder.performances[alloc.source_perf.number])
-        parts = rec.performance_parts(record)
-        for part in parts:
-            if not part.used:
-                continue
-            if part.index in alloc.part_patch_slots:
-                rec.set_performance_part(
-                    record,
-                    part.index,
-                    bank=made.destination_bank.number,
-                    patch=alloc.part_patch_slots[part.index],
-                )
+        perf_record = planned_performance_record(srcs, alloc, made.destination_bank)
         at = alloc.target_perf_slot * rec.PERFORMANCE_SIZE
-        performances[at : at + rec.PERFORMANCE_SIZE] = record
+        performances[at : at + rec.PERFORMANCE_SIZE] = bytearray(perf_record)
 
     return SlotImportBuilt(
         performances=bytes(performances),

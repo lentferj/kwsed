@@ -41,6 +41,10 @@ _HELP_LINES = [
     "U  clear all assignments",
     "p  toggle shared/fresh patches (fresh = the import gets its own",
     "   patch copies, independent of the target bank)",
+    "t  audition the focused row in the unit's edit buffer (an unassigned",
+    "   row borrows the first free slot); fresh patch copies are staged",
+    "   into the configured pre-audit area, wave sequences into the target",
+    "   bank's sequence memory (backed up; z undoes that staging)",
     "s  choose a source bank, add another file, or add a RAM/ROM/Card bank",
     "w  toggle write gate",
     "ctrl+s  import the current assignment",
@@ -169,6 +173,7 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
         Binding("A", "assign_all", "All"),
         Binding("U", "clear_all", "Clear"),
         Binding("p", "toggle_patches", "Patches"),
+        Binding("t", "audition", "Audition"),
         Binding("s", "cycle_source", "Source"),
         Binding("w", "toggle_gate", "Gate"),
         Binding("ctrl+s", "import_choice", "Import", priority=True),
@@ -193,6 +198,7 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
         target_source: Any,
         gate: Optional[EditGate] = None,
         on_source_request: Optional[Callable[["SingleImportScreen"], None]] = None,
+        on_audition_request: Optional[Callable[["SingleImportScreen"], None]] = None,
         on_cancel: Optional[Callable[["SingleImportScreen"], None]] = None,
         initial_assignments: Optional[Mapping[int, relations.PerfId]] = None,
         initial_status: str = "",
@@ -205,6 +211,7 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
         self._target_source = target_source
         self._gate = gate
         self._on_source_request = on_source_request
+        self._on_audition_request = on_audition_request
         self._on_cancel = on_cancel
         self._target_scope = _target_scope(sources, target_bank, target_source)
         self._source_index = 0
@@ -588,7 +595,7 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
             hint = (
                 "Space assign · type 00-49 + Enter exact slot (inline) · "
                 "u unassign · A all · U clear\n"
-                "s source banks/add · p patches · w gate · "
+                "s source banks/add · p patches · t audition · w gate · "
                 "ctrl+s import · ? help · Esc cancel"
             )
             yield Static(hint, classes="hint", markup=False)
@@ -886,6 +893,26 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
             f"source bank {self._source_index + 1}/{len(self._banks)}; assignments kept"
         )
         self._refresh()
+
+    def action_audition(self) -> None:
+        self._clear_slot_entry()
+        try:
+            table = self.query_one(f"#{self.SOURCE_TABLE_ID}", DataTable)
+            has_row = table.has_focus and table.cursor_row >= 0
+        except Exception:
+            has_row = False
+        if not has_row:
+            # A DataTable keeps its cursor when unfocused, so ask for real
+            # focus: auditioning a row the user is not looking at would
+            # sound like the wrong row.
+            self._set_status("focus a source row to audition")
+            return
+        # An unassigned row is auditioned through a scratch slot: the sound
+        # depends on where the parts point, not on which performance slot
+        # the plan borrows, so no assignment is needed to hear it.
+        if self._on_audition_request is not None:
+            self._on_audition_request(self)
+            return
 
     def action_toggle_gate(self) -> None:
         if self._gate is None:

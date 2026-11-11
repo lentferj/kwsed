@@ -241,6 +241,16 @@ class Unit:
             + self.contents[at + r.PERFORMANCE_SIZE :]
         )
 
+    def _execute_write(self, data):
+        """An EXECUTE_WRITE change writes the buffer, so read-back sees it."""
+        packet = m.parse(data)
+        assert packet is not None
+        param = packet.payload[0] | (packet.payload[1] << 7)
+        assert param == m.EXECUTE_WRITE
+        if self.mode == "write_error":
+            return m.frame(m.Function.WRITE_ERROR, channel=0)
+        return m.frame(m.Function.WRITE_COMPLETED, channel=0)
+
     def _performance_write(self, data):
         if self.mode == "write_error":
             return m.frame(m.Function.WRITE_ERROR, channel=0)
@@ -274,6 +284,7 @@ class Unit:
         m.Function.SINGLE_PERFORMANCE_REQUEST: _performance_request,
         m.Function.PERFORMANCE_DUMP: _performance_dump,
         m.Function.PERFORMANCE_WRITE: _performance_write,
+        m.Function.PARAMETER_CHANGE_SR: _execute_write,
         m.Function.MULTI_REQUEST: _multi_request,
         m.Function.MULTISET_DUMP: _multi_dump_write,
         m.Function.SYSTEM_SETUP_REQUEST: _system_setup_request,
@@ -355,17 +366,21 @@ class TestWritePatch:
         assert packet.data()[:8] == b"Previous", "the backup holds the old patch"
         assert backup.describe(result["backup"])["bank"] == "Card-patch03"
 
-    def test_it_sends_the_dump_then_the_write_command(self, tmp_path):
+    def test_it_sends_the_dump_then_the_execute_write(self, tmp_path):
         """Two messages, because one is not enough: the dump lands in the
-        edit buffer and the command commits it."""
+        edit buffer and the SR-only EXECUTE_WRITE change commits it."""
         unit = Unit()
         unit.bridge.write_patch("CARD", 3, ONE_PATCH, backup_dir=str(tmp_path))
         functions = [d[4] for d in unit.midi_out.sent if len(d) > 5]
         assert m.Function.SINGLE_PATCH_DUMP in functions
-        assert m.Function.PATCH_WRITE in functions
+        assert m.Function.PARAMETER_CHANGE_SR in functions
         assert functions.index(m.Function.SINGLE_PATCH_DUMP) < functions.index(
-            m.Function.PATCH_WRITE
+            m.Function.PARAMETER_CHANGE_SR
         ), "the buffer is filled before it is committed"
+        change = next(d for d in unit.midi_out.sent if len(d) > 5 and d[4] == 0x43)
+        assert change[5:8] == bytes(
+            [m.EXECUTE_WRITE & 0x7F, (m.EXECUTE_WRITE >> 7) & 0x7F, ord("+")]
+        ), "the change is EXECUTE_WRITE = +1, Edisyn's write"
 
     def test_it_reports_the_units_own_status_reply(self, tmp_path):
         result = Unit().bridge.write_patch(
@@ -383,6 +398,37 @@ class TestWritePatch:
         with pytest.raises(DeviceError, match="ROM"):
             unit.bridge.write_patch("ROM4", 3, ONE_PATCH, backup_dir=str(tmp_path))
         assert unit.midi_out.sent == []
+
+
+class TestSendPerformanceToBuffer:
+    """The audition fill: one dump, no commit, nothing written anywhere."""
+
+    def test_it_sends_one_dump_and_no_commit(self):
+        unit = Unit()
+        record = bytes(r.PERFORMANCE_SIZE)
+        unit.bridge.send_performance_to_buffer("CARD", 3, record)
+        functions = [d[4] for d in unit.midi_out.sent if len(d) > 5]
+        assert functions.count(m.Function.PERFORMANCE_DUMP) == 1
+        assert m.Function.PARAMETER_CHANGE_SR not in functions, (
+            "auditioning must not commit the buffer -- that is the write"
+        )
+        assert m.Function.PERFORMANCE_WRITE not in functions
+
+    def test_the_dump_names_the_destination_slot(self):
+        unit = Unit()
+        record = bytes(r.PERFORMANCE_SIZE)
+        unit.bridge.send_performance_to_buffer("CARD", 3, record)
+        dump = next(
+            d
+            for d in unit.midi_out.sent
+            if len(d) > 5 and d[4] == m.Function.PERFORMANCE_DUMP
+        )
+        assert dump[5] == banks.bank("CARD").sysex, "the destination bank"
+        assert dump[6] == 3, "the destination number"
+
+    def test_a_bad_length_is_refused(self):
+        with pytest.raises(ValueError, match="bytes"):
+            Unit().bridge.send_performance_to_buffer("CARD", 3, b"short")
 
     def test_a_patch_of_the_wrong_size_is_refused(self, tmp_path):
         unit = Unit()

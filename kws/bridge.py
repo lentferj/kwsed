@@ -654,6 +654,14 @@ class WavestationBridge:
         35 slots and 30 kB. The fence is the same anyway, because the thing
         that makes a write safe is the backup and the read-back, not the
         size.
+
+        Seen live on a Wavestation SR (2026-11): the write command makes
+        the unit show its front-panel "SAVE PATCH -- ARE YOU SURE?" prompt
+        and wait for +1/YES, so a remote write stalls there and later reads
+        come back addressed oddly (a patch dump for a different bank and
+        slot) while the prompt is up. Nobody should build a flow on this
+        expecting it to finish unattended -- kwsed's audition staging uses
+        a whole-bank dump instead, which loads without any prompt.
         """
         entry = banks.bank(bank)
         if not entry.writable:
@@ -689,7 +697,13 @@ class WavestationBridge:
 
         self._drain()
         self._send(m.single_patch_dump(entry.sysex, number, data, channel=self.channel))
-        self._send(m.patch_write_command(entry.sysex, number, self.channel))
+        # Edisyn's write path (its performance writer pairs a dump with an
+        # EXECUTE_WRITE change): the dump fills the edit buffer and names
+        # the destination, and the SR-only parameter change performs the
+        # write without the unit's front-panel confirmation. The documented
+        # 0x11 command was seen live to stop at "SAVE PATCH -- ARE YOU
+        # SURE?" and never write unattended.
+        self._send(m.execute_write(channel=self.channel))
 
         result: Dict[str, Any] = {
             "bank": entry.label,
@@ -756,6 +770,40 @@ class WavestationBridge:
             f"is still answering an earlier request."
         )
 
+    def send_performance_to_buffer(
+        self,
+        bank: int | str,
+        number: int,
+        data: bytes,
+        *,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Fill the edit buffer with one performance. **Nothing is written.**
+
+        A single performance dump lands in the unit's edit buffer: it is
+        audible at once, bypasses memory protect, and survives nothing.
+        The header's bank and number are where the buffer *would* go if
+        the unit's own SAVE were executed; kwsed writes for real through
+        :meth:`write_performance` instead, so the destination here only
+        has to be a bank the unit knows.
+        """
+        entry = banks.bank(bank)
+        if not 0 <= number < banks.PERFORMANCES_PER_BANK:
+            raise ValueError(
+                f"a bank holds {banks.PERFORMANCES_PER_BANK} performances, so "
+                f"{number} is not one of them"
+            )
+        if len(data) != records.PERFORMANCE_SIZE:
+            raise ValueError(
+                f"a performance is {records.PERFORMANCE_SIZE} bytes; got {len(data)}"
+            )
+
+        self._drain()
+        self._send(
+            m.single_performance_dump(entry.sysex, number, data, channel=self.channel)
+        )
+        return {"bank": entry.label, "number": number}
+
     def write_performance(
         self,
         bank: int | str,
@@ -810,7 +858,13 @@ class WavestationBridge:
         self._send(
             m.single_performance_dump(entry.sysex, number, data, channel=self.channel)
         )
-        self._send(m.performance_write_command(entry.sysex, number, self.channel))
+        # Edisyn's write, not the documented write command: the buffer's
+        # destination was set by the dump above, and an EXECUTE_WRITE change
+        # performs it without the unit's front-panel prompt. (The 0x11 patch
+        # write command was seen live to stop at "SAVE PATCH -- ARE YOU
+        # SURE?"; its 0x1A sibling is presumed to behave the same, and
+        # Edisyn never uses either.)
+        self._send(m.execute_write(channel=self.channel))
 
         result: Dict[str, Any] = {
             "bank": entry.label,
