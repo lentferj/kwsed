@@ -150,6 +150,90 @@ async def test_space_assigns_and_unassigns() -> None:
 
 
 @pytest.mark.asyncio
+async def test_inline_two_digits_assign_without_dialog() -> None:
+    screen = _screen(active_slots=[0, 1])
+    host = _host()
+    async with host.run_test() as pilot:
+        host.push_screen_cb(screen)
+        await settle(pilot)
+        src = screen.query_one("#source-table", DataTable)
+        src.move_cursor(row=0)
+        await settle(pilot)
+        await pilot.press("0")
+        await settle(pilot)
+        assert screen.assignments == {}
+        assert screen._slot_entry == "0"
+        await pilot.press("5")
+        await settle(pilot)
+        assert screen.assignments.get(5) is not None
+        assert screen.assignments[5].number == 0
+        assert screen._slot_entry == ""
+        # no SlotPrompt modal was pushed
+        assert host.screen is screen
+
+
+@pytest.mark.asyncio
+async def test_inline_one_digit_enter_assigns() -> None:
+    screen = _screen(active_slots=[0, 1])
+    host = _host()
+    async with host.run_test() as pilot:
+        host.push_screen_cb(screen)
+        await settle(pilot)
+        src = screen.query_one("#source-table", DataTable)
+        src.move_cursor(row=1)
+        await settle(pilot)
+        await pilot.press("1")
+        await settle(pilot)
+        assert screen.assignments == {}
+        await pilot.press("enter")
+        await settle(pilot)
+        assert screen.assignments.get(1) is not None
+        assert screen.assignments[1].number == 1
+
+
+@pytest.mark.asyncio
+async def test_inline_escape_cancels_entry_then_screen() -> None:
+    screen = _screen(active_slots=[0])
+    host = _host()
+    async with host.run_test() as pilot:
+        host.push_screen_cb(screen)
+        await settle(pilot)
+        src = screen.query_one("#source-table", DataTable)
+        src.move_cursor(row=0)
+        await settle(pilot)
+        await pilot.press("2")
+        await settle(pilot)
+        await pilot.press("escape")
+        await settle(pilot)
+        assert screen._slot_entry == ""
+        assert screen.assignments == {}
+        assert host.result == "unset"
+        await pilot.press("escape")
+        await settle(pilot)
+        assert host.result is None
+
+
+@pytest.mark.asyncio
+async def test_target_patch_slots_column() -> None:
+    screen = _screen(active_slots=[0], target_used_patches=1)
+    host = _host()
+    async with host.run_test() as pilot:
+        host.push_screen_cb(screen)
+        await settle(pilot)
+        tgt = screen.query_one("#target-table", DataTable)
+        # slot 5 is a used target performance with local part (1, 0)
+        assert str(tgt.get_row_at(5)[3]) == "00"
+        src = screen.query_one("#source-table", DataTable)
+        src.move_cursor(row=0)
+        await settle(pilot)
+        await pilot.press("0")
+        await pilot.press("6")
+        await settle(pilot)
+        # patch 00 is pinned by the used target performance; the source gets 01
+        assert str(tgt.get_row_at(6)[3]) == "01"
+
+
+@pytest.mark.asyncio
 async def test_direct_assign_free_and_duplicate() -> None:
     screen = _screen(active_slots=[0, 1])
     host = _host()

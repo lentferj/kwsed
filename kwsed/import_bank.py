@@ -29,6 +29,7 @@ from textual.widgets import DataTable, Static
 from kws import banks as kws_banks
 from kws import dumps, records
 from kwsed.gate import EditGate
+from vinsynlib.ui.report import ReportScreen
 
 if TYPE_CHECKING:
     from kws.importers import ImportedBank
@@ -109,6 +110,7 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
         Binding("w", "toggle_gate", "Gate"),
         Binding("ctrl+s", "write", "Write", priority=True),
         Binding("c", "cache", "Cache"),
+        Binding("question_mark", "help", "Help"),
     ]
 
     def __init__(
@@ -277,7 +279,8 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
             yield Static("", id=GATE_ID, classes="gate", markup=False)
             yield Static("", id=STATUS_ID, classes="status", markup=False)
             yield Static(
-                "s source · b target · w gate · ctrl+s write · c cache · esc/q cancel",
+                "s source · b target · w gate · ctrl+s write · c cache · "
+                "? help · esc/q cancel",
                 classes="hint",
                 markup=False,
             )
@@ -328,6 +331,21 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
 
     def action_cache(self) -> None:
         self.dismiss(WholeBankChoice(self._source_index, self._target_bank().id, False))
+
+    def action_help(self) -> None:
+        text = (
+            "Whole-bank import keys:\n"
+            "s  switch to the next source bank in the file\n"
+            "b  switch the target bank (RAM 1/2/3, Card)\n"
+            "w  arm/lock the write gate\n"
+            "c  save the bank to the local cache only (no unit write)\n"
+            "ctrl+s  write the whole bank to the target (gate must be armed)\n"
+            "?  this help\n"
+            "Esc / q  cancel\n\n"
+            "Whole-bank writes relocate interior bank references to the\n"
+            "target and leave ROM references in ROM."
+        )
+        self.app.push_screen(ReportScreen("Whole bank import", text))
 
     def action_cancel(self) -> None:
         self.dismiss(None)

@@ -33,7 +33,9 @@ __all__ = ["SingleImportChoice", "SingleImportScreen", "SlotPrompt"]
 _HELP_LINES = [
     "Single import keys:",
     "Space  toggle auto-assign on the focused source row",
-    "Enter / 0-9  assign focused source to a chosen target slot",
+    "0-9  type the target slot directly into the target column",
+    "     two digits assign immediately; Enter commits one digit",
+    "Enter  commit the typed slot (no dialog opens)",
     "u / Backspace / Delete  unassign focused source",
     "A  assign all unassigned active sources to free/Init slots",
     "U  clear all assignments",
@@ -42,7 +44,11 @@ _HELP_LINES = [
     "ctrl+s  import the current assignment",
     "r  rebuild",
     "?  this help",
-    "Esc / q  cancel",
+    "Esc  cancel typed slot first, then leave the screen",
+    "q  leave the screen",
+    "",
+    "The lower table's 'patches' column shows the destination patch",
+    "slots a performance uses or will use.",
 ]
 
 
@@ -189,6 +195,10 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
         self._assignments: Dict[int, relations.PerfId] = {}
         self._active_sources: List[int] = []
         self._status_message = ""
+        #: Target slot digits typed straight into the source row. No modal:
+        #: the target column shows the digits while they are entered.
+        self._slot_entry = ""
+        self._slot_entry_source: Optional[int] = None
 
     @property
     def assignments(self) -> Dict[int, relations.PerfId]:
@@ -223,6 +233,13 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
             if pid == perf_id:
                 return slot
         return None
+
+    def _target_text(self, source_slot: int, target_slot: Optional[int]) -> str:
+        if self._slot_entry_source == source_slot and self._slot_entry:
+            return f"[bold cyan]{self._slot_entry}[/bold cyan]"
+        if target_slot is None:
+            return "--"
+        return f"[bold yellow]{target_slot:02d}[/bold yellow]"
 
     def _first_free_target_slot(self) -> Optional[int]:
         assigned = set(self._assignments)
@@ -268,9 +285,9 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
             else:
                 gate_text = "Write gate: locked (press w)"
             self.query_one(f"#{self.GATE_ID}", Static).update(gate_text)
-        self._refresh_source_table()
-        self._refresh_target_table()
         plan = self._plan()
+        self._refresh_source_table()
+        self._refresh_target_table(plan)
         with suppress(Exception):
             budget_text = (
                 f"Assigned: {len(self._assignments)} · "
@@ -304,9 +321,7 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
             name = dumps.record_name(record)
             parts = sum(1 for p in rec.performance_parts(record) if p.used)
             target_slot = self._target_slot_for_source(slot)
-            target_text = "--" if target_slot is None else f"{target_slot:02d}"
-            if target_slot is not None:
-                target_text = f"[bold yellow]{target_text}[/bold yellow]"
+            target_text = self._target_text(slot, target_slot)
             table.add_row(
                 f"{slot:02d}",
                 target_text,
@@ -321,18 +336,30 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
                 table.move_cursor(row=cursor)
             table.focus()
 
-    def _refresh_target_table(self) -> None:
+    def _refresh_target_table(self, plan: Any = None) -> None:
         try:
             table = self.query_one(f"#{self.TARGET_TABLE_ID}", DataTable)
         except Exception:
             return
         table.clear()
+        alloc_by_slot = {}
+        if plan is not None:
+            alloc_by_slot = {
+                allocation.target_perf_slot: allocation
+                for allocation in plan.allocations
+            }
         perfs = getattr(self._target_source, "performances", [])
         for slot in range(50):
             record = perfs[slot] if slot < len(perfs) else b""
             assigned_src = self._assignments.get(slot)
             if assigned_src is not None:
                 state = f"← {assigned_src.number:02d}"
+                allocation = alloc_by_slot.get(slot)
+                patch_slots = (
+                    sorted(set(allocation.part_patch_slots.values()))
+                    if allocation is not None
+                    else []
+                )
             else:
                 try:
                     empty = perfcopy.is_empty_performance(record)
@@ -343,6 +370,17 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
                     state = "Init" if name_low == "init" else "free"
                 else:
                     state = "used"
+                patch_slots = (
+                    sorted(
+                        {
+                            part.patch
+                            for part in rec.performance_parts(record)
+                            if part.used and part.bank == self._target_bank.number
+                        }
+                    )
+                    if not empty
+                    else []
+                )
             name = dumps.record_name(record)
             if assigned_src is not None:
                 with suppress(Exception):
@@ -358,12 +396,23 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
                         else ""
                     )
                     name = f"{src_name} ← {name}"
-            table.add_row(f"{slot:02d}", state, _escape(str(name)), key=str(slot))
+            patch_text = ",".join(f"{number:02d}" for number in patch_slots) or "--"
+            table.add_row(
+                f"{slot:02d}",
+                state,
+                _escape(str(name)),
+                _escape(patch_text),
+                key=str(slot),
+            )
 
     def compose(self) -> ComposeResult:
         with Vertical():
             yield Static(self._path, id=self.HEADER_ID, classes="header", markup=False)
-            hint = "s source bank · w gate · ctrl+s import · ? help · esc cancel"
+            hint = (
+                "Space assign · type 00-49 + Enter exact slot (inline) · "
+                "u unassign · A all · U clear\n"
+                "s source bank · w gate · ctrl+s import · ? help · Esc cancel"
+            )
             yield Static(hint, classes="hint", markup=False)
             yield DataTable(
                 id=self.SOURCE_TABLE_ID, cursor_type="row", zebra_stripes=True
@@ -385,7 +434,8 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
             tgt_table = self.query_one(f"#{self.TARGET_TABLE_ID}", DataTable)
             tgt_table.add_column("slot", key="slot", width=6)
             tgt_table.add_column("state", key="state", width=8)
-            tgt_table.add_column("name", key="name")
+            tgt_table.add_column("performance", key="name")
+            tgt_table.add_column("patch slots", key="patches", width=16)
         self._refresh()
 
     def on_key(self, event: Any) -> None:
@@ -393,7 +443,74 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
         if key in "0123456789":
             event.stop()
             event.prevent_default()
-            self.action_open_slot(key)
+            self._type_slot_digit(key)
+            return
+        if key == "backspace" and self._slot_entry:
+            event.stop()
+            event.prevent_default()
+            self._slot_entry = self._slot_entry[:-1]
+            if not self._slot_entry:
+                self._slot_entry_source = None
+                self._set_status("slot entry cancelled")
+            else:
+                self._set_status(
+                    f"target slot {self._slot_entry}_ — "
+                    "type the second digit or Enter; Esc cancels"
+                )
+            self._refresh_source_table()
+            return
+        if key == "enter" and self._slot_entry:
+            event.stop()
+            event.prevent_default()
+            self._commit_slot_entry()
+            return
+        if key == "escape" and self._slot_entry:
+            event.stop()
+            event.prevent_default()
+            self._slot_entry = ""
+            self._slot_entry_source = None
+            self._set_status("slot entry cancelled")
+            self._refresh_source_table()
+
+    def _type_slot_digit(self, digit: str) -> None:
+        source_slot = self._focused_source_slot()
+        if source_slot is None:
+            self._set_status("select a source performance first")
+            return
+        if self._slot_entry_source != source_slot:
+            self._slot_entry = ""
+            self._slot_entry_source = source_slot
+        self._slot_entry = (self._slot_entry + digit)[:2]
+        if len(self._slot_entry) == 2:
+            self._commit_slot_entry()
+            return
+        self._set_status(
+            f"target slot {self._slot_entry}_ — "
+            "type the second digit or Enter; Esc cancels"
+        )
+        self._refresh_source_table()
+
+    def _commit_slot_entry(self) -> None:
+        source_slot = self._slot_entry_source
+        text = self._slot_entry
+        if source_slot is None or not text:
+            self._set_status("type a target slot 00-49 first")
+            return
+        try:
+            target_slot = int(text)
+        except ValueError:
+            self._set_status("target slot must be 00-49")
+            return
+        if not 0 <= target_slot <= 49:
+            self._set_status("target slot must be 00-49")
+            self._refresh_source_table()
+            return
+        self._clear_slot_entry()
+        self._assign_to_slot(source_slot, target_slot)
+
+    def _clear_slot_entry(self) -> None:
+        self._slot_entry = ""
+        self._slot_entry_source = None
 
     def _focused_source_slot(self) -> Optional[int]:
         try:
@@ -406,6 +523,7 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
         return self._active_sources[row]
 
     def action_toggle_auto(self) -> None:
+        self._clear_slot_entry()
         slot = self._focused_source_slot()
         if slot is None:
             return
@@ -444,18 +562,19 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
                 table.move_cursor(row=table.cursor_row + 1)
 
     def action_open_slot(self, seed: str = "") -> None:
-        slot = self._focused_source_slot()
-        if slot is None:
+        if self._slot_entry:
+            self._commit_slot_entry()
             return
-
-        def on_result(result: Optional[int]) -> None:
-            if result is None:
-                return
-            self._assign_to_slot(slot, result)
-
-        self.app.push_screen(SlotPrompt(seed=seed), on_result)
+        if seed and seed in "0123456789":
+            self._type_slot_digit(seed)
+            return
+        self._set_status(
+            "type the target slot directly in the target column (00-49); "
+            "two digits commit, Enter commits one"
+        )
 
     def _assign_to_slot(self, source_slot: int, target_slot: int) -> None:
+        self._clear_slot_entry()
         source_scope = self._source_scope()
         perf_id = relations.PerfId(source_scope, source_slot)
         existing = self._assignments.get(target_slot)
@@ -482,6 +601,7 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
         self._refresh()
 
     def action_unassign(self) -> None:
+        self._clear_slot_entry()
         slot = self._focused_source_slot()
         if slot is None:
             return
@@ -496,6 +616,7 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
         self._refresh()
 
     def action_assign_all(self) -> None:
+        self._clear_slot_entry()
         assigned = set(self._assignments)
         unassigned_sources = [
             s for s in self._active_sources if self._target_slot_for_source(s) is None
@@ -545,11 +666,13 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
         self._refresh()
 
     def action_clear_all(self) -> None:
+        self._clear_slot_entry()
         self._assignments.clear()
         self._set_status("cleared all assignments")
         self._refresh()
 
     def action_cycle_source(self) -> None:
+        self._clear_slot_entry()
         if not self._banks:
             return
         self._source_index = (self._source_index + 1) % len(self._banks)
@@ -591,4 +714,9 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
         self.app.push_screen(ReportScreen("Single import", "\n".join(_HELP_LINES)))
 
     def action_cancel(self) -> None:
+        if self._slot_entry:
+            self._clear_slot_entry()
+            self._set_status("slot entry cancelled")
+            self._refresh_source_table()
+            return
         self.dismiss(None)

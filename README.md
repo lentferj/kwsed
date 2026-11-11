@@ -546,7 +546,9 @@ left and all 50 destination slots on the right, with a live budget:
 
 ```text
 Space        assign the focused source to the first free/Init target slot
-Enter / 0-9  assign to a chosen exact slot 00-49 (overwrite allowed)
+0-9          type the target slot directly into the table's target column
+             two digits assign immediately; Enter commits one digit
+Enter        commit a one-digit target (no dialog opens)
 u / Backspace / Delete   unassign
 A / U        assign all unassigned / clear all
 s            switch source bank
@@ -554,15 +556,20 @@ w            toggle the write gate
 ctrl+s       write the whole assignment in one batch
 ```
 
-`Init` and free slots are available; occupied slots are overwritten only when
-chosen. Each assignment is checked against the 50 performance, 35 patch, 32
-sequence and 501 step budgets, so the screen refuses an assignment before it
-can make a bank that does not fit. For a file bank that already has the same
-scope as the target (for example RAM 1 into RAM 1), choose a different target
-bank for now; the same-scope source alias is not implemented yet. The app reads the destination bank once,
-the slot-preserving planner keeps every untouched destination slot and every
-surviving shared/ROM reference, and `ctrl+s` writes one fenced bundle with one
-undo step instead of one slow single-performance operation per row.
+The lower table has a `patch slots` column: it lists the destination patch
+slots an existing performance uses, or the slots the planner will give an
+assigned performance. `Init` and free slots are available; occupied slots are
+overwritten only when chosen. Each assignment is checked against the 50
+performance, 35 patch, 32 sequence and 501 step budgets, so the screen refuses
+an assignment before it can make a bank that does not fit. For a file bank
+that already has the same scope as the target (for example RAM 1 into RAM 1),
+choose a different target bank for now; the same-scope source alias is not
+implemented yet. The app reads the destination bank once, the slot-preserving
+planner keeps every untouched destination slot and every surviving shared/ROM
+reference, and `ctrl+s` writes one fenced bundle with one undo step instead of
+one slow single-performance operation per row. After the write, the target
+bank's names and rows are refreshed from the bytes just written, without
+re-reading every bank; `S` remains the full rescan.
 
 The copy screen (`y`) uses the same slot-preserving planner for append and
 overwrite, the whole-bank replace for clean, and the same `before_blocks` fast
