@@ -449,6 +449,23 @@ files.
 | `~/.local/share/kwsed/banks/` | imported bank records |
 | `~/.local/share/kwsed/backups/` | write-fence backup envelopes |
 
+### Pre-audit staging area
+
+Two hand-edited keys in `~/.config/kwsed/config.toml` reserve a staging area
+the import screen's audition uses:
+
+```toml
+preaudit_target_perf = "RAM3:49"
+preaudit_target_patches = "RAM3:27-34"
+```
+
+`preaudit_target_perf` names a single performance slot and
+`preaudit_target_patches` a patch slot range (inclusive; a single slot is
+valid). Both must point at a writable bank (RAM 1-3 or the Card). It is the
+user's job to keep those slots free; the app still backs up whatever it
+overwrites there. A malformed value or a ROM bank silently turns the feature
+off.
+
 ### Multisets and multi-card staging
 
 `m` reads the 32 Multisets; `e` edits the selected one's 16 channels. Silent
