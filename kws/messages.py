@@ -82,6 +82,9 @@ __all__ = [
     "single_patch_request",
     "single_patch_dump",
     "patch_write_command",
+    "single_performance_request",
+    "single_performance_dump",
+    "performance_write_command",
     "multi_select",
     "parameter_change",
     "REQUEST_FOR_DUMP",
@@ -532,6 +535,36 @@ def patch_write_command(bank: int, number: int, channel: int = 0) -> bytes:
     The documented form is bank then number.
     """
     return frame(Function.PATCH_WRITE, [bank, number], channel=channel)
+
+
+def single_performance_request(bank: int, number: int, channel: int = 0) -> bytes:
+    """Ask for one performance. Read-only for memory; the reply lands
+    in the unit's performance edit buffer (Reference Appendix 4, 4.1.2)."""
+    return frame(Function.SINGLE_PERFORMANCE_REQUEST, [bank, number], channel=channel)
+
+
+def single_performance_dump(
+    bank: int, number: int, data: Sequence[int], *, channel: int = 0
+) -> bytes:
+    """One performance, addressed to a slot. **Lands in the edit buffer.**
+
+    On its own this changes nothing in memory: a single performance dump
+    is placed in the edit buffer, and it takes a separate write command
+    to put it in the slot (Appendix 4, 2.1.2)."""
+    nibbles = list(to_nibbles(data))
+    return frame(
+        Function.PERFORMANCE_DUMP,
+        [bank, number] + nibbles + [checksum(nibbles)],
+        channel=channel,
+    )
+
+
+def performance_write_command(bank: int, number: int, channel: int = 0) -> bytes:
+    """Commit the performance edit buffer to a slot. **Destructive.**
+
+    Documented in Appendix 4, 4.2.2: bank then number (the order
+    Edisyn got wrong for the patch write command)."""
+    return frame(Function.PERFORMANCE_WRITE, [bank, number], channel=channel)
 
 
 def multi_select(number: int, *, channel: int = 0) -> bytes:

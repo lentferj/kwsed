@@ -134,6 +134,10 @@ class DemoDevice:
         self.bank_write_count: int = 0
         self.bundle_writes: List[Dict[str, Any]] = []
         self.bundle_write_count: int = 0
+        self.edit_buffer: Optional[bytes] = None
+        self.buffer_log: List[Any] = []
+        self.patch_write_count: int = 0
+        self.performance_write_count: int = 0
         self.received: List[bytes] = []
         self.identify_calls: int = 0
         self._closed = False
@@ -168,9 +172,45 @@ class DemoDevice:
             m.Function.BULK_REQUEST: banks.Kind.PATCH,
             m.Function.PERFORMANCE_BANK_REQUEST: banks.Kind.PERFORMANCE,
         }
-        if packet.function not in kinds or not packet.payload:
-            return m.frame(m.Function.DATA_LOAD_ERROR, channel=self.channel)
-        return self._bank_dump(packet.payload[0], kinds[packet.function])
+        if packet.function in kinds and packet.payload:
+            return self._bank_dump(packet.payload[0], kinds[packet.function])
+        # single-object requests
+        if (
+            packet.function == m.Function.SINGLE_PATCH_REQUEST
+            and len(packet.payload) >= 2
+        ):
+            bank_byte = packet.payload[0]
+            number = packet.payload[1]
+            entry = banks.by_sysex(bank_byte)
+            payload = self._bank_payload(entry, banks.Kind.PATCH)
+            at = number * records.PATCH_SIZE
+            record = payload[at : at + records.PATCH_SIZE]
+            entry = banks.by_sysex(bank_byte)
+            nibbles = list(m.to_nibbles(record))
+            return m.frame(
+                m.Function.SINGLE_PATCH_DUMP,
+                [bank_byte, number] + nibbles + [m.checksum(nibbles)],
+                channel=self.channel,
+            )
+        if (
+            packet.function == m.Function.SINGLE_PERFORMANCE_REQUEST
+            and len(packet.payload) >= 2
+        ):
+            bank_byte = packet.payload[0]
+            number = packet.payload[1]
+            entry = banks.by_sysex(bank_byte)
+            payload = self._bank_payload(entry, banks.Kind.PERFORMANCE)
+            at = number * records.PERFORMANCE_SIZE
+            record = payload[at : at + records.PERFORMANCE_SIZE]
+            nibbles = list(m.to_nibbles(record))
+            return m.frame(
+                m.Function.PERFORMANCE_DUMP,
+                [bank_byte, number] + nibbles + [m.checksum(nibbles)],
+                channel=self.channel,
+            )
+        if packet.function in (m.Function.PATCH_WRITE, m.Function.PERFORMANCE_WRITE):
+            return m.frame(m.Function.WRITE_COMPLETED, channel=self.channel)
+        return m.frame(m.Function.DATA_LOAD_ERROR, channel=self.channel)
 
     def _bank_dump(self, number: int, kind: str) -> bytes:
         # The byte on the wire, not a display position: byte 3 is the
@@ -193,6 +233,36 @@ class DemoDevice:
             raw.extend(record)
         payload = [entry.sysex] + list(m.to_nibbles(bytes(raw)))
         return m.frame(function, payload, channel=self.channel)
+
+    def _bank_payload(self, entry: banks.Bank, kind: str) -> bytes:
+        stored = self._written.get((entry.id, kind))
+        if stored is not None:
+            return bytes(stored)
+        if kind == banks.Kind.PERFORMANCE:
+            size = records.PERFORMANCE_SIZE
+            count = banks.PERFORMANCES_PER_BANK
+        elif kind == banks.Kind.PATCH:
+            size = records.PATCH_SIZE
+            count = banks.PATCHES_PER_BANK
+        else:
+            size = records.WAVESEQ_BANK_SIZE
+            count = 1
+        if kind == "waveseq":
+            pool = bytearray(records.WAVESEQ_BANK_SIZE)
+            for i in range(records.SEQUENCES_PER_BANK):
+                name = f"Demo {i:02d}"
+                at = records.SEQNAME_BASE + i * records.SEQNAME_SIZE
+                encoded = name.encode("ascii")
+                pool[at : at + len(encoded)] = encoded
+            return bytes(pool)
+        raw = bytearray()
+        for index in range(count):
+            record = bytearray(size)
+            name = demo_name(entry.id, kind, index)
+            record[: len(name)] = name.encode("ascii")
+            record[m.NAME_LEN] = 0x80 | (index & 0x7F)
+            raw.extend(record)
+        return bytes(raw)
 
     def read_raw(
         self,
@@ -477,3 +547,108 @@ class DemoDevice:
             "verified": True,
             "mismatch": None,
         }
+
+    def read_patch(
+        self, bank: int | str, number: int, *, timeout: Optional[float] = None
+    ) -> bytes:
+        entry = banks.bank(bank)
+        payload = self._bank_payload(entry, banks.Kind.PATCH)
+        at = number * records.PATCH_SIZE
+        return payload[at : at + records.PATCH_SIZE]
+
+    def read_performance(
+        self, bank: int | str, number: int, *, timeout: Optional[float] = None
+    ) -> bytes:
+        entry = banks.bank(bank)
+        payload = self._bank_payload(entry, banks.Kind.PERFORMANCE)
+        at = number * records.PERFORMANCE_SIZE
+        return payload[at : at + records.PERFORMANCE_SIZE]
+
+    def write_patch(
+        self,
+        bank: int | str,
+        number: int,
+        data: Any,
+        *,
+        backup_dir: str,
+        verify: bool = True,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        self._tick()
+        entry = banks.bank(bank)
+        if not entry.writable:
+            raise RuntimeError(f"{entry.label} is ROM and cannot be written.")
+        before = self.read_patch(bank, number)
+        # splice into full bank
+        payload = bytearray(self._bank_payload(entry, banks.Kind.PATCH))
+        at = number * records.PATCH_SIZE
+        payload[at : at + records.PATCH_SIZE] = bytes(data)
+        self._written[(entry.id, banks.Kind.PATCH)] = bytes(payload)
+        path = backup.save(
+            backup_dir,
+            kind="patch",
+            slot=f"{entry.label} {number:02d}",
+            name=f"{entry.label} {number:02d}",
+            device_id=str(self.channel),
+            source="kwsed",
+            blocks={"dump": before},
+        )
+        self.patch_write_count += 1
+        return {
+            "bank": entry.label,
+            "number": number,
+            "backup": path,
+            "verified": True,
+            "mismatch": None,
+        }
+
+    def write_performance(
+        self,
+        bank: int | str,
+        number: int,
+        data: Any,
+        *,
+        backup_dir: str,
+        verify: bool = True,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        self._tick()
+        entry = banks.bank(bank)
+        if not entry.writable:
+            raise RuntimeError(f"{entry.label} is ROM and cannot be written.")
+        before = self.read_performance(bank, number)
+        payload = bytearray(self._bank_payload(entry, banks.Kind.PERFORMANCE))
+        at = number * records.PERFORMANCE_SIZE
+        payload[at : at + records.PERFORMANCE_SIZE] = bytes(data)
+        self._written[(entry.id, banks.Kind.PERFORMANCE)] = bytes(payload)
+        path = backup.save(
+            backup_dir,
+            kind="performance",
+            slot=f"{entry.label} {number:02d}",
+            name=f"{entry.label} {number:02d}",
+            device_id=str(self.channel),
+            source="kwsed",
+            blocks={"dump": before},
+        )
+        self.performance_write_count += 1
+        return {
+            "bank": entry.label,
+            "number": number,
+            "backup": path,
+            "verified": True,
+            "mismatch": None,
+        }
+
+    def send_performance_to_buffer(
+        self,
+        bank: int | str,
+        number: int,
+        data: Any,
+        *,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        self._tick()
+        entry = banks.bank(bank)
+        self.edit_buffer = bytes(data)
+        self.buffer_log.append((entry.label, number))
+        return {"bank": entry.label, "number": number}

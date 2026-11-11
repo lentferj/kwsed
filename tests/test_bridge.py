@@ -221,6 +221,31 @@ class Unit:
             return m.frame(m.Function.WRITE_ERROR, channel=0)
         return m.frame(m.Function.WRITE_COMPLETED, channel=0)
 
+    def _performance_request(self, data):
+        if self.mode == "read_error":
+            return m.frame(m.Function.WRITE_ERROR, channel=0)
+        bank = 11 if self.mode == "wrong_slot" else data[5]
+        number = data[6]
+        at = number * r.PERFORMANCE_SIZE
+        return m.single_performance_dump(
+            bank, number, self.contents[at : at + r.PERFORMANCE_SIZE], channel=0
+        )
+
+    def _performance_dump(self, data):
+        packet = m.parse(data)
+        assert packet is not None
+        at = data[5] * r.PERFORMANCE_SIZE
+        self.contents = (
+            self.contents[:at]
+            + bytes(packet.data()[: r.PERFORMANCE_SIZE])
+            + self.contents[at + r.PERFORMANCE_SIZE :]
+        )
+
+    def _performance_write(self, data):
+        if self.mode == "write_error":
+            return m.frame(m.Function.WRITE_ERROR, channel=0)
+        return m.frame(m.Function.WRITE_COMPLETED, channel=0)
+
     def _multi_request(self, data):
         if self.mode == "read_error":
             return m.frame(m.Function.WRITE_ERROR, channel=0)
@@ -246,6 +271,9 @@ class Unit:
         m.Function.SINGLE_PATCH_REQUEST: _patch_request,
         m.Function.SINGLE_PATCH_DUMP: _patch_dump,
         m.Function.PATCH_WRITE: _patch_write,
+        m.Function.SINGLE_PERFORMANCE_REQUEST: _performance_request,
+        m.Function.PERFORMANCE_DUMP: _performance_dump,
+        m.Function.PERFORMANCE_WRITE: _performance_write,
         m.Function.MULTI_REQUEST: _multi_request,
         m.Function.MULTISET_DUMP: _multi_dump_write,
         m.Function.SYSTEM_SETUP_REQUEST: _system_setup_request,

@@ -724,6 +724,127 @@ class WavestationBridge:
             result["mismatch"] = _first_difference(bytes(data), bytes(after))
         return result
 
+    def read_performance(
+        self, bank: int | str, number: int, *, timeout: Optional[float] = None
+    ) -> bytes:
+        """One performance's 181 bytes. Read-only for memory, but the reply
+        lands in the performance edit buffer, so it clobbers whatever edit
+        was buffered there -- the buffer is scratch, harmless, but say it."""
+        entry = banks.bank(bank)
+        self._drain()
+        self._send(m.single_performance_request(entry.sysex, number, self.channel))
+        deadline = time.time() + (SINGLE_OBJECT_TIMEOUT if timeout is None else timeout)
+        while time.time() < deadline:
+            message = self._in.get_message()
+            if message is None:
+                time.sleep(0.002)
+                continue
+            packet = m.parse(message[0])
+            if packet is None or packet.channel != self.channel:
+                continue
+            if packet.is_error:
+                raise DeviceRefused(packet.function)
+            if packet.function != m.Function.PERFORMANCE_DUMP:
+                continue
+            raw = bytes(message[0])
+            if len(raw) < 7 or raw[5] != entry.sysex or raw[6] != number:
+                continue
+            return packet.data()[: records.PERFORMANCE_SIZE]
+        raise TimeoutError(
+            f"no performance came back for {entry.label} {number}. A reply for a "
+            f"different slot does not count, so this can also mean the unit "
+            f"is still answering an earlier request."
+        )
+
+    def write_performance(
+        self,
+        bank: int | str,
+        number: int,
+        data: bytes,
+        *,
+        backup_dir: str,
+        verify: bool = True,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Replace **one performance**. Destructive, and fenced like a patch write.
+
+        Two messages, because one is not enough: a single performance dump
+        lands in the edit buffer, and a separate write command commits it to
+        the slot. The backup covers the slot it overwrites.
+        """
+        entry = banks.bank(bank)
+        if not entry.writable:
+            raise DeviceError(f"{entry.label} is ROM and cannot be written.")
+        if not 0 <= number < banks.PERFORMANCES_PER_BANK:
+            raise ValueError(
+                f"a bank holds {banks.PERFORMANCES_PER_BANK} performances, so "
+                f"{number} is not one of them"
+            )
+        if len(data) != records.PERFORMANCE_SIZE:
+            raise ValueError(
+                f"a performance is {records.PERFORMANCE_SIZE} bytes; got {len(data)}"
+            )
+
+        try:
+            before = self.read_performance(entry.sysex, number, timeout=timeout)
+        except Exception as exc:
+            raise DeviceError(
+                f"could not read {entry.label} performance {number} before "
+                f"writing it, so nothing was sent ({exc})."
+            ) from exc
+        saved = backup.save(
+            backup_dir,
+            kind="performance",
+            slot=_performance_backup_name(entry.label, number),
+            name=_performance_backup_name(entry.label, number),
+            device_id=str(self.channel),
+            source="kwsed",
+            blocks={
+                "dump": m.single_performance_dump(
+                    entry.sysex, number, before, channel=self.channel
+                )
+            },
+        )
+
+        self._drain()
+        self._send(
+            m.single_performance_dump(entry.sysex, number, data, channel=self.channel)
+        )
+        self._send(m.performance_write_command(entry.sysex, number, self.channel))
+
+        result: Dict[str, Any] = {
+            "bank": entry.label,
+            "number": number,
+            "backup": saved,
+            "status": None,
+            "verified": None,
+            "mismatch": None,
+        }
+        deadline = time.time() + 2.0
+        while time.time() < deadline:
+            message = self._in.get_message()
+            if message is None:
+                time.sleep(0.002)
+                continue
+            packet = m.parse(message[0])
+            if packet is None:
+                continue
+            if packet.function in (m.Function.WRITE_COMPLETED, m.Function.WRITE_ERROR):
+                result["status"] = packet.function_name
+                break
+        if not verify:
+            return result
+        try:
+            after = self.read_performance(entry.sysex, number, timeout=timeout)
+        except Exception as exc:
+            result["verified"] = False
+            result["mismatch"] = f"could not read it back ({exc})"
+            return result
+        result["verified"] = bytes(after) == bytes(data)
+        if not result["verified"]:
+            result["mismatch"] = _first_difference(bytes(data), bytes(after))
+        return result
+
     def read_multi(self, *, timeout: Optional[float] = None) -> bytes:
         """The Multisets, as the raw 0x62 message. Read-only, makes no sound.
 
@@ -1362,3 +1483,7 @@ def _multi_request(channel: int) -> bytes:
 
 def _patch_backup_name(bank_label: str, number: int) -> str:
     return f"{bank_label}-patch{number:02d}"
+
+
+def _performance_backup_name(bank_label: str, number: int) -> str:
+    return f"{bank_label}-performance{number:02d}"

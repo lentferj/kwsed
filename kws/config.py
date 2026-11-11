@@ -39,7 +39,9 @@ from __future__ import annotations
 
 import os
 import re
+from typing import Any
 
+from kws import banks
 from vinsynlib.config import (
     bind,
     config_dir,
@@ -83,7 +85,11 @@ __all__ = [
     "load_show_patches",
     "load_deps_pane",
     "load_import_folder",
+    "load_preaudit_patch_area",
+    "load_preaudit_target",
     "migrate_legacy_config",
+    "parse_preaudit_patch_range",
+    "parse_preaudit_perf",
     "save_card_mode",
     "save_channel",
     "save_device_id",
@@ -224,6 +230,151 @@ def load_import_folder(path: str | None = None) -> str:
 def save_import_folder(value: str, path: str | None = None) -> None:
     """Remember the last folder used by the import file picker."""
     _settings.save_ui_state("import.folder", value, ui_state_path(path))
+
+
+#: Range bounds, mirroring ``banks.PERFORMANCES_PER_BANK`` (50) and
+#: ``banks.PATCHES_PER_BANK`` (35); duplicated here so ``kws.config`` does
+#: not import ``kws.banks`` at module load in a way that could cycle. (It
+#: turns out ``banks`` does not import ``config``, so the import above is
+#: safe; the bounds are still stated locally for clarity.)
+_PREAUDIT_PERF_COUNT = 50
+_PREAUDIT_PATCH_COUNT = 35
+
+
+def _parse_bank_token(token: str) -> Any:
+    """Resolve a bank id token, rejecting space-bearing labels."""
+    if not token or any(ch.isspace() for ch in token):
+        raise ValueError(
+            f"unknown bank {token!r}; expected one of RAM1, RAM2, "
+            f"RAM3, ROM4..ROM11, CARD"
+        )
+    try:
+        entry = banks.bank(token)
+    except (LookupError, ValueError, TypeError):
+        raise ValueError(
+            f"unknown bank {token!r}; expected one of RAM1, RAM2, "
+            f"RAM3, ROM4..ROM11, CARD"
+        ) from None
+    if not entry.writable:
+        raise ValueError(
+            f"bank {entry.id} is not writable (ROM); the pre-audit "
+            f"staging area must live in a writable bank"
+        )
+    return entry
+
+
+def parse_preaudit_perf(value: Any) -> tuple[Any, int] | None:
+    """Parse "RAM3:49" into (Bank, slot) for the pre-audit staging slot.
+
+    Returns None for an unset/empty value. Raises ValueError with a
+    helpful message for anything malformed, a bank the unit cannot
+    write (ROM), or a slot outside 0-49.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("preaudit target must be a string like 'RAM3:49'")
+    text = value.strip()
+    if text == "":
+        return None
+    if ":" not in text:
+        raise ValueError(f"malformed preaudit target {value!r}; expected 'BANK:SLOT'")
+    bank_token, _, slot_token = text.partition(":")
+    bank_token = bank_token.strip()
+    slot_token = slot_token.strip()
+    if bank_token == "" or slot_token == "" or ":" in slot_token:
+        raise ValueError(f"malformed preaudit target {value!r}; expected 'BANK:SLOT'")
+    entry = _parse_bank_token(bank_token)
+    try:
+        slot = int(slot_token)
+    except (ValueError, TypeError):
+        raise ValueError(f"invalid slot {slot_token!r} in {value!r}") from None
+    if slot < 0 or slot >= _PREAUDIT_PERF_COUNT:
+        raise ValueError(
+            f"slot {slot} out of range for {entry.id}; expected 0-"
+            f"{_PREAUDIT_PERF_COUNT - 1}"
+        )
+    return entry, slot
+
+
+def _parse_patch_slots(rest: str, value: Any) -> tuple[int, ...]:
+    if "-" in rest:
+        parts = rest.split("-")
+        if len(parts) != 2:
+            raise ValueError(f"malformed preaudit patch area {value!r}")
+        try:
+            a = int(parts[0].strip())
+            b = int(parts[1].strip())
+        except (ValueError, TypeError):
+            raise ValueError(f"invalid slot range {rest!r} in {value!r}") from None
+        if a > b:
+            raise ValueError(f"slot range {a}-{b} is not ascending in {value!r}")
+        return tuple(range(a, b + 1))
+    try:
+        return (int(rest),)
+    except (ValueError, TypeError):
+        raise ValueError(f"invalid slot {rest!r} in {value!r}") from None
+
+
+def parse_preaudit_patch_range(value: Any) -> tuple[Any, tuple[int, ...]] | None:
+    """Parse "RAM3:27-34" into (Bank, slots) for the pre-audit patch area.
+
+    "RAM3:30" (one slot) is also valid. Returns None when unset.
+    Raises ValueError for malformed input, a ROM bank, or slots
+    outside 0-34.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("preaudit patch area must be a string like 'RAM3:27-34'")
+    text = value.strip()
+    if text == "":
+        return None
+    if ":" not in text:
+        raise ValueError(
+            f"malformed preaudit patch area {value!r}; expected "
+            f"'BANK:SLOT' or 'BANK:A-B'"
+        )
+    bank_token, _, rest = text.partition(":")
+    bank_token = bank_token.strip()
+    rest = rest.strip()
+    if bank_token == "" or rest == "" or ":" in rest:
+        raise ValueError(f"malformed preaudit patch area {value!r}")
+    entry = _parse_bank_token(bank_token)
+    slots = _parse_patch_slots(rest, value)
+    if any(s < 0 or s >= _PREAUDIT_PATCH_COUNT for s in slots):
+        bad = next(s for s in slots if s < 0 or s >= _PREAUDIT_PATCH_COUNT)
+        raise ValueError(
+            f"slot {bad} out of range for {entry.id}; expected 0-"
+            f"{_PREAUDIT_PATCH_COUNT - 1}"
+        )
+    return entry, slots
+
+
+def load_preaudit_target(path: str | None = None) -> tuple[Any, int] | None:
+    """The pre-audit staging performance slot, or None when unset/broken."""
+    data = _settings.read(path or DEFAULT_PATH)[0]
+    value = data.get("preaudit_target_perf")
+    if not isinstance(value, str):
+        return None
+    try:
+        return parse_preaudit_perf(value)
+    except ValueError:
+        return None
+
+
+def load_preaudit_patch_area(
+    path: str | None = None,
+) -> tuple[Any, tuple[int, ...]] | None:
+    """The pre-audit staging patch slots, or None when unset/broken."""
+    data = _settings.read(path or DEFAULT_PATH)[0]
+    value = data.get("preaudit_target_patches")
+    if not isinstance(value, str):
+        return None
+    try:
+        return parse_preaudit_patch_range(value)
+    except ValueError:
+        return None
 
 
 def _toml_scalar(value: object) -> str | None:
