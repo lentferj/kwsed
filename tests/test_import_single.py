@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
@@ -233,6 +234,42 @@ async def test_target_patch_slots_column() -> None:
         await settle(pilot)
         # patch 00 is pinned by the used target performance; the source gets 01
         assert str(tgt.get_row_at(6)[3]) == "01"
+
+
+@pytest.mark.asyncio
+async def test_target_source_path_column_is_right_trimmed() -> None:
+    screen = _screen(active_slots=[0])
+    original = screen._banks[0]
+    screen._banks[0] = SimpleNamespace(
+        label=original.label,
+        scope=original.scope,
+        source=original.source,
+        source_path="/a/b/WS_ALL.syx",
+    )
+    host = _host()
+    async with host.run_test() as pilot:
+        host.push_screen_cb(screen)
+        await settle(pilot)
+        src = screen.query_one("#source-table", DataTable)
+        src.move_cursor(row=0)
+        await settle(pilot)
+        await pilot.press("space")
+        await settle(pilot)
+        tgt = screen.query_one("#target-table", DataTable)
+        shown = str(tgt.get_row_at(0)[4])
+        assert "WS_ALL.syx" in shown
+        assert shown.startswith(" "), "the path is right-aligned"
+        long_bank = screen._banks[0]
+        screen._banks[0] = SimpleNamespace(
+            label=long_bank.label,
+            scope=long_bank.scope,
+            source=long_bank.source,
+            source_path="/home/me/Monotanz/Sounds/LIBRA18.SYX",
+        )
+        screen._refresh()
+        await settle(pilot)
+        shown = str(tgt.get_row_at(0)[4])
+        assert shown.endswith("LIBRA18.SYX")
 
 
 @pytest.mark.asyncio

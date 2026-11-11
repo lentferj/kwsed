@@ -13,7 +13,7 @@ from typing import Any, Optional
 from unittest.mock import patch
 
 import pytest
-from textual.widgets import DataTable
+from textual.widgets import DataTable, Static
 
 from kws import banks, bankstore, config, deps, importers, perfcopy, relations
 from kws import messages as m
@@ -24,6 +24,7 @@ from kwsed.gate import EditGate
 from kwsed.import_bank import WholeBankChoice, WholeBankImportScreen
 from kwsed.import_screen import BankImportScreen
 from kwsed.import_single import SingleImportChoice, SingleImportScreen
+from kwsed.target_bank import ImportMenuScreen, TargetBankScreen
 from vinsynlib.ui.modals import ChoiceScreen
 
 PERF_RECORD_SIZE = 181
@@ -77,6 +78,38 @@ async def test_i_binding_hint_and_help() -> None:
     assert "I import" in KEY_HINTS
     assert "Shortcuts: I import" in _HELP
     assert "I   import a file" in _HELP
+
+
+@pytest.mark.asyncio
+async def test_import_menu_q_and_legend() -> None:
+    app = KwsedApp(DemoDevice())
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.action_import()
+        await pilot.pause()
+        assert isinstance(app.screen, ImportMenuScreen)
+        hint = app.screen.query_one("#import-menu-hint", Static)
+        assert "q / Esc back" in str(hint.render())
+        await pilot.press("q")
+        await pilot.pause()
+        assert not isinstance(app.screen, ImportMenuScreen)
+        assert len(app.screen_stack) == 1
+
+
+@pytest.mark.asyncio
+async def test_target_bank_screen_q_and_legend() -> None:
+    app = KwsedApp(DemoDevice())
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = TargetBankScreen("Target bank", ["RAM 1", "RAM 2", "RAM 3", "Card"])
+        app.push_screen(screen)
+        await pilot.pause()
+        assert isinstance(app.screen, TargetBankScreen)
+        hint = app.screen.query_one("#target-bank-hint", Static)
+        assert "q / Esc back" in str(hint.render())
+        await pilot.press("q")
+        await pilot.pause()
+        assert not isinstance(app.screen, TargetBankScreen)
 
 
 @pytest.mark.asyncio

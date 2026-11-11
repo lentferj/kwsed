@@ -90,6 +90,7 @@ from kwsed.file_picker import FilePickerScreen
 from kwsed.import_screen import BankImportScreen
 from kwsed.import_bank import WholeBankImportScreen
 from kwsed.import_single import SingleImportScreen
+from kwsed.target_bank import ImportMenuScreen, TargetBankScreen
 from kwsed.target_screen import TargetSlotScreen
 
 # The legend's wrapping and the widget that draws it are the family's; see
@@ -1369,7 +1370,7 @@ class CopyPerformanceScreen(ModalScreen[Optional[Dict[str, Any]]]):
     def action_bank(self) -> None:
         choices = [bank.label for bank in self._destinations]
         self._app.push_screen(
-            ChoiceScreen(
+            TargetBankScreen(
                 "Destination bank",
                 choices,
                 self._dest_index,
@@ -3212,7 +3213,9 @@ class KwsedApp(App[None]):
 
     def action_import(self) -> None:
         self.push_screen(
-            ChoiceScreen("Import", ["Whole bank", "Single / multiple performances"]),
+            ImportMenuScreen(
+                "Import", ["Whole bank", "Single / multiple performances"]
+            ),
             self._import_kind_chosen,
         )
 
@@ -3403,7 +3406,7 @@ class KwsedApp(App[None]):
         writable: Sequence[Any],
     ) -> None:
         self.push_screen(
-            ChoiceScreen("Target bank", [b.label for b in writable]),
+            TargetBankScreen("Target bank", [b.label for b in writable]),
             lambda ti: self._import_single_target_chosen(
                 path, bank, banks_list, writable, ti
             ),
@@ -3426,7 +3429,7 @@ class KwsedApp(App[None]):
         return f"{base}#{index}"
 
     def _session_source(
-        self, bank: Any, sources: Mapping[str, Any]
+        self, bank: Any, sources: Mapping[str, Any], path: str = ""
     ) -> tuple[Any, deps.Source]:
         """A source bank under a unique session key.
 
@@ -3450,7 +3453,9 @@ class KwsedApp(App[None]):
         label = getattr(bank, "label", base)
         if alias != base:
             label = f"{label} ({alias})"
-        wrapped = SimpleNamespace(label=label, scope=alias, source=aliased)
+        wrapped = SimpleNamespace(
+            label=label, scope=alias, source=aliased, source_path=path
+        )
         return wrapped, aliased
 
     def _import_single_target_chosen(
@@ -3483,7 +3488,7 @@ class KwsedApp(App[None]):
                 return
             self._sources[target.id] = target_source
             sources = dict(self._sources_with_store())
-        wrapped, aliased = self._session_source(bank, sources)
+        wrapped, aliased = self._session_source(bank, sources, path)
         sources[wrapped.scope] = aliased
         sources[target.id] = target_source
         self._import_single_sources = sources
@@ -3510,7 +3515,7 @@ class KwsedApp(App[None]):
         ]
         choices.append("Add another source file…")
         self.push_screen(
-            ChoiceScreen("Source bank", choices, screen.source_index),
+            ImportMenuScreen("Source bank", choices, screen.source_index),
             lambda index: self._single_source_menu_chosen(screen, index),
         )
 
@@ -3549,19 +3554,23 @@ class KwsedApp(App[None]):
                 self.notify_status("import: no banks found")
                 return
             if len(extra_banks) == 1:
-                self._add_extra_source(screen, extra_banks[0])
+                self._add_extra_source(screen, extra_banks[0], path)
                 return
             self.push_screen(
                 BankImportScreen(path=path, banks=extra_banks),
                 lambda choice: self._add_extra_source_choice(
-                    screen, extra_banks, choice
+                    screen, extra_banks, path, choice
                 ),
             )
 
         self.push_screen(picker, done)
 
     def _add_extra_source_choice(
-        self, screen: Any, banks_list: Sequence[Any], index: Optional[int]
+        self,
+        screen: Any,
+        banks_list: Sequence[Any],
+        path: str,
+        index: Optional[int],
     ) -> None:
         if index is None:
             return
@@ -3570,10 +3579,10 @@ class KwsedApp(App[None]):
         except (IndexError, TypeError):
             return
         if bank is not None:
-            self._add_extra_source(screen, bank)
+            self._add_extra_source(screen, bank, path)
 
-    def _add_extra_source(self, screen: Any, bank: Any) -> None:
-        wrapped, aliased = self._session_source(bank, screen.sources)
+    def _add_extra_source(self, screen: Any, bank: Any, path: str = "") -> None:
+        wrapped, aliased = self._session_source(bank, screen.sources, path)
         screen.add_source_bank(wrapped, aliased)
 
     def _import_single_chosen(  # noqa: C901 - one flow, with fence and cache

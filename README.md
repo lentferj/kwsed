@@ -558,8 +558,12 @@ ctrl+s       write the whole assignment in one batch
 
 The lower table has a `patch slots` column: it lists the destination patch
 slots an existing performance uses, or the slots the planner will give an
-assigned performance. `Init` and free slots are available; occupied slots are
-overwritten only when chosen. Each assignment is checked against the 50
+assigned performance. Its `source file` column shows the file an assigned
+performance came from, shortened to the file name and its two parent folders
+(for example `.../Monotanz/Sounds/LIBRA18.SYX`). The text is right-aligned and
+left-trimmed, so the file name at the right is never cut off when the terminal
+is narrow. `Init` and free slots are available; occupied slots are overwritten
+only when chosen. Each assignment is checked against the 50
 performance, 35 patch, 32 sequence and 501 step budgets, so the screen refuses
 an assignment before it can make a bank that does not fit.
 
@@ -577,6 +581,9 @@ every untouched destination slot and every surviving shared/ROM reference, and
 single-performance operation per row. After the write, the target bank's names
 and rows are refreshed from the bytes just written, without re-reading every
 bank; `S` remains the full rescan.
+
+The Import menu and the target-bank chooser bind both `q` and `Esc` and show
+the legend `↑/↓ choose · Enter select · q / Esc back · ? help`.
 
 `Esc`/`q` in the import flow goes back one step: single import → target-bank
 chooser → source-bank chooser → file picker → Import menu; whole-bank import

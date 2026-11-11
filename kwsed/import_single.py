@@ -206,6 +206,7 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
         #: the target column shows the digits while they are entered.
         self._slot_entry = ""
         self._slot_entry_source: Optional[int] = None
+        self._source_path_width = 28
 
     @property
     def assignments(self) -> Dict[int, relations.PerfId]:
@@ -281,6 +282,62 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
         if target_slot is None:
             return "--"
         return f"[bold yellow]{target_slot:02d}[/bold yellow]"
+
+    @staticmethod
+    def _compact_source_path(path: str) -> str:
+        if not path:
+            return ""
+        parts = [part for part in path.replace("\\", "/").split("/") if part]
+        if len(parts) >= 3:
+            return ".../" + "/".join(parts[-3:])
+        return "/".join(parts)
+
+    def _source_path_for_scope(self, scope: str) -> str:
+        for bank in self._banks:
+            if getattr(bank, "scope", None) == scope:
+                return str(getattr(bank, "source_path", "") or "")
+        return ""
+
+    def _source_path_text(self, scope: str) -> str:
+        compact = self._compact_source_path(self._source_path_for_scope(scope))
+        if not compact:
+            return "--"
+        width = max(3, self._source_path_width)
+        if len(compact) > width:
+            compact = "..." + compact[-(width - 3) :] if width > 3 else compact[-width:]
+        # Right-align it by hand: DataTable cells are left-aligned by default,
+        # and the right end is the file name we must never lose.
+        return _escape(compact.rjust(width))
+
+    def _target_path_for_slot(self, slot: int) -> str:
+        assigned = self._assignments.get(slot)
+        if assigned is None:
+            return ""
+        return self._source_path_text(assigned.scope_id)
+
+    def _source_path_column_width(self) -> int:
+        # slot 6 + state 8 + performance 20 + patches 14, plus frame/padding.
+        available = max(0, int(getattr(self.size, "width", 0) or 80) - 52)
+        return max(10, min(64, available))
+
+    def _setup_target_columns(self) -> None:
+        table = self.query_one(f"#{self.TARGET_TABLE_ID}", DataTable)
+        table.clear(columns=True)
+        self._source_path_width = self._source_path_column_width()
+        table.add_column("slot", key="slot", width=6)
+        table.add_column("state", key="state", width=8)
+        table.add_column("performance", key="performance", width=20)
+        table.add_column("patch slots", key="patches", width=14)
+        table.add_column("source file", key="source", width=self._source_path_width)
+
+    def on_resize(self, event: Any) -> None:
+        if not self.is_mounted:
+            return
+        try:
+            self._setup_target_columns()
+            self._refresh_target_table(self._plan())
+        except Exception:
+            return
 
     def _update_source_target_cell(self, source_slot: int) -> None:
         """Update one target cell without rebuilding the table or moving the cursor."""
@@ -451,11 +508,13 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
                     )
                     name = f"{src_name} ← {name}"
             patch_text = ",".join(f"{number:02d}" for number in patch_slots) or "--"
+            source_text = self._target_path_for_slot(slot) or "--"
             table.add_row(
                 f"{slot:02d}",
                 state,
                 _escape(str(name)),
                 _escape(patch_text),
+                source_text,
                 key=str(slot),
             )
 
@@ -485,11 +544,7 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
             src_table.add_column("target", key="target", width=8)
             src_table.add_column("name", key="name")
             src_table.add_column("deps", key="deps", width=6)
-            tgt_table = self.query_one(f"#{self.TARGET_TABLE_ID}", DataTable)
-            tgt_table.add_column("slot", key="slot", width=6)
-            tgt_table.add_column("state", key="state", width=8)
-            tgt_table.add_column("performance", key="name")
-            tgt_table.add_column("patch slots", key="patches", width=16)
+            self._setup_target_columns()
         self._refresh()
 
     def on_key(self, event: Any) -> None:
