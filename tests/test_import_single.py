@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any, cast
 
 import pytest
@@ -185,6 +186,7 @@ async def test_inline_one_digit_enter_assigns() -> None:
         await pilot.press("1")
         await settle(pilot)
         assert screen.assignments == {}
+        assert src.cursor_row == 1
         await pilot.press("enter")
         await settle(pilot)
         assert screen.assignments.get(1) is not None
@@ -333,14 +335,79 @@ async def test_cycle_source() -> None:
         await settle(pilot)
         assert len(screen.assignments) >= 1
         before_scope = screen._source_scope()
+        before_assignments = dict(screen.assignments)
         await pilot.press("s")
         await settle(pilot)
         assert screen._source_scope() != before_scope
-        assert len(screen.assignments) == 0
+        # A source-bank switch keeps work already assigned from the first bank.
+        assert screen.assignments == before_assignments
         src2 = screen.query_one("#source-table", DataTable)
         assert src2.row_count >= 1
         tgt = screen.query_one("#target-table", DataTable)
         assert tgt.row_count == 50
+
+
+@pytest.mark.asyncio
+async def test_source_request_keeps_assignments() -> None:
+    screen = _screen(active_slots=[0, 1], two_sources=True)
+    calls: list[SingleImportScreen] = []
+    screen._on_source_request = calls.append
+    host = _host()
+    async with host.run_test() as pilot:
+        host.push_screen_cb(screen)
+        await settle(pilot)
+        src = screen.query_one("#source-table", DataTable)
+        src.move_cursor(row=0)
+        await settle(pilot)
+        await pilot.press("space")
+        await settle(pilot)
+        before = dict(screen.assignments)
+        await pilot.press("s")
+        await settle(pilot)
+        assert calls == [screen]
+        assert screen.assignments == before
+        assert host.screen is screen
+
+
+@pytest.mark.asyncio
+async def test_add_source_bank_keeps_assignments_and_carries_sources() -> None:
+    screen = _screen(active_slots=[0, 1])
+    host = _host()
+    async with host.run_test() as pilot:
+        host.push_screen_cb(screen)
+        await settle(pilot)
+        src = screen.query_one("#source-table", DataTable)
+        src.move_cursor(row=0)
+        await settle(pilot)
+        await pilot.press("space")
+        await settle(pilot)
+        before = dict(screen.assignments)
+        extra = _source_bank("RAM1#2", [3])
+        extra = replace(
+            extra,
+            source=deps.Source(
+                bank_id="RAM1#2",
+                performances=extra.source.performances,
+                patches=extra.source.patches,
+                waveseq=extra.source.waveseq,
+                bank_number=0,
+            ),
+        )
+        screen.add_source_bank(extra, extra.source)
+        await settle(pilot)
+        assert len(screen.source_banks) == 2
+        assert screen.source_index == 1
+        assert screen.assignments == before
+        # Assign the new source to the other free slot.
+        screen._assign_to_slot(3, 1)
+        await settle(pilot)
+        assert screen.assignments[1].scope_id == "RAM1#2"
+        assert "RAM1#2" in screen.sources
+        await pilot.press("ctrl+s")
+        await settle(pilot)
+        result = host.result
+        assert isinstance(result, SingleImportChoice)
+        assert "RAM1#2" in result.sources
 
 
 @pytest.mark.asyncio

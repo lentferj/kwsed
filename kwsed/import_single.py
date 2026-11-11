@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from contextlib import suppress
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -39,7 +39,7 @@ _HELP_LINES = [
     "u / Backspace / Delete  unassign focused source",
     "A  assign all unassigned active sources to free/Init slots",
     "U  clear all assignments",
-    "s  cycle source bank (clears assignments)",
+    "s  choose a source bank already added, or add another file (keeps assignments)",
     "w  toggle write gate",
     "ctrl+s  import the current assignment",
     "r  rebuild",
@@ -56,6 +56,9 @@ _HELP_LINES = [
 class SingleImportChoice:
     target_bank: str
     assignments: Dict[int, relations.PerfId] = field(default_factory=dict)
+    #: Every source bank in the session, including aliases for additional
+    #: files and the target bank's current records.
+    sources: Dict[str, Any] = field(default_factory=dict)
 
 
 def _escape(text: str) -> str:
@@ -182,14 +185,18 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
         target_bank: banks.Bank,
         target_source: Any,
         gate: Optional[EditGate] = None,
+        on_source_request: Optional[Callable[["SingleImportScreen"], None]] = None,
+        on_cancel: Optional[Callable[["SingleImportScreen"], None]] = None,
     ) -> None:
         super().__init__()
         self._path = path
         self._banks: list[Any] = list(banks)
-        self._sources = sources
+        self._sources: Dict[str, Any] = dict(sources)
         self._target_bank = target_bank
         self._target_source = target_source
         self._gate = gate
+        self._on_source_request = on_source_request
+        self._on_cancel = on_cancel
         self._target_scope = _target_scope(sources, target_bank, target_source)
         self._source_index = 0
         self._assignments: Dict[int, relations.PerfId] = {}
@@ -203,6 +210,40 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
     @property
     def assignments(self) -> Dict[int, relations.PerfId]:
         return self._assignments
+
+    @property
+    def sources(self) -> Mapping[str, Any]:
+        return self._sources
+
+    @property
+    def source_banks(self) -> List[Any]:
+        return list(self._banks)
+
+    @property
+    def source_index(self) -> int:
+        return self._source_index
+
+    def select_source(self, index: int) -> None:
+        if not 0 <= index < len(self._banks):
+            return
+        self._source_index = index
+        self._clear_slot_entry()
+        self._set_status(f"source bank {index + 1}/{len(self._banks)}")
+        self._refresh()
+
+    def add_source_bank(self, bank: Any, source: Optional[Any] = None) -> None:
+        """Add a source from another file without touching assignments."""
+        self._banks.append(bank)
+        scope = str(getattr(bank, "scope", ""))
+        self._sources[scope] = (
+            source if source is not None else getattr(bank, "source", None)
+        )
+        self._source_index = len(self._banks) - 1
+        self._clear_slot_entry()
+        self._set_status(
+            f"added source {getattr(bank, 'label', scope)}; assignments kept"
+        )
+        self._refresh()
 
     def _source_bank(self) -> Any:
         if not self._banks:
@@ -240,6 +281,19 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
         if target_slot is None:
             return "--"
         return f"[bold yellow]{target_slot:02d}[/bold yellow]"
+
+    def _update_source_target_cell(self, source_slot: int) -> None:
+        """Update one target cell without rebuilding the table or moving the cursor."""
+        try:
+            table = self.query_one(f"#{self.SOURCE_TABLE_ID}", DataTable)
+            target_slot = self._target_slot_for_source(source_slot)
+            table.update_cell(
+                str(source_slot),
+                "target",
+                self._target_text(source_slot, target_slot),
+            )
+        except Exception:
+            self._refresh_source_table()
 
     def _first_free_target_slot(self) -> Optional[int]:
         assigned = set(self._assignments)
@@ -411,7 +465,7 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
             hint = (
                 "Space assign · type 00-49 + Enter exact slot (inline) · "
                 "u unassign · A all · U clear\n"
-                "s source bank · w gate · ctrl+s import · ? help · Esc cancel"
+                "s source banks/add · w gate · ctrl+s import · ? help · Esc cancel"
             )
             yield Static(hint, classes="hint", markup=False)
             yield DataTable(
@@ -448,6 +502,7 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
         if key == "backspace" and self._slot_entry:
             event.stop()
             event.prevent_default()
+            source_slot = self._slot_entry_source
             self._slot_entry = self._slot_entry[:-1]
             if not self._slot_entry:
                 self._slot_entry_source = None
@@ -457,7 +512,8 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
                     f"target slot {self._slot_entry}_ — "
                     "type the second digit or Enter; Esc cancels"
                 )
-            self._refresh_source_table()
+            if source_slot is not None:
+                self._update_source_target_cell(source_slot)
             return
         if key == "enter" and self._slot_entry:
             event.stop()
@@ -467,10 +523,12 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
         if key == "escape" and self._slot_entry:
             event.stop()
             event.prevent_default()
+            source_slot = self._slot_entry_source
             self._slot_entry = ""
             self._slot_entry_source = None
             self._set_status("slot entry cancelled")
-            self._refresh_source_table()
+            if source_slot is not None:
+                self._update_source_target_cell(source_slot)
 
     def _type_slot_digit(self, digit: str) -> None:
         source_slot = self._focused_source_slot()
@@ -488,7 +546,7 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
             f"target slot {self._slot_entry}_ — "
             "type the second digit or Enter; Esc cancels"
         )
-        self._refresh_source_table()
+        self._update_source_target_cell(source_slot)
 
     def _commit_slot_entry(self) -> None:
         source_slot = self._slot_entry_source
@@ -503,7 +561,7 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
             return
         if not 0 <= target_slot <= 49:
             self._set_status("target slot must be 00-49")
-            self._refresh_source_table()
+            self._update_source_target_cell(source_slot)
             return
         self._clear_slot_entry()
         self._assign_to_slot(source_slot, target_slot)
@@ -673,11 +731,17 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
 
     def action_cycle_source(self) -> None:
         self._clear_slot_entry()
+        if self._on_source_request is not None:
+            self._on_source_request(self)
+            return
         if not self._banks:
             return
         self._source_index = (self._source_index + 1) % len(self._banks)
-        self._assignments.clear()
-        self._set_status("switched source bank")
+        # Switching among banks in one session must not throw away work
+        # already assigned from the previous bank.
+        self._set_status(
+            f"source bank {self._source_index + 1}/{len(self._banks)}; assignments kept"
+        )
         self._refresh()
 
     def action_toggle_gate(self) -> None:
@@ -704,7 +768,13 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
             suffix = f" (+{len(plan.rejected) - 2})" if len(plan.rejected) > 2 else ""
             self._set_status("; ".join(rejected) + suffix)
             return
-        self.dismiss(SingleImportChoice(self._target_bank.id, dict(self._assignments)))
+        self.dismiss(
+            SingleImportChoice(
+                self._target_bank.id,
+                dict(self._assignments),
+                dict(self._sources),
+            )
+        )
 
     def action_rebuild(self) -> None:
         self._refresh()
@@ -715,8 +785,13 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
 
     def action_cancel(self) -> None:
         if self._slot_entry:
+            source_slot = self._slot_entry_source
             self._clear_slot_entry()
             self._set_status("slot entry cancelled")
-            self._refresh_source_table()
+            if source_slot is not None:
+                self._update_source_target_cell(source_slot)
+            return
+        if self._on_cancel is not None:
+            self._on_cancel(self)
             return
         self.dismiss(None)
