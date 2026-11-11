@@ -154,6 +154,17 @@ _FUNCTION_WIRE_BYTES = {
 }
 
 
+_BUNDLE_LABELS = {
+    "patches": "patches",
+    "performances": "performances",
+    "waveseq": "wave sequences",
+}
+
+
+def _bundle_label(kind: str) -> str:
+    return _BUNDLE_LABELS.get(kind, kind)
+
+
 def _wire_estimate(total: int) -> float:
     """How long ``total`` wire bytes take, plus a moment to process."""
     return total / alsa.Sender.BYTES_PER_SECOND + 0.8
@@ -672,7 +683,8 @@ class WavestationBridge:
         kind_key = kind if kind is not None else banks.Kind.PATCH
         wire = _WIRE_BYTES.get(kind_key, _WIRE_BYTES[banks.Kind.PATCH])
         with self._progress_scope(
-            f"receiving {entry.label} {kind_key}s", _wire_estimate(wire)
+            f"receiving {entry.label} {banks.plural(kind_key)}",
+            _wire_estimate(wire),
         ) as estimate:
             started = time.monotonic()
             self._drain()
@@ -773,6 +785,8 @@ class WavestationBridge:
         verify: bool = True,
         timeout: Optional[float] = None,
         wait_status: bool = True,
+        before: Optional[bytes] = None,
+        save_backup: bool = True,
     ) -> Dict[str, Any]:
         """Replace **one patch**. Destructive, and fenced like a bank write.
 
@@ -789,6 +803,11 @@ class WavestationBridge:
         35 slots and nearly 30 kB on the wire. The fence is the same
         anyway, because the thing that makes a write safe is the backup and
         the read-back, not the size.
+
+        ``save_backup`` is the audition's opt-out: the staging area is the
+        user's scratch and capturing it costs a read per slot. With it off
+        nothing is read before sending and no envelope is written, so the
+        write cannot be undone -- the default keeps the fence intact.
 
         ``wait_status`` says whether to hold for the unit's WRITE_COMPLETED
         reply. The audition staging pairs this with ``verify=True`` and
@@ -807,26 +826,37 @@ class WavestationBridge:
         if len(data) != records.PATCH_SIZE:
             raise ValueError(f"a patch is {records.PATCH_SIZE} bytes; got {len(data)}")
 
-        try:
-            before = self.read_patch(entry.sysex, number, timeout=timeout)
-        except Exception as exc:
-            raise DeviceError(
-                f"could not read {entry.label} patch {number} before "
-                f"writing it, so nothing was sent ({exc})."
-            ) from exc
-        saved = backup.save(
-            backup_dir,
-            kind="patch",
-            slot=_patch_backup_name(entry.label, number),
-            name=_patch_backup_name(entry.label, number),
-            device_id=str(self.channel),
-            source="kwsed",
-            blocks={
-                "dump": m.single_patch_dump(
-                    entry.sysex, number, before, channel=self.channel
-                )
-            },
-        )
+        saved: Optional[str] = None
+        if save_backup:
+            if before is not None:
+                if len(before) != records.PATCH_SIZE:
+                    raise ValueError(
+                        f"a patch is {records.PATCH_SIZE} bytes; got {len(before)}"
+                    )
+                before_bytes = bytes(before)
+            else:
+                try:
+                    before_bytes = bytes(
+                        self.read_patch(entry.sysex, number, timeout=timeout)
+                    )
+                except Exception as exc:
+                    raise DeviceError(
+                        f"could not read {entry.label} patch {number} before "
+                        f"writing it, so nothing was sent ({exc})."
+                    ) from exc
+            saved = backup.save(
+                backup_dir,
+                kind="patch",
+                slot=_patch_backup_name(entry.label, number),
+                name=_patch_backup_name(entry.label, number),
+                device_id=str(self.channel),
+                source="kwsed",
+                blocks={
+                    "dump": m.single_patch_dump(
+                        entry.sysex, number, before_bytes, channel=self.channel
+                    )
+                },
+            )
 
         # Edisyn's write path (its performance writer pairs a dump with an
         # EXECUTE_WRITE change): the dump fills the edit buffer and names
@@ -1424,7 +1454,7 @@ class WavestationBridge:
 
         # --- 3. send -------------------------------------------------------
         frame = m.frame_bulk(function, entry.sysex, data, channel=self.channel)
-        with self._progress_scope(f"writing {entry.label} {kind}"):
+        with self._progress_scope(f"writing {entry.label} {banks.plural(kind)}"):
             self._drain()
             self._send(frame)
 
@@ -1613,7 +1643,7 @@ class WavestationBridge:
                 channel=self.channel,
             )
             sent[kind] = frame
-            with self._progress_scope(f"writing {entry.label} {kind}"):
+            with self._progress_scope(f"writing {entry.label} {_bundle_label(kind)}"):
                 self._send(frame)
 
         result = {

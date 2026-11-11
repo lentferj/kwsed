@@ -222,11 +222,26 @@ def slots(which: int | str, kind: str) -> List[Slot]:
     ]
 
 
+def plural(kind: str) -> str:
+    """``patch`` -> ``patches``; the one irregular kind name.
+
+    Everything that prints a kind goes through here, because the obvious
+    ``f"{kind}s"`` reads "patchs" -- which is exactly what a status line
+    did until someone looked at it.
+    """
+    if kind == "waveseq":
+        return "wave sequences"
+    if str(kind).endswith("ch"):
+        return f"{kind}es"
+    return f"{kind}s"
+
+
 def slot(which: int | str, kind: str, number: int) -> Slot:
     entry = bank(which)
     total = count_for(kind)
     if not 0 <= number < total:
         raise LookupError(
-            f"{entry.label} holds {total} {kind}s, so {number} is outside 0-{total - 1}"
+            f"{entry.label} holds {total} {plural(kind)}, so {number} is "
+            f"outside 0-{total - 1}"
         )
     return Slot(bank=entry, kind=kind, number=number)

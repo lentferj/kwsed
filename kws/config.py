@@ -85,9 +85,11 @@ __all__ = [
     "load_show_patches",
     "load_deps_pane",
     "load_import_folder",
+    "load_preaudit_backup",
     "load_preaudit_patch_area",
     "load_preaudit_target",
     "migrate_legacy_config",
+    "parse_preaudit_backup",
     "parse_preaudit_patch_range",
     "parse_preaudit_perf",
     "save_card_mode",
@@ -349,6 +351,36 @@ def parse_preaudit_patch_range(value: Any) -> tuple[Any, tuple[int, ...]] | None
             f"{_PREAUDIT_PATCH_COUNT - 1}"
         )
     return entry, slots
+
+
+def parse_preaudit_backup(value: Any) -> bool:
+    """Whether a staged audition backs up what it overwrites.
+
+    Default is True: the staging slots are the user's, and an audition
+    that replaces them should be undoable. Turning it off saves the reads
+    that capture those slots -- one per slot per session -- at the cost of
+    `z` no longer restoring them.
+    """
+    if value is None:
+        return True
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in ("", "true", "yes", "on", "1"):
+            return True
+        if text in ("false", "no", "off", "0"):
+            return False
+    raise ValueError(f"preaudit_backup must be true or false, not {value!r}")
+
+
+def load_preaudit_backup(path: str | None = None) -> bool:
+    """The pre-audit backup switch; True when unset or malformed."""
+    data = _settings.read(path or DEFAULT_PATH)[0]
+    try:
+        return parse_preaudit_backup(data.get("preaudit_backup"))
+    except ValueError:
+        return True
 
 
 def load_preaudit_target(path: str | None = None) -> tuple[Any, int] | None:

@@ -129,6 +129,27 @@ def test_parse_preaudit_patch_range_unset(tmp_path):
     assert config.parse_preaudit_patch_range(None) is None
 
 
+def test_parse_preaudit_backup_defaults_on():
+    from kws import config
+
+    assert config.parse_preaudit_backup(None) is True
+    assert config.parse_preaudit_backup("") is True
+    assert config.parse_preaudit_backup(False) is False
+    assert config.parse_preaudit_backup("off") is False
+    with pytest.raises(ValueError):
+        config.parse_preaudit_backup("maybe")
+
+
+def test_load_preaudit_backup_round_trip(tmp_path):
+    from kws import config
+
+    path = str(tmp_path / "config.toml")
+    assert config.load_preaudit_backup(path) is True
+
+    (tmp_path / "config.toml").write_text("preaudit_backup = false\n", encoding="utf-8")
+    assert config.load_preaudit_backup(path) is False
+
+
 def test_load_preaudit_target_round_trip(tmp_path):
     from kws import config
 

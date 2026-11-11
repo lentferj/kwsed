@@ -44,6 +44,7 @@ import contextlib
 import os
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import (
@@ -2719,6 +2720,14 @@ class KwsedApp(App[None]):
         if self._busy:
             self.notify_status("busy", refused=True)
             return
+        # Undo rewrites what the staging cache believes it knows; drop it so
+        # the next audition reads the restored bank once instead of trusting
+        # the pre-undo contents.
+        screen: Any = self.screen
+        try:
+            screen._staging_cache = None
+        except Exception:  # noqa: S110 - the cache is an optimisation
+            pass
         records = self._undo_log.plan(1)
         if not records:
             self.notify_status("nothing to undo", refused=True)
@@ -3934,6 +3943,27 @@ class KwsedApp(App[None]):
             lambda index: self._single_source_menu_chosen(screen, index),
         )
 
+    def _select_for_audition(self, bank: Any, number: int) -> None:
+        """Make the dump's destination the current performance first.
+
+        A single performance dump fills the edit buffer, and what the unit
+        shows and plays is the buffer on top of a current performance.
+        Selecting the destination first -- Performance mode, Bank Select,
+        Program Change, the same messages the browser's select uses --
+        leaves the unit on the slot the audition is meant for instead of
+        whatever the user happened to be on, and guarantees the unit is in
+        Performance mode where a Program Change means a performance.
+        """
+        from kws import banks as _banks
+
+        select = getattr(self.device, "select", None)
+        if not callable(select):
+            return
+        try:
+            select(_banks.Slot(bank=bank, kind=_banks.Kind.PERFORMANCE, number=number))
+        except Exception:  # noqa: S110 - a unit that will not switch still hears
+            pass
+
     def _audition_buffer(
         self,
         screen: Any,
@@ -3946,6 +3976,7 @@ class KwsedApp(App[None]):
             record = perfcopy.planned_performance_record(
                 sources, allocation, target_bank
             )
+            self._select_for_audition(target_bank, target_slot)
             self.device.send_performance_to_buffer(
                 target_bank.number, target_slot, record
             )
@@ -4048,11 +4079,23 @@ class KwsedApp(App[None]):
         target_source = getattr(screen, "_target_source", None)
         stage_bank = patch_area[0].number
         buffer_slot = perf_area[1]
+        staging = self._staging_cache_for(screen)
+        from kws import config as _cfg2
+
+        save_backup = _cfg2.load_preaudit_backup(self._config_path)
 
         def work() -> Any:
             undo_entries, seq_note, patch_path = self._stage_banks(
-                target_source, plan, built, fresh, patch_area, target_bank
+                target_source,
+                plan,
+                built,
+                fresh,
+                patch_area,
+                target_bank,
+                staging,
+                save_backup,
             )
+            self._select_for_audition(patch_area[0], buffer_slot)
             self.device.send_performance_to_buffer(stage_bank, buffer_slot, record)
             return undo_entries, seq_note, patch_path
 
@@ -4073,13 +4116,36 @@ class KwsedApp(App[None]):
                     )
                 )
             msg = self._staging_message(
-                fresh, patch_area, undo_entries, seq_note, patch_path
+                fresh,
+                patch_area,
+                undo_entries,
+                seq_note,
+                patch_path,
+                save_backup,
             )
             screen.set_status(msg)
             self.notify_status(msg)
 
         self.notify_status("staging the audition...")
         self._device_worker(work, done, "auditioning from the staging area")
+
+    def _staging_cache_for(self, screen: Any) -> dict[str, Any]:
+        """What this screen's staging slots hold, from the first read on.
+
+        One import screen is one session: after the first audition this
+        program is the only writer of those slots, so a slot is read once
+        and then tracked here instead of re-read for every `t`. Undo drops
+        the cache, because a restore is another writer.
+        """
+        staging = getattr(screen, "_staging_cache", None)
+        if isinstance(staging, dict):
+            return staging
+        staging = {"slots": {}, "bank": None}
+        try:
+            screen._staging_cache = staging
+        except Exception:  # noqa: S110 - the cache is an optimisation
+            pass
+        return staging
 
     def _stage_banks(
         self,
@@ -4089,6 +4155,8 @@ class KwsedApp(App[None]):
         fresh: Any,
         patch_area: Any,
         target_bank: Any,
+        staging: Any = None,
+        save_backup: bool = True,
     ) -> tuple[list[dict[str, Any]], str, str]:
         """Write the staging patch bank, then sequences if the plan needs them.
 
@@ -4097,7 +4165,7 @@ class KwsedApp(App[None]):
         (``"single"`` or ``"bank"``).
         """
         undo_entries, patch_path = self._stage_patches(
-            target_source, built, fresh, patch_area
+            target_source, built, fresh, patch_area, staging, save_backup
         )
         seq_note = ""
         if plan.sequence_map and built.waveseq is not None:
@@ -4111,65 +4179,147 @@ class KwsedApp(App[None]):
         return undo_entries, seq_note, patch_path
 
     def _stage_patches(
-        self, target_source: Any, built: Any, fresh: Any, patch_area: Any
+        self,
+        target_source: Any,
+        built: Any,
+        fresh: Any,
+        patch_area: Any,
+        staging: Any = None,
+        save_backup: bool = True,
     ) -> tuple[list[dict[str, Any]], str]:
-        """Stage the fresh copies one patch at a time, verifying each.
+        """Stage the fresh copies one patch at a time.
 
         A whole patch bank is nearly 30 kB on the wire -- about ten seconds
         each way -- for what is usually one or two patches. One patch is
-        426 bytes, so the same copy costs a fraction of a second, and a
-        read-back after each proves the unit stored it. The unit's own
-        EXECUTE_WRITE is what commits it (see bridge.write_patch).
+        426 bytes and the unit's EXECUTE_WRITE commits it (see
+        bridge.write_patch), so the copy is a fraction of a second.
 
-        When the unit does not take a single write -- the read-back says it
-        did not land, or the write is refused -- the whole bank is staged
-        instead. That path is slower but is the one proven on the SR, so a
-        unit that ignores EXECUTE_WRITE for patches still gets an audition.
+        Only **one** read-back is spent on a whole audition. Verifying each
+        patch meant a read after every write, and on the SR those reads are
+        what the unit spends its time on -- a retry per patch made the
+        audition slower than the bank dump it replaced. The last copy is
+        read once; if it did not land, the whole bank is staged instead,
+        which is the path proven on the SR.
+
+        The previous content of every slot written is captured here (one
+        small read per patch) because it is the undo's ``before`` and the
+        bank fallback's restore point.
         """
         from kws import backup as _backup
         from kws import messages as _m
 
         bank = patch_area[0]
+        cache_slots: dict[int, bytes] = (
+            staging["slots"] if isinstance(staging, dict) else {}
+        )
         entries: list[dict[str, Any]] = []
         captured: dict[int, bytes] = {}
+        written: list[tuple[int, bytes]] = []
         for (_pid, planned_slot), staging_slot in zip(fresh, patch_area[1]):
             src_at = planned_slot * rec.PATCH_SIZE
             data = bytes(built.patches[src_at : src_at + rec.PATCH_SIZE])
-            before = bytes(self.device.read_patch(bank.number, staging_slot))
-            captured[staging_slot] = before
+            before: Optional[bytes] = cache_slots.get(staging_slot)
+            if save_backup and before is None:
+                # One read per slot per import-screen session: after that
+                # this program is the only writer of the staging slots, so
+                # what it wrote last time is what is there now. With the
+                # backup switched off, nothing is read at all.
+                before = bytes(self.device.read_patch(bank.number, staging_slot))
+                cache_slots[staging_slot] = before
+            captured[staging_slot] = before if before is not None else b""
             try:
                 result = self.device.write_patch(
                     bank.number,
                     staging_slot,
                     data,
                     backup_dir=_backup.default_dir(),
-                    verify=True,
+                    verify=False,
                     wait_status=False,
+                    before=before,
+                    save_backup=save_backup,
                 )
             except Exception:
-                return self._stage_patches_as_bank(
-                    target_source, built, fresh, patch_area, captured
-                ), "bank"
-            if result.get("verified") is False or result.get("status") == "write error":
-                return self._stage_patches_as_bank(
-                    target_source, built, fresh, patch_area, captured
-                ), "bank"
-            entries.append(
-                {
-                    "kind": "patch",
-                    "bank": bank.number,
-                    "slot": staging_slot,
-                    "blocks": {
-                        "dump": _m.single_patch_dump(
-                            bank.sysex,
-                            staging_slot,
-                            before,
-                            channel=self.device.channel,
-                        )
-                    },
-                }
+                return (
+                    self._stage_patches_as_bank(
+                        target_source,
+                        built,
+                        fresh,
+                        patch_area,
+                        captured,
+                        staging,
+                        save_backup,
+                    ),
+                    "bank",
+                )
+            if result.get("status") == "write error":
+                return (
+                    self._stage_patches_as_bank(
+                        target_source,
+                        built,
+                        fresh,
+                        patch_area,
+                        captured,
+                        staging,
+                        save_backup,
+                    ),
+                    "bank",
+                )
+            written.append((staging_slot, data))
+            cache_slots[staging_slot] = data
+            if isinstance(staging, dict) and staging.get("bank") is not None:
+                bank_bytes = bytearray(staging["bank"])
+                at = staging_slot * rec.PATCH_SIZE
+                bank_bytes[at : at + rec.PATCH_SIZE] = data
+                staging["bank"] = bytes(bank_bytes)
+            if save_backup and before is not None:
+                entries.append(
+                    {
+                        "kind": "patch",
+                        "bank": bank.number,
+                        "slot": staging_slot,
+                        "blocks": {
+                            "dump": _m.single_patch_dump(
+                                bank.sysex,
+                                staging_slot,
+                                before,
+                                channel=self.device.channel,
+                            )
+                        },
+                    }
+                )
+        if written and not self._staged_patch_landed(bank, *written[-1]):
+            return (
+                self._stage_patches_as_bank(
+                    target_source,
+                    built,
+                    fresh,
+                    patch_area,
+                    captured,
+                    staging,
+                    save_backup,
+                ),
+                "bank",
             )
         return entries, "single"
+
+    def _staged_patch_landed(self, bank: Any, slot: int, expected: bytes) -> bool:
+        """Whether the last staged copy is really in the unit's memory.
+
+        One read for the whole audition, with one short retry: the unit may
+        still have been committing when the first read was answered, and
+        that must not be mistaken for a write it never performed. A read
+        that fails is treated as "assume it landed": the copies are already
+        sent, and turning a slow read into a whole-bank write on top would
+        make the audition slower still.
+        """
+        try:
+            after = bytes(self.device.read_patch(bank.number, slot))
+            if after != expected:
+                time.sleep(0.25)
+                after = bytes(self.device.read_patch(bank.number, slot))
+        except Exception:
+            return True
+        return after == expected
 
     def _stage_patches_as_bank(
         self,
@@ -4178,6 +4328,8 @@ class KwsedApp(App[None]):
         fresh: Any,
         patch_area: Any,
         captured: Any,
+        staging: Any = None,
+        save_backup: bool = True,
     ) -> list[dict[str, Any]]:
         """Stage the fresh copies as one whole patch bank.
 
@@ -4188,8 +4340,13 @@ class KwsedApp(App[None]):
         and the undo must put back what was there, not what a half-done
         try left.
         """
-        dump = self.device.read_bank(patch_area[0].id, banks.Kind.PATCH)
-        before_bank = bytearray(b"".join(dump.records))
+        cached = staging.get("bank") if isinstance(staging, dict) else None
+        expected = banks.PATCHES_PER_BANK * rec.PATCH_SIZE
+        if cached is not None and len(cached) == expected:
+            before_bank = bytearray(cached)
+        else:
+            dump = self.device.read_bank(patch_area[0].id, banks.Kind.PATCH)
+            before_bank = bytearray(b"".join(dump.records))
         for staging_slot, blob in captured.items():
             at = staging_slot * rec.PATCH_SIZE
             before_bank[at : at + rec.PATCH_SIZE] = blob
@@ -4207,9 +4364,19 @@ class KwsedApp(App[None]):
                 for at in range(0, len(before_bank), rec.PATCH_SIZE)
             ],
         )
-        return self._stage_one_bank(
+        result = self._stage_one_bank(
             target_source, patch_area[0], "patches", bytes(staged_bank), source
         )
+        if not save_backup:
+            result = []
+        if isinstance(staging, dict):
+            staging["bank"] = bytes(staged_bank)
+            for (_pid, _planned_slot), staging_slot in zip(fresh, patch_area[1]):
+                at = staging_slot * rec.PATCH_SIZE
+                staging["slots"][staging_slot] = bytes(
+                    staged_bank[at : at + rec.PATCH_SIZE]
+                )
+        return result
 
     def _stage_one_bank(
         self,
@@ -4263,6 +4430,7 @@ class KwsedApp(App[None]):
         undo_entries: Any,
         seq_note: str,
         patch_path: str = "single",
+        save_backup: bool = True,
     ) -> str:
         """The status line for a successful staged audition."""
         slots_text = ", ".join(f"{s:02d}" for s in patch_area[1][: len(fresh)])
@@ -4272,10 +4440,12 @@ class KwsedApp(App[None]):
             else "no fresh patches needed"
         )
         how = "" if patch_path == "single" or not fresh else " (bank dump)"
+        backed = "" if save_backup else "; not backed up (preaudit_backup = false)"
         return (
             f"{patch_note}{how}{seq_note}; auditioning — play it; "
             "ctrl+s imports for real"
             + ("; z undoes the staging" if undo_entries else "")
+            + backed
         )
 
     def _audition_focused(self, screen: Any) -> None:
@@ -6667,7 +6837,8 @@ class KwsedApp(App[None]):
         try:
             self.call_from_thread(
                 self.notify_status,
-                f"asking for bank {bank_id} {kind}s in one message (silent)...",
+                f"asking for bank {bank_id} {banks.plural(kind)} "
+                "in one message (silent)...",
             )
             with self._busy_gate, self._lock:
                 dump = self.device.read_bank(bank_id, kind)

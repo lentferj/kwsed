@@ -151,7 +151,7 @@ def parse_bulk(packet: m.Packet) -> BulkDump:
     if len(records) != expected:
         raise m.ProtocolError(
             f"{packet.function_name} holds {len(records)} records; a bank "
-            f"has {expected} {kind}s"
+            f"has {expected} {banks.plural(kind)}"
         )
     return BulkDump(
         function=packet.function,

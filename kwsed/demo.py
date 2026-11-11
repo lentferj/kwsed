@@ -595,26 +595,31 @@ class DemoDevice:
         verify: bool = True,
         timeout: Optional[float] = None,
         wait_status: bool = True,
+        before: Optional[bytes] = None,
+        save_backup: bool = True,
     ) -> Dict[str, Any]:
         self._tick()
         entry = banks.bank(bank)
         if not entry.writable:
             raise RuntimeError(f"{entry.label} is ROM and cannot be written.")
-        before = self.read_patch(bank, number)
+        if before is None and save_backup:
+            before = self.read_patch(bank, number)
         # splice into full bank
         payload = bytearray(self._bank_payload(entry, banks.Kind.PATCH))
         at = number * records.PATCH_SIZE
         payload[at : at + records.PATCH_SIZE] = bytes(data)
         self._written[(entry.id, banks.Kind.PATCH)] = bytes(payload)
-        path = backup.save(
-            backup_dir,
-            kind="patch",
-            slot=f"{entry.label} {number:02d}",
-            name=f"{entry.label} {number:02d}",
-            device_id=str(self.channel),
-            source="kwsed",
-            blocks={"dump": before},
-        )
+        path = None
+        if save_backup:
+            path = backup.save(
+                backup_dir,
+                kind="patch",
+                slot=f"{entry.label} {number:02d}",
+                name=f"{entry.label} {number:02d}",
+                device_id=str(self.channel),
+                source="kwsed",
+                blocks={"dump": before},
+            )
         self.patch_write_count += 1
         return {
             "bank": entry.label,

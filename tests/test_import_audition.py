@@ -103,15 +103,15 @@ def _target_source(
     )
 
 
-def _staging_config(tmp_path: Any) -> str:
+def _staging_config(tmp_path: Any, *, backup: bool | None = None) -> str:
     path = tmp_path / "config.toml"
-    config._write_settings(
-        str(path),
-        {
-            "preaudit_target_perf": "RAM3:49",
-            "preaudit_target_patches": "RAM3:27-34",
-        },
-    )
+    settings: dict[str, Any] = {
+        "preaudit_target_perf": "RAM3:49",
+        "preaudit_target_patches": "RAM3:27-34",
+    }
+    if backup is not None:
+        settings["preaudit_backup"] = backup
+    config._write_settings(str(path), settings)
     return str(path)
 
 
@@ -155,6 +155,12 @@ async def test_t_auditions_in_the_edit_buffer_when_nothing_is_new(tmp_path):
         await _settle(pilot)
 
         assert device.buffer_log == [("RAM 3", assigned)]
+        selected = device.selected_log[-1]
+        assert selected.kind == banks.Kind.PERFORMANCE
+        assert selected.bank.id == "RAM3"
+        assert selected.number == assigned, (
+            "the unit is switched to the slot the dump names before it arrives"
+        )
         assert device.patch_write_count == 0, "a buffer audition writes nothing"
         assert device.performance_write_count == 0
         assert len(app._undo_log) == 0, "auditioning is not an undo step"
@@ -235,6 +241,12 @@ async def test_t_stages_fresh_patches_into_the_reserved_area(tmp_path, monkeypat
             "the auditioned record points at the staging slot, not the plan's"
         )
         assert device.buffer_log == [("RAM 3", 49)]
+        selected = device.selected_log[-1]
+        assert selected.kind == banks.Kind.PERFORMANCE
+        assert selected.bank.id == "RAM3"
+        assert selected.number == 49, (
+            "the configured pre-audit slot is made current before the dump"
+        )
         assert "staged 1 patch" in _status(screen)
         assert "27" in _status(screen)
         assert len(app._undo_log) == 1
@@ -548,3 +560,78 @@ async def test_a_held_operation_keeps_the_bar_up_between_steps(tmp_path):
         app._progress_hold_end()
         await pilot.pause(0.5)
         assert bar.display is False
+
+
+@pytest.mark.asyncio
+async def test_a_second_audition_uses_the_session_cache(tmp_path):
+    """The staging slots' backups are read once per screen, not per `t`."""
+    device = DemoDevice()
+    app = KwsedApp(
+        device, catalog=cat.Catalog([]), config_path=_staging_config(tmp_path)
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._sources["RAM1"] = _pcm_source()
+        app._sources["RAM3"] = _target_source(keep=False)
+        await _open_import_screen(app, pilot)
+        await pilot.press("w")
+        await _settle(pilot)
+
+        reads: list[Any] = []
+        original = device.read_patch
+
+        def counting(*args: Any, **kwargs: Any) -> Any:
+            reads.append(args[1] if len(args) > 1 else kwargs.get("number"))
+            return original(*args, **kwargs)
+
+        device.read_patch = counting  # type: ignore[method-assign]
+        await pilot.press("t")
+        await app.workers.wait_for_complete()
+        await _settle(pilot)
+        assert 27 in reads, "the first audition reads the slot it overwrites"
+
+        reads.clear()
+        await pilot.press("t")
+        await app.workers.wait_for_complete()
+        await _settle(pilot)
+        assert reads == [27], (
+            "the second audition reuses the cached backup; only the one "
+            "read-back that proves the write remains"
+        )
+
+
+@pytest.mark.asyncio
+async def test_backups_can_be_switched_off_for_the_staging_slots(tmp_path):
+    """`preaudit_backup = false`: no slot reads, nothing to undo."""
+    device = DemoDevice()
+    app = KwsedApp(
+        device,
+        catalog=cat.Catalog([]),
+        config_path=_staging_config(tmp_path, backup=False),
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._sources["RAM1"] = _pcm_source()
+        app._sources["RAM3"] = _target_source(keep=False)
+        screen = await _open_import_screen(app, pilot)
+        reads: list[Any] = []
+        original = device.read_patch
+
+        def counting(*args: Any, **kwargs: Any) -> Any:
+            reads.append(args[1] if len(args) > 1 else kwargs.get("number"))
+            return original(*args, **kwargs)
+
+        device.read_patch = counting  # type: ignore[method-assign]
+        await pilot.press("w")
+        await _settle(pilot)
+
+        await pilot.press("t")
+        await app.workers.wait_for_complete()
+        await _settle(pilot)
+
+        assert reads == [27], (
+            "only the read-back that proves the write; no backup capture"
+        )
+        assert len(app._undo_log) == 0, "nothing captured, nothing to undo"
+        assert "not backed up" in _status(screen)
+        assert device.read_patch("RAM3", 27) == _pcm_patch()

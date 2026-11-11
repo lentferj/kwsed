@@ -480,6 +480,15 @@ class TestReadsMatchTheBankTheyAskedFor:
         dump = bridge.read_bank("CARD", banks.Kind.PATCH, timeout=2.0)
         assert dump.bank.label == "Card"
 
+    def test_the_progress_label_pluralises_patches(self):
+        """It said "patchs" on startup, which is not a word."""
+        bridge = self._unit(reply_bank=3)
+        labels: list[str] = []
+        bridge.progress = lambda label, fraction: labels.append(label)
+        bridge.read_bank("CARD", banks.Kind.PATCH, timeout=2.0)
+        assert any("Card patches" in label for label in labels)
+        assert not any("patchs" in label for label in labels)
+
 
 class TestALargeSendIsRefusedWithoutTheAlsaPath:
     """The refusal used to sit inside `if alsa.available()`.

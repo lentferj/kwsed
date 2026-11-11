@@ -367,9 +367,7 @@ def _cmd_status(device: Any, _args: argparse.Namespace) -> None:
 
 def _plural(kind: str) -> str:
     """ "patch" pluralises to "patches", not "patchs"."""
-    if kind == "waveseq":
-        return "wave sequences"
-    return f"{kind}es" if kind.endswith("ch") else f"{kind}s"
+    return banks.plural(kind)
 
 
 def _cmd_dump(device: Any, args: argparse.Namespace) -> None:

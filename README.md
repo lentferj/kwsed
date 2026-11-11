@@ -462,6 +462,7 @@ the import screen's audition uses:
 ```toml
 preaudit_target_perf = "RAM3:49"
 preaudit_target_patches = "RAM3:27-34"
+# preaudit_backup = false   # off: faster staging, no `z` for the patches
 ```
 
 `preaudit_target_perf` names a single performance slot and
@@ -469,7 +470,14 @@ preaudit_target_patches = "RAM3:27-34"
 valid). Both must point at a writable bank (RAM 1-3 or the Card). It is the
 user's job to keep those slots free; the app still backs up whatever it
 overwrites there. A malformed value or a ROM bank silently turns the feature
-off. A staged audition writes each needed patch on its own (one 426-byte
+off. Before the dump the unit is switched to the configured pre-audit
+performance slot (Performance mode, Bank Select, Program Change), so it
+is on the slot the audition is meant for rather than whatever was current.
+`preaudit_backup` defaults to true: what the staging slots hold is read
+once per screen session and `z` puts it back. Setting it to false skips
+those reads (and the per-patch backup envelopes) -- the audition is
+quicker, but `z` no longer restores the staged patches.
+A staged audition writes each needed patch on its own (one 426-byte
 dump and an `EXECUTE_WRITE`, read back to prove it landed), so it costs a
 fraction of a second per patch instead of a whole bank. Only the target's
 sequence memory, when the plan needs wave sequences, is written as a whole
