@@ -758,6 +758,25 @@ async def test_fresh_patch_mode_changes_planned_patch_slot() -> None:
 
 
 @pytest.mark.asyncio
+async def test_undo_routes_to_the_app_from_the_import_screen() -> None:
+    """`z` says it undoes the staging, so it must reach the app's undo.
+
+    App-level bindings do not fire while a modal screen is up, so the
+    screen carries its own `z`.
+    """
+    screen = _screen(active_slots=[0, 1])
+    host = _host()
+    fired: list[str] = []
+    host.action_undo = lambda: fired.append("undo")
+    async with host.run_test() as pilot:
+        host.push_screen_cb(screen)
+        await settle(pilot)
+        await pilot.press("z")
+        await settle(pilot)
+        assert fired == ["undo"]
+
+
+@pytest.mark.asyncio
 async def test_audition_routes_to_the_app_even_without_an_assignment() -> None:
     """`t` needs only a focused row; an unassigned row is fine."""
     screen = _screen(active_slots=[0, 1])

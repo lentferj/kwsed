@@ -583,6 +583,7 @@ p            toggle shared/fresh patches (fresh = the import gets its
              own patch copies, independent of the target bank)
 s            choose a source bank already in the session, or add another file
 w            toggle the write gate
+z            undo the last import or staging write (needs the armed gate)
 ctrl+s       write the whole assignment in one batch
 t            audition the focused row in the unit's edit buffer before
              anything is written; an unassigned row borrows the first free

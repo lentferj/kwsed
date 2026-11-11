@@ -1011,11 +1011,17 @@ def planned_performance_record(
     destination_bank: banks.Bank,
     *,
     slot_override: Optional[Mapping[int, int]] = None,
+    bank_override: Optional[int] = None,
 ) -> bytes:
     """The performance record as the import would write it.
 
     ``slot_override`` remaps part index -> patch slot, for auditioning
     through a staging area whose slots differ from the final plan's.
+    ``bank_override`` says which bank those remapped slots actually live
+    in then: the staging bank is not the destination bank, and pointing a
+    part at the destination bank with a staging slot number names a
+    different patch -- usually an empty one, which is a silent audition.
+    Parts left unremapped keep pointing at ``destination_bank``.
     """
     srcs = dict(sources)
     holder = srcs[allocation.source_perf.scope_id]
@@ -1026,12 +1032,15 @@ def planned_performance_record(
             continue
         if part.index in allocation.part_patch_slots:
             planned_slot = allocation.part_patch_slots[part.index]
+            bank = destination_bank.number
             if slot_override and part.index in slot_override:
                 planned_slot = slot_override[part.index]
+                if bank_override is not None:
+                    bank = bank_override
             rec.set_performance_part(
                 record,
                 part.index,
-                bank=destination_bank.number,
+                bank=bank,
                 patch=planned_slot,
             )
     return bytes(record)

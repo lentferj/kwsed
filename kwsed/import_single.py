@@ -41,6 +41,7 @@ _HELP_LINES = [
     "U  clear all assignments",
     "p  toggle shared/fresh patches (fresh = the import gets its own",
     "   patch copies, independent of the target bank)",
+    "z  undo the last import or staging write (needs the armed gate)",
     "t  audition the focused row in the unit's edit buffer (an unassigned",
     "   row borrows the first free slot); fresh patch copies are staged",
     "   into the configured pre-audit area, wave sequences into the target",
@@ -176,6 +177,7 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
         Binding("t", "audition", "Audition"),
         Binding("s", "cycle_source", "Source"),
         Binding("w", "toggle_gate", "Gate"),
+        Binding("z", "undo_app", "Undo"),
         Binding("ctrl+s", "import_choice", "Import", priority=True),
         Binding("r", "rebuild", "Rebuild"),
         Binding("question_mark", "help", "Help"),
@@ -950,6 +952,12 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
     def action_rebuild(self) -> None:
         self._refresh()
         self._set_status("rebuilt")
+
+    def action_undo_app(self) -> None:
+        """`z` here as well: the app's binding does not reach past a modal."""
+        undo = getattr(self.app, "action_undo", None)
+        if callable(undo):
+            undo()
 
     def action_help(self) -> None:
         self.app.push_screen(ReportScreen("Single import", "\n".join(_HELP_LINES)))

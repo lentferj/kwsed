@@ -85,15 +85,18 @@ def _seq_source(scope: str = "RAM1") -> deps.Source:
     )
 
 
-def _target_source(*, keep: bool, patch: bytes | None = None) -> deps.Source:
-    """An empty RAM3; `keep` adds one kept performance pinning patch 2."""
+def _target_source(
+    *, keep: bool, patch: bytes | None = None, scope: str = "RAM3"
+) -> deps.Source:
+    """An empty target bank; `keep` adds one kept performance pinning patch 2."""
+    number = banks.bank(scope).number
     perfs = [bytes(PERF_SIZE) for _ in range(banks.PERFORMANCES_PER_BANK)]
     patches = [bytes(r.PATCH_SIZE) for _ in range(banks.PATCHES_PER_BANK)]
     if keep:
-        perfs[5] = make_performance("Kept", ((RAM3.number, 2),))
+        perfs[5] = make_performance("Kept", ((number, 2),))
         patches[2] = patch if patch is not None else _pcm_patch()
     return deps.Source(
-        "RAM3",
+        scope,
         performances=perfs,
         patches=patches,
         waveseq=bytes(r.WAVESEQ_BANK_SIZE),
@@ -112,15 +115,17 @@ def _staging_config(tmp_path: Any) -> str:
     return str(path)
 
 
-async def _open_import_screen(app: KwsedApp, pilot: Any) -> SingleImportScreen:
-    """Drive the `y` flow to the unified import screen for RAM 3."""
+async def _open_import_screen(
+    app: KwsedApp, pilot: Any, target: str = "RAM 3"
+) -> SingleImportScreen:
+    """Drive the `y` flow to the unified import screen for ``target``."""
     app._fill((0, banks.Kind.PERFORMANCE))
     app.query_one("#slot-table").focus()
     await _settle(pilot)
     await pilot.press("y")
     await _settle(pilot)
     chooser: Any = app.screen
-    index = chooser._choices.index("RAM 3")
+    index = chooser._choices.index(target)
     chooser._current = index
     chooser.action_confirm()
     await _settle(pilot)
@@ -201,6 +206,10 @@ async def test_t_stages_fresh_patches_into_the_reserved_area(tmp_path, monkeypat
         app._sources["RAM1"] = _pcm_source()
         app._sources["RAM3"] = _target_source(keep=False)
         screen = await _open_import_screen(app, pilot)
+        # The device's staging bank is not the app's in-memory source: what
+        # is in RAM 3:27 is what undo must put back.
+        before_staged = device.read_patch("RAM3", 27)
+        assert before_staged.startswith(b"Drifting Bell")
         await pilot.press("w")  # staging writes are destructive: gate first
         await _settle(pilot)
 
@@ -226,6 +235,51 @@ async def test_t_stages_fresh_patches_into_the_reserved_area(tmp_path, monkeypat
         assert "staged 1 patch" in _status(screen)
         assert "27" in _status(screen)
         assert len(app._undo_log) == 1
+
+        # One `z` puts the staging bank back exactly as the unit had it --
+        # the undo base is the bank that was written, not the target.
+        await pilot.press("z")
+        await app.workers.wait_for_complete()
+        await _settle(pilot)
+        assert device.read_patch("RAM3", 27) == before_staged
+
+
+@pytest.mark.asyncio
+async def test_staged_parts_name_the_staging_bank_not_the_target(tmp_path):
+    """Import into RAM 2, stage in RAM 3: the record must follow the patches.
+
+    With the destination's bank number the audition would point at RAM 2's
+    slot 27 -- some other patch, usually an empty one -- and stay silent
+    even though RAM 3:27 holds the right copy. This is the live bug.
+    """
+    device = DemoDevice()
+    app = KwsedApp(
+        device, catalog=cat.Catalog([]), config_path=_staging_config(tmp_path)
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._sources["RAM1"] = _pcm_source()
+        app._sources["RAM2"] = _target_source(keep=False, scope="RAM2")
+        await _open_import_screen(app, pilot, target="RAM 2")
+        was = device.read_patch("RAM2", 27)
+        await pilot.press("w")
+        await _settle(pilot)
+
+        await pilot.press("t")
+        await _settle(pilot)
+
+        assert device.read_patch("RAM3", 27) == _pcm_patch()
+        buffer = device.edit_buffer
+        assert buffer is not None
+        used = [part for part in r.performance_parts(buffer) if part.used]
+        assert {part.bank for part in used} == {RAM3.number}, (
+            "the staged parts must name the staging bank"
+        )
+        assert {part.patch for part in used} == {27}
+        assert device.read_patch("RAM2", 27) == was, (
+            "and the target's slot 27 was not touched: it holds something "
+            "else, which is why naming it was silent"
+        )
 
 
 @pytest.mark.asyncio

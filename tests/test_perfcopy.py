@@ -1104,5 +1104,35 @@ def test_planned_performance_record_slot_override_remaps_parts():
     assert {part.patch for part in plain_used} != {27}
 
 
+def test_bank_override_names_where_the_overridden_slots_actually_live():
+    """Staging into another bank: the overridden parts must name it too.
+
+    Slot numbers only mean something together with a bank. A part left at
+    the destination's number with a staging slot points at an unrelated
+    patch there -- on a real SR, usually an empty one, so the audition is
+    silent.
+    """
+    sources = _audition_sources()
+    plan = perfcopy.plan_slot_import(
+        sources,
+        "RAM3",
+        {0: relations.PerfId("RAM1", 0)},
+        destination_bank=RAM3,
+    )
+    assert plan.fits, plan.rejected
+    alloc = plan.allocations[0]
+    override = dict.fromkeys(alloc.part_patch_slots, 27)
+    record = perfcopy.planned_performance_record(
+        sources,
+        alloc,
+        RAM3,
+        slot_override=override,
+        bank_override=banks.bank("RAM2").number,
+    )
+    used = [part for part in r.performance_parts(record) if part.used]
+    assert {part.bank for part in used} == {banks.bank("RAM2").number}
+    assert {part.patch for part in used} == {27}
+
+
 def test_imports_ok():
     assert True

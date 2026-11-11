@@ -3932,7 +3932,11 @@ class KwsedApp(App[None]):
                     )
                 )
             record = perfcopy.planned_performance_record(
-                sources, allocation, target_bank, slot_override=slot_override
+                sources,
+                allocation,
+                target_bank,
+                slot_override=slot_override,
+                bank_override=patch_area[0].number,
             )
             self.device.send_performance_to_buffer(
                 patch_area[0].number, perf_area[1], record
@@ -3959,7 +3963,15 @@ class KwsedApp(App[None]):
         Returns the undo entries, one per bank written, and the sentence
         fragment that names the sequences in the status line.
         """
-        staged_bank = bytearray(b"".join(screen._target_source.patches))
+        # The staging bank's own content is the base: its untouched slots
+        # keep whatever the user keeps there, and the undo puts the bank
+        # back as it really was. The target source is a different bank and
+        # restoring its bytes into the staging bank would be data loss.
+        staging_before = self.device.read_bank(patch_area[0].id, banks.Kind.PATCH)
+        staging_source = deps.Source(
+            patch_area[0].id, patches=list(staging_before.records)
+        )
+        staged_bank = bytearray(b"".join(staging_before.records))
         for (_pid, planned_slot), staging_slot in zip(fresh, patch_area[1]):
             src_at = planned_slot * rec.PATCH_SIZE
             dst_at = staging_slot * rec.PATCH_SIZE
@@ -3967,7 +3979,7 @@ class KwsedApp(App[None]):
                 src_at : src_at + rec.PATCH_SIZE
             ]
         undo_entries = self._stage_one_bank(
-            screen, patch_area[0], "patches", bytes(staged_bank)
+            screen, patch_area[0], "patches", bytes(staged_bank), staging_source
         )
         seq_note = ""
         if plan.sequence_map and built.waveseq is not None:
@@ -3981,12 +3993,23 @@ class KwsedApp(App[None]):
         return undo_entries, seq_note
 
     def _stage_one_bank(
-        self, screen: Any, bank: Any, kind: str, data: bytes
+        self,
+        screen: Any,
+        bank: Any,
+        kind: str,
+        data: bytes,
+        source: Any = None,
     ) -> list[dict[str, Any]]:
-        """Write one kind of one bank; return its undo entry, if any."""
+        """Write one kind of one bank; return its undo entry, if any.
+
+        ``source`` is the bank being written, as the app last read it;
+        it defaults to the target source, which is right only when the
+        bank is the target bank itself.
+        """
         from kws import backup as _backup
 
-        before = self._before_blocks(screen._target_source, bank)
+        holder = screen._target_source if source is None else source
+        before = self._before_blocks(holder, bank)
         before_blocks = {kind: before[kind]} if kind in before else None
         if kind == "patches":
             result = self.device.write_bank_bundle(
