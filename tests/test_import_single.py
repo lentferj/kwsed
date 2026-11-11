@@ -13,7 +13,7 @@ from typing import Any, cast
 import pytest
 from textual.widgets import DataTable, Static
 
-from kws import banks, deps, importers, perfcopy
+from kws import banks, deps, importers, perfcopy, relations
 from kws import records as rec
 from kwsed.gate import EditGate
 from kwsed.import_single import SingleImportChoice, SingleImportScreen
@@ -75,6 +75,7 @@ def _screen(
     two_sources: bool = False,
     target_used_patches: int = 0,
     gate_armed: bool = True,
+    initial_assignments: Any = None,
 ) -> SingleImportScreen:
     if active_slots is None:
         active_slots = [0, 1]
@@ -106,6 +107,7 @@ def _screen(
         target_bank=target_bank,
         target_source=target_source,
         gate=EditGate(armed=gate_armed),
+        initial_assignments=initial_assignments,
     )
 
 
@@ -525,3 +527,108 @@ async def test_no_active_performances() -> None:
         await pilot.press("ctrl+s")
         await settle(pilot)
         assert not isinstance(host.result, SingleImportChoice)
+
+
+@pytest.mark.asyncio
+async def test_initial_assignments_immediate_and_ctrls() -> None:
+    screen = _screen(
+        active_slots=[0, 1],
+        initial_assignments={0: relations.PerfId("RAM1", 0)},
+    )
+    host = _host()
+    async with host.run_test() as pilot:
+        host.push_screen_cb(screen)
+        await settle(pilot)
+        assert screen.assignments == {0: relations.PerfId("RAM1", 0)}
+        tgt = screen.query_one("#target-table", DataTable)
+        row0 = [str(c) for c in tgt.get_row_at(0)]
+        assert row0[1] == "← 00"
+        budget = screen.query_one("#budget", Static)
+        assert "Assigned: 1" in str(budget.content)
+        await pilot.press("ctrl+s")
+        await settle(pilot)
+        result = host.result
+        assert isinstance(result, SingleImportChoice)
+        assert result.assignments == {0: relations.PerfId("RAM1", 0)}
+
+
+@pytest.mark.asyncio
+async def test_source_origin_ram2_displays() -> None:
+    screen = _screen(active_slots=[0])
+    original = screen._banks[0]
+    screen._banks[0] = SimpleNamespace(
+        label=original.label,
+        scope=original.scope,
+        source=original.source,
+        source_origin="RAM 2",
+    )
+    host = _host()
+    async with host.run_test() as pilot:
+        host.push_screen_cb(screen)
+        await settle(pilot)
+        src = screen.query_one("#source-table", DataTable)
+        src.move_cursor(row=0)
+        await settle(pilot)
+        await pilot.press("space")
+        await settle(pilot)
+        tgt = screen.query_one("#target-table", DataTable)
+        shown = str(tgt.get_row_at(0)[4])
+        assert shown.strip() == "RAM 2"
+
+
+@pytest.mark.asyncio
+async def test_source_origin_rom7_and_long_path() -> None:
+    screen = _screen(active_slots=[0])
+    original = screen._banks[0]
+    screen._banks[0] = SimpleNamespace(
+        label=original.label,
+        scope=original.scope,
+        source=original.source,
+        source_origin="ROM 7",
+    )
+    host = _host()
+    async with host.run_test() as pilot:
+        host.push_screen_cb(screen)
+        await settle(pilot)
+        src = screen.query_one("#source-table", DataTable)
+        src.move_cursor(row=0)
+        await settle(pilot)
+        await pilot.press("space")
+        await settle(pilot)
+        tgt = screen.query_one("#target-table", DataTable)
+        shown = str(tgt.get_row_at(0)[4])
+        assert shown.strip() == "ROM 7"
+        long_bank = screen._banks[0]
+        screen._banks[0] = SimpleNamespace(
+            label=long_bank.label,
+            scope=long_bank.scope,
+            source=long_bank.source,
+            source_path="/home/me/Monotanz/Sounds/LIBRA18.SYX",
+        )
+        screen._refresh()
+        await settle(pilot)
+        shown = str(tgt.get_row_at(0)[4])
+        assert shown.endswith("LIBRA18.SYX")
+
+
+@pytest.mark.asyncio
+async def test_initial_assignments_survive_add_and_switch() -> None:
+    screen = _screen(
+        active_slots=[0, 1],
+        initial_assignments={0: relations.PerfId("RAM1", 0)},
+    )
+    host = _host()
+    async with host.run_test() as pilot:
+        host.push_screen_cb(screen)
+        await settle(pilot)
+        before = dict(screen.assignments)
+        extra = _source_bank("RAM3", [2, 3])
+        screen.add_source_bank(extra, extra.source)
+        await settle(pilot)
+        assert screen.assignments == before
+        screen.select_source(0)
+        await settle(pilot)
+        assert screen.assignments == before
+        screen.select_source(1)
+        await settle(pilot)
+        assert screen.assignments == before

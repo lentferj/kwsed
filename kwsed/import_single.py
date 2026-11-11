@@ -187,6 +187,7 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
         gate: Optional[EditGate] = None,
         on_source_request: Optional[Callable[["SingleImportScreen"], None]] = None,
         on_cancel: Optional[Callable[["SingleImportScreen"], None]] = None,
+        initial_assignments: Optional[Mapping[int, relations.PerfId]] = None,
     ) -> None:
         super().__init__()
         self._path = path
@@ -199,7 +200,9 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
         self._on_cancel = on_cancel
         self._target_scope = _target_scope(sources, target_bank, target_source)
         self._source_index = 0
-        self._assignments: Dict[int, relations.PerfId] = {}
+        self._assignments: Dict[int, relations.PerfId] = (
+            dict(initial_assignments) if initial_assignments else {}
+        )
         self._active_sources: List[int] = []
         self._status_message = ""
         #: Target slot digits typed straight into the source row. No modal:
@@ -295,14 +298,27 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
     def _source_path_for_scope(self, scope: str) -> str:
         for bank in self._banks:
             if getattr(bank, "scope", None) == scope:
-                return str(getattr(bank, "source_path", "") or "")
+                path = getattr(bank, "source_path", "")
+                if path:
+                    return str(path)
+                origin = getattr(bank, "source_origin", "")
+                if origin:
+                    return str(origin)
+                return ""
         return ""
 
     def _source_path_text(self, scope: str) -> str:
-        compact = self._compact_source_path(self._source_path_for_scope(scope))
-        if not compact:
+        raw = self._source_path_for_scope(scope)
+        if not raw:
             return "--"
         width = max(3, self._source_path_width)
+        # Unit origins (e.g. "RAM 2", "ROM 7", "Card 07") are not filesystem
+        # paths: display them verbatim, only right-aligning/padding.
+        if "/" not in raw and "\\" not in raw:
+            return _escape(raw.rjust(width))
+        compact = self._compact_source_path(raw)
+        if not compact:
+            return "--"
         if len(compact) > width:
             compact = "..." + compact[-(width - 3) :] if width > 3 else compact[-width:]
         # Right-align it by hand: DataTable cells are left-aligned by default,
@@ -328,7 +344,7 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
         table.add_column("state", key="state", width=8)
         table.add_column("performance", key="performance", width=20)
         table.add_column("patch slots", key="patches", width=14)
-        table.add_column("source file", key="source", width=self._source_path_width)
+        table.add_column("source", key="source", width=self._source_path_width)
 
     def on_resize(self, event: Any) -> None:
         if not self.is_mounted:
