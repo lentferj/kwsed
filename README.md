@@ -303,8 +303,8 @@ kwsed --port "U6MIDI Pro:U6MIDI Pro MIDI 1 44:0" --device-channel 5
 | `m` / `e` | read the 32 Multisets / edit the selected one — **silent** |
 | `d` / `D` | show the selection's dependencies / show-hide the dependency pane — silent, remembered |
 | `p` | show/hide the patch rows in the bank list — remembered (they can be inspected, not selected) |
-| `y` | copy this performance, with private copies of its patches, into RAM 1–3 or the Card — silent until armed |
-| `I` | import a file/disk: whole bank (into cache or a unit bank) or single/multiple performances into a bank |
+| `y` | open the unified copy session for this performance, prefilled and ready for the target/slot map |
+| `I` | import/copy: whole bank from a file or unit bank, or select performances from files, RAM, ROM or Card into one target bank |
 | `z` / `w` | undo the last write / toggle the write gate |
 | `C` / `L` / `X` | capture the inserted card / label it / sweep HCard banks — read-only on the unit |
 | `i` / `?` / `q` | device identity / help / quit |
@@ -318,9 +318,9 @@ nothing when `card_mode = "none"`; `X` is HCard-only. `c`, `[` and `]` set the
 MIDI channel used for selection and audition; the unit's own SysEx base
 channel is the separate `--device-channel`.
 
-On the **copy-performance** screen (`y`), `b` chooses the destination bank,
-`t` opens the target slot list, `m` chooses append/clean, `a` arms, `w` writes,
-`?` opens the screen help, and `esc`/`q` cancels. In the **Multi editor**
+On the unified **copy** session (`y`), choose the target bank, adjust the
+prefilled slot map, use `s` to add more sources, `w` to arm and `ctrl+s` to
+write; `?` opens help and `esc`/`q` goes back. In the **Multi editor**
 (`m`, then `e`), `b` chooses a bank (including `CARD/07` and `CARD/c1`), `s`
 stages card performances into RAM, `space` toggles a channel's used flag,
 `+`/`-` nudges its level, `n` renames it, and `a`/`w` arm and write the staged
@@ -520,12 +520,16 @@ same readers; `--list` before choosing is cheap and needs no unit.
 #### From the browser
 
 `I` opens a `ChoiceScreen` — **Whole bank** or **Single / multiple
-performances** — then a `FilePickerScreen`: one directory at a time, `..` to
-go up, import files sorted first, `enter` opens a directory or file, `r`
-refreshes, `esc`/`q` cancels. The start folder is remembered in
-`ui-state.toml` under `[import] folder`.
+performances**. Whole bank asks for a file or unit source; single/multiple
+starts with a `FilePickerScreen`: one directory at a time, `..` to go up,
+import files sorted first, `enter` opens a directory or file, `r` refreshes,
+`esc`/`q` cancels. The start folder is remembered in `ui-state.toml` under
+`[import] folder`.
 
-**Whole bank** opens `WholeBankImportScreen`:
+**Whole bank** first opens a source chooser: a file, or any unit bank
+(`RAM 1`–`RAM 3`, `ROM 4`–`ROM 11`, or the active `Card`). A file goes through
+the file picker; a unit source is read once into a session snapshot and then
+opens `WholeBankImportScreen`:
 
 - it previews the source bank's active performances, patches and sequence
   bank;
@@ -558,22 +562,24 @@ ctrl+s       write the whole assignment in one batch
 
 The lower table has a `patch slots` column: it lists the destination patch
 slots an existing performance uses, or the slots the planner will give an
-assigned performance. Its `source file` column shows the file an assigned
-performance came from, shortened to the file name and its two parent folders
-(for example `.../Monotanz/Sounds/LIBRA18.SYX`). The text is right-aligned and
-left-trimmed, so the file name at the right is never cut off when the terminal
+assigned performance. Its `source` column shows the file or unit bank an
+assigned performance came from. File paths are shortened to the file name and
+its two parent folders (for example `.../Monotanz/Sounds/LIBRA18.SYX`); unit
+banks show `RAM 2`, `ROM 7`, `Card 07`, and so on. Text is right-aligned and
+left-trimmed, so the right-hand file name is never cut off when the terminal
 is narrow. `Init` and free slots are available; occupied slots are overwritten
 only when chosen. Each assignment is checked against the 50
 performance, 35 patch, 32 sequence and 501 step budgets, so the screen refuses
 an assignment before it can make a bank that does not fit.
 
 `s` opens the session's source-bank chooser. It lists every bank already added
-and has **Add another source file…** for another `.syx`/`.img`/`.LIB`/`.MPC`
-bank. Assignments already made are kept when switching or adding. Distinct
-banks with the same scope (two RAM 1 files, or RAM 1 into RAM 1) are held under
-session aliases carrying their real bank number, so one target bank can be
-assembled from several source files. The target is still single: many source
-banks to one destination bank.
+and has **Add another source file…** and **Add unit bank (RAM/ROM/Card)…**.
+The unit chooser lists RAM 1–3, ROM 4–11 and the active Card, and each bank is
+read at most once per session. Assignments already made are kept when
+switching or adding. Distinct banks with the same scope (two RAM 1 files, or
+RAM 1 into RAM 1) are held under session aliases carrying their real bank
+number, so one target bank can be assembled from several source files and unit
+banks. The target is still single: many sources to one destination bank.
 
 The app reads the destination bank once, the slot-preserving planner keeps
 every untouched destination slot and every surviving shared/ROM reference, and
@@ -590,10 +596,12 @@ chooser → source-bank chooser → file picker → Import menu; whole-bank impo
 goes back to the file picker. The Import menu's own `Esc` returns to the
 browser.
 
-The copy screen (`y`) uses the same slot-preserving planner for append and
-overwrite, the whole-bank replace for clean, and the same `before_blocks` fast
-path. The CLI remains the scriptable path; the browser `I` uses the same
-readers, planner and cache.
+`y` is now a shortcut into the same unified screen: it loads the selected
+performance's source bank, asks for a target bank, and preassigns that
+performance to the first free/Init slot. You can add more file/unit sources
+with `s`, adjust the map, arm the gate and write one batch. The target write
+is the same fenced bundle and one undo step. The CLI remains the scriptable
+path; the browser `I`/`y` use the same readers, planner and cache.
 
 #### What each source supplies
 

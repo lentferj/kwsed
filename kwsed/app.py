@@ -90,6 +90,12 @@ from kwsed.file_picker import FilePickerScreen
 from kwsed.import_screen import BankImportScreen
 from kwsed.import_bank import WholeBankImportScreen
 from kwsed.import_single import SingleImportScreen
+from kwsed.import_source import (
+    SourceEntry,
+    make_source_entry,
+    origin_for_unit,
+    unit_bank_choices,
+)
 from kwsed.target_bank import ImportMenuScreen, TargetBankScreen
 from kwsed.target_screen import TargetSlotScreen
 
@@ -3209,7 +3215,110 @@ class KwsedApp(App[None]):
             )
         except Exception:
             source_name = ""
-        self.push_screen(CopyPerformanceScreen(self, perf, source_name))
+        self._open_copy_target_chooser(perf, source_name)
+
+    def _open_copy_target_chooser(
+        self, perf: relations.PerfId, source_name: str = ""
+    ) -> None:
+        writable = banks.writable_banks()
+        if not writable:
+            self.notify_status("no writable target banks", refused=True)
+            return
+        self.push_screen(
+            TargetBankScreen("Copy to bank", [b.label for b in writable]),
+            lambda index: self._copy_target_chosen(perf, source_name, writable, index),
+        )
+
+    def _copy_target_chosen(
+        self,
+        perf: relations.PerfId,
+        source_name: str,
+        writable: Sequence[Any],
+        target_index: Optional[int],
+    ) -> None:
+        if target_index is None:
+            return
+        try:
+            target = writable[target_index]
+        except (IndexError, TypeError):
+            return
+        sources = dict(self._sources_with_store())
+        target_source = sources.get(target.id)
+        if target_source is None:
+            try:
+                target_source = self._read_source_offline(target.id)
+            except Exception as exc:
+                self.notify_status(
+                    f"copy: could not read {target.label}: {exc}", refused=True
+                )
+                return
+            self._sources[target.id] = target_source
+            sources[target.id] = target_source
+        source = sources.get(perf.scope_id)
+        if source is None:
+            source = self._load_unit_source(
+                perf.scope_id, origin_for_unit(perf.scope_id)
+            )
+            if source is None:
+                return
+            sources[perf.scope_id] = source
+        origin = origin_for_unit(perf.scope_id)
+        read_only = not self._unit_scope_is_writable(perf.scope_id)
+        entry = make_source_entry(
+            label=origin,
+            scope=perf.scope_id,
+            source=source,
+            origin=origin,
+            existing=sources,
+            read_only=read_only,
+        )
+        sources[entry.scope] = entry.source
+        sources[target.id] = target_source
+        free = next(
+            (
+                slot
+                for slot, record in enumerate(target_source.performances)
+                if perfcopy.is_empty_performance(record)
+            ),
+            None,
+        )
+        if free is None:
+            self.notify_status(f"copy: {target.label} has no free slot", refused=True)
+            return
+        initial = {free: relations.PerfId(entry.scope, perf.number)}
+        self.push_screen(
+            SingleImportScreen(
+                path=origin,
+                banks=[entry],
+                sources=sources,
+                target_bank=target,
+                target_source=target_source,
+                gate=self._write_gate,
+                initial_assignments=initial,
+                on_source_request=self._single_source_menu,
+            ),
+            lambda choice: self._import_single_chosen(
+                choice,
+                target,
+                entry,
+                sources,
+                origin,
+                [entry],
+                writable,
+            ),
+        )
+        self.notify_status(
+            f"copy {source_name or perf} into {target.label} slot {free:02d}; "
+            "adjust or ctrl+s"
+        )
+
+    def _unit_scope_is_writable(self, scope: str) -> bool:
+        if scope == "CARD" or scope.startswith("CARD/"):
+            return True
+        try:
+            return bool(banks.bank(scope).writable)
+        except LookupError:
+            return False
 
     def action_import(self) -> None:
         self.push_screen(
@@ -3222,6 +3331,12 @@ class KwsedApp(App[None]):
     def _import_kind_chosen(self, kind: Optional[int]) -> None:
         if kind is None:
             return
+        if kind == 0:
+            self._open_whole_source_menu()
+            return
+        self._open_file_picker(kind)
+
+    def _open_file_picker(self, kind: int) -> None:
         picker = FilePickerScreen(
             start=self._import_folder or "",
             start_row=self._import_cursor,
@@ -3239,12 +3354,79 @@ class KwsedApp(App[None]):
             self._import_cursor = picker.last_row
             if path:
                 self._import_path_chosen(kind, path)
+            elif kind == 0:
+                self._open_whole_source_menu()
             else:
                 # Escape from the file picker goes back to the Import menu,
                 # not all the way to the browser.
                 self.action_import()
 
         self.push_screen(picker, done)
+
+    def _open_whole_source_menu(self) -> None:
+        choices = ["From file…"] + [
+            origin_for_unit(
+                self._active_card_scope() if choice.scope == "CARD" else choice.scope
+            )
+            for choice in unit_bank_choices()
+        ]
+        self.push_screen(
+            ImportMenuScreen("Whole bank source", choices),
+            self._whole_source_chosen,
+        )
+
+    def _whole_source_chosen(self, index: Optional[int]) -> None:
+        if index is None:
+            self.action_import()
+            return
+        if index == 0:
+            self._open_file_picker(0)
+            return
+        try:
+            choice = unit_bank_choices()[index - 1]
+        except (IndexError, TypeError):
+            return
+        scope = self._active_card_scope() if choice.scope == "CARD" else choice.scope
+        origin = origin_for_unit(scope)
+        source = self._load_unit_source(scope, origin)
+        if source is None:
+            return
+        entry = make_source_entry(
+            label=origin,
+            scope=scope,
+            source=source,
+            origin=origin,
+            existing={},
+            read_only=choice.read_only,
+        )
+        whole_banks: Any = [entry]
+        self.push_screen(
+            WholeBankImportScreen(
+                path=origin, banks=whole_banks, gate=self._write_gate
+            ),
+            lambda picked: self._import_whole_bank_chosen(whole_banks, picked),
+        )
+
+    def _load_unit_source(self, scope: str, label: str) -> Optional[deps.Source]:
+        source = self._sources_with_store().get(scope)
+        if source is None:
+            self.notify_status(f"reading {label}…")
+            try:
+                source = self._read_source_offline(scope)
+            except Exception as exc:
+                self.notify_status(
+                    f"import: could not read {label}: {exc}", refused=True
+                )
+                return None
+            self._sources[scope] = source
+        performances = getattr(source, "performances", None) or []
+        patches = getattr(source, "patches", None) or []
+        if len(performances) != 50 or len(patches) != 35:
+            self.notify_status(
+                f"import: could not read {label}: incomplete source", refused=True
+            )
+            return None
+        return source
 
     def _import_path_chosen(self, kind: int, path: str) -> None:
         try:
@@ -3514,6 +3696,7 @@ class KwsedApp(App[None]):
             for index, bank in enumerate(screen.source_banks)
         ]
         choices.append("Add another source file…")
+        choices.append("Add unit bank (RAM/ROM/Card)…")
         self.push_screen(
             ImportMenuScreen("Source bank", choices, screen.source_index),
             lambda index: self._single_source_menu_chosen(screen, index),
@@ -3525,7 +3708,13 @@ class KwsedApp(App[None]):
         if 0 <= index < len(screen.source_banks):
             screen.select_source(index)
             return
-        self._browse_extra_source(screen)
+        extra_index = len(screen.source_banks)
+        if index == extra_index:
+            self._browse_extra_source(screen)
+            return
+        if index == extra_index + 1:
+            self._browse_unit_source(screen)
+            return
 
     def _browse_extra_source(self, screen: Any) -> None:
         picker = FilePickerScreen(
@@ -3564,6 +3753,49 @@ class KwsedApp(App[None]):
             )
 
         self.push_screen(picker, done)
+
+    def _browse_unit_source(self, screen: Any) -> None:
+        choices = unit_bank_choices()
+        active_scope = self._active_card_scope()
+        labels: List[str] = []
+        for choice in choices:
+            if choice.scope == "CARD":
+                labels.append(origin_for_unit(active_scope))
+            else:
+                labels.append(origin_for_unit(choice.scope))
+
+        def chosen(index: Optional[int]) -> None:
+            if index is None:
+                return
+            try:
+                choice = choices[index]
+            except (IndexError, TypeError):
+                return
+            self._add_unit_source(screen, choice)
+
+        self.push_screen(ImportMenuScreen("Add unit bank", labels), chosen)
+
+    def _add_unit_source(self, screen: Any, choice: Any) -> None:
+        scope = (
+            self._active_card_scope()
+            if getattr(choice, "scope", "") == "CARD"
+            else str(getattr(choice, "scope", ""))
+        )
+        origin = origin_for_unit(scope)
+        label = origin
+        source = self._load_unit_source(scope, label)
+        if source is None:
+            return
+        entry: SourceEntry = make_source_entry(
+            label=origin,
+            scope=scope,
+            source=source,
+            origin=origin,
+            existing=screen.sources,
+            read_only=bool(getattr(choice, "read_only", False)),
+            bank_number=None,
+        )
+        screen.add_source_bank(entry, entry.source)
 
     def _add_extra_source_choice(
         self,

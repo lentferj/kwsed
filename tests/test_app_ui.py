@@ -39,14 +39,15 @@ from kwsed.app import (
     VIEW_ALL,
     VIEW_ALL_FAVOURITES,
     VIEW_BANK_FAVOURITES,
-    CopyPerformanceScreen,
     KwsedApp,
     ViewSlot,
     favorite_bank_id,
 )
 from kwsed.demo import DemoDevice
+from kwsed.import_single import SingleImportScreen
+from kwsed.target_bank import TargetBankScreen
 from kwsed.target_screen import TargetSlotScreen
-from vinsynlib.ui.modals import ChoiceScreen, RatingFilter
+from vinsynlib.ui.modals import RatingFilter
 from vinsynlib.ui.report import ReportScreen
 
 
@@ -2473,20 +2474,24 @@ class TestCopyPerformance:
             app.query_one("#slot-table").focus()
             await pilot.press("y")
             await settle(pilot)
-            assert isinstance(app.screen, CopyPerformanceScreen)
+            assert isinstance(app.screen, TargetBankScreen)
+
+            chooser = app.screen
+            idx = chooser._choices.index("RAM 3")
+            chooser._current = idx
+            chooser.action_confirm()
+            await settle(pilot)
+            assert isinstance(app.screen, SingleImportScreen)
             screen = app.screen
+            assert screen.assignments, "one assignment to the first free slot"
 
             # Nothing is written before the screen is armed.
             await pilot.press("w")
             await settle(pilot)
             assert device.bundle_write_count == 0
-            assert "arm" in panel_text(app, "#status")
+            assert "ARMED" in str(screen.query_one("#status", Static).content).upper()
 
-            await pilot.press("a")
-            ids = [bank.id for bank in screen._destinations]
-            screen._dest_index = ids.index("RAM3")
-            screen._refresh()
-            await pilot.press("w")
+            await pilot.press("ctrl+s")
             await settle(pilot, 40)
 
             assert device.bundle_write_count == 1
@@ -2504,7 +2509,7 @@ class TestCopyPerformance:
                 "two parts sharing one source patch keep one private slot"
             )
 
-    async def test_copy_screen_names_bank_mode_and_opens_choosers(self, app):
+    async def test_copy_target_chooser_labels_and_source_origin(self, app):
         async with app.run_test() as pilot:
             await pilot.pause()
             app._sources["RAM1"] = _copied_source()
@@ -2512,76 +2517,19 @@ class TestCopyPerformance:
             app.query_one("#slot-table").focus()
             await pilot.press("y")
             await settle(pilot)
-            screen = app.screen
-            assert isinstance(screen, CopyPerformanceScreen)
-            state = str(screen.query_one("#copy-perf-state", Static).content)
-            assert "destination bank:" in state
-            assert "copy mode: append" in state
-            assert "b bank · t target slot · m append/clean" in state
-            title = str(screen.query_one("#copy-perf-title", Label).content)
-            assert "Copy Performance →" in title
+            chooser = app.screen
+            assert isinstance(chooser, TargetBankScreen)
+            assert chooser._choices == ["RAM 1", "RAM 2", "RAM 3", "Card"]
 
-            screen.action_bank()
-            await settle(pilot)
-            assert isinstance(app.screen, ChoiceScreen)
-            ids = [bank.id for bank in screen._destinations]
-            screen._bank_chosen(ids.index("RAM3"))
-            await settle(pilot)
-            state = str(screen.query_one("#copy-perf-state", Static).content)
-            assert "destination bank: RAM 3" in state
-
-            screen.action_mode()
-            await settle(pilot)
-            assert isinstance(app.screen, ChoiceScreen)
-            screen._mode_chosen(1)
-            await settle(pilot)
-            state = str(screen.query_one("#copy-perf-state", Static).content)
-            assert "copy mode: clean" in state
-
-            screen.action_help()
-            await settle(pilot)
-            assert isinstance(app.screen, ReportScreen)
-            await pilot.press("escape")
-
-    async def test_copy_screen_opens_overwrite_target_list(self, app):
-        async with app.run_test() as pilot:
-            await pilot.pause()
-            app._sources["RAM1"] = _shared_source()
-            app._fill((0, banks.Kind.PERFORMANCE))
-            app.query_one("#slot-table").focus()
-            await pilot.press("y")
+            idx = chooser._choices.index("RAM 1")
+            chooser._current = idx
+            chooser.action_confirm()
             await settle(pilot)
             screen = app.screen
-            assert isinstance(screen, CopyPerformanceScreen)
+            assert isinstance(screen, SingleImportScreen)
+            assert "RAM 1" in screen._source_path_text(screen.source_banks[0].scope)
 
-            screen.action_target()
-            await settle(pilot)
-            assert isinstance(app.screen, TargetSlotScreen)
-            assert app.screen.slots == list(range(50))
-            screen._target_chosen(1)
-            await settle(pilot)
-            state = str(screen.query_one("#copy-perf-state", Static).content)
-            assert "copy mode: overwrite slot 01" in state
-            title = str(screen.query_one("#copy-perf-title", Label).content)
-            assert "overwrite 01" in title
-
-    async def test_append_preview_uses_the_new_slot_not_an_existing_one(self, app):
-        async with app.run_test() as pilot:
-            await pilot.pause()
-            app._sources["RAM1"] = _copied_source()
-            app._fill((0, banks.Kind.PERFORMANCE))
-            app.query_one("#slot-table").focus()
-            await pilot.press("y")
-            await settle(pilot)
-            screen = app.screen
-            assert isinstance(screen, CopyPerformanceScreen)
-            # Destination is the same bank as the source, so the source
-            # Performance is also an existing destination allocation.
-            state = str(screen.query_one("#copy-perf-state", Static).content)
-            assert "target Performance slot 01" in state
-            assert "cannot copy" not in state
-
-    async def test_init_slots_are_free_in_the_copy_preview(self, app):
+    async def test_init_slots_are_free(self, app):
         from tests.test_bankbuild import make_performance
 
         async with app.run_test() as pilot:
@@ -2600,24 +2548,54 @@ class TestCopyPerformance:
             app.query_one("#slot-table").focus()
             await pilot.press("y")
             await settle(pilot)
-            screen = app.screen
-            assert isinstance(screen, CopyPerformanceScreen)
-            ids = [bank.id for bank in screen._destinations]
-            screen._dest_index = ids.index("RAM3")
-            screen._ensure_context()
+            chooser = app.screen
+            assert isinstance(chooser, TargetBankScreen)
+            idx = chooser._choices.index("RAM 3")
+            chooser._current = idx
+            chooser.action_confirm()
             await settle(pilot)
-            state = str(screen.query_one("#copy-perf-state", Static).content)
-            assert "destination active performances: 0" in state
-            assert "free performance slots: 50" in state
-            assert "target Performance slot 00" in state
+            screen = app.screen
+            assert isinstance(screen, SingleImportScreen)
+            assert list(screen.assignments.keys()) == [0]
 
-    async def test_rejected_copy_is_not_written(self, tmp_path):
+    async def test_q_esc_from_chooser_returns_without_writing(self, app):
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._sources["RAM1"] = _copied_source()
+            app._fill((0, banks.Kind.PERFORMANCE))
+            app.query_one("#slot-table").focus()
+            await pilot.press("y")
+            await settle(pilot)
+            assert isinstance(app.screen, TargetBankScreen)
+            await pilot.press("q")
+            await settle(pilot)
+            assert not isinstance(app.screen, TargetBankScreen)
+            assert app.device.bundle_write_count == 0
+
+    async def test_q_esc_from_screen_returns_to_chooser(self, app):
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._sources["RAM1"] = _copied_source()
+            app._sources["RAM3"] = _empty_source("RAM3")
+            app._fill((0, banks.Kind.PERFORMANCE))
+            app.query_one("#slot-table").focus()
+            await pilot.press("y")
+            await settle(pilot)
+            chooser = app.screen
+            idx = chooser._choices.index("RAM 3")
+            chooser._current = idx
+            chooser.action_confirm()
+            await settle(pilot)
+            assert isinstance(app.screen, SingleImportScreen)
+            await pilot.press("q")
+            await settle(pilot)
+            assert isinstance(app.screen, TargetBankScreen)
+
+    async def test_full_target_no_assignment(self, tmp_path):
         from tests.test_bankbuild import make_patch, make_performance
 
         def full_ram3():
-            perfs = [
-                make_performance(f"Filled {i:02d}", ((2, i),)) for i in range(35)
-            ] + [make_performance("", ()) for _ in range(15)]
+            perfs = [make_performance(f"Filled {i:02d}", ((2, 0),)) for i in range(50)]
             patches = [make_patch(f"Patch {i:02d}") for i in range(35)]
             return deps.Source(
                 "RAM3",
@@ -2636,132 +2614,34 @@ class TestCopyPerformance:
             app.query_one("#slot-table").focus()
             await pilot.press("y")
             await settle(pilot)
-            screen = app.screen
-            assert isinstance(screen, CopyPerformanceScreen)
-            ids = [bank.id for bank in screen._destinations]
-            screen._dest_index = ids.index("RAM3")
-            screen._ensure_context()
-            await settle(pilot)
-            state = str(screen.query_one("#copy-perf-state", Static).content)
-            assert "cannot copy" in state
-            assert "target Performance slot" not in state
-
-            await pilot.press("a")
-            await pilot.press("w")
-            await settle(pilot, 40)
+            chooser = app.screen
+            assert isinstance(chooser, TargetBankScreen)
+            idx = chooser._choices.index("RAM 3")
+            chooser._current = idx
+            chooser.action_confirm()
+            await settle(pilot, 20)
+            assert not isinstance(app.screen, SingleImportScreen)
             assert device.bundle_write_count == 0
-            assert "does not fit" in panel_text(app, "#status")
+            assert "no free slot" in panel_text(app, "#status")
 
-    async def test_skip_readonly_card_formats_active_bank(self, app):
-        async with app.run_test() as pilot:
-            await pilot.pause()
-            app._active_card = 7
-            app._sources["RAM1"] = _copied_source()
-            app._fill((0, banks.Kind.PERFORMANCE))
-            app.query_one("#slot-table").focus()
-            await pilot.press("y")
-            await settle(pilot)
-            assert isinstance(app.screen, CopyPerformanceScreen)
-
-            ids = [b.id for b in app.screen._destinations]
-            app.screen._dest_index = ids.index("CARD")
-            app.screen._skip_readonly_card()
-            await settle(pilot)
-
-            text = panel_text(app, "#status")
-            assert "Card 07" in text
-            assert "Card NN" not in text
-
-    async def test_y_on_a_card_row_when_another_bank_is_active_writes_nothing(
-        self, app
-    ):
+    async def test_card_mismatch_refusal(self, app):
         async with app.run_test() as pilot:
             await pilot.pause()
             app._active_physical = None
             app._active_card = 13
+            app._sources["RAM1"] = _copied_source()
             app._fill((banks.bank("CARD").number, banks.Kind.PERFORMANCE), 7)
             app.query_one("#slot-table").focus()
             await pilot.press("y")
             await settle(pilot, 20)
-            assert isinstance(app.screen, CopyPerformanceScreen)
+            assert isinstance(app.screen, TargetBankScreen)
+            chooser = app.screen
+            chooser._current = 0
+            chooser.action_confirm()
+            await settle(pilot, 20)
             text = panel_text(app, "#status")
             assert "CARD/07" in text
-            assert "CARD/13" in text, "the refusal names the bank in the slot"
+            assert "CARD/13" in text
             assert "refused" in text
-
-            await pilot.press("a")
-            await settle(pilot)
-            await pilot.press("w")
-            await settle(pilot, 20)
-
+            assert not isinstance(app.screen, SingleImportScreen)
             assert app.device.bundle_write_count == 0
-            text = panel_text(app, "#status")
-            assert "CARD/13" in text, "firing repeats the failed read, it does not lie"
-            assert "refused" in text
-
-    async def test_preview_uses_loaded_destination_bank(self, tmp_path):
-        from kws import perfcopy
-        from tests.test_bankbuild import make_performance
-
-        class _Ram3Demo(DemoDevice):
-            def read_raw(self, bank_number, function, *, timeout=None):
-                if bank_number == banks.bank("RAM3").sysex:
-                    active = make_performance("Active Zero", ((0, 0),))
-                    perfs = [active, active] + [
-                        make_performance("", ())
-                        for _ in range(banks.PERFORMANCES_PER_BANK - 2)
-                    ]
-                    patches = [
-                        bytes(rec.PATCH_SIZE) for _ in range(banks.PATCHES_PER_BANK)
-                    ]
-                    perf_blob = b"".join(perfs)
-                    patch_blob = b"".join(patches)
-                    ws_blob = bytes(rec.WAVESEQ_BANK_SIZE)
-                    if function == m.Function.ALL_PERFORMANCE_DUMP:
-                        return m.frame_bulk(
-                            function, bank_number, perf_blob, channel=self.channel
-                        )
-                    if function == m.Function.ALL_PATCH_DUMP:
-                        return m.frame_bulk(
-                            function, bank_number, patch_blob, channel=self.channel
-                        )
-                    if function == m.Function.ALL_WAVESEQ_DUMP:
-                        return m.frame_bulk(
-                            function, bank_number, ws_blob, channel=self.channel
-                        )
-                return super().read_raw(bank_number, function, timeout=timeout)
-
-        device = _Ram3Demo()
-        app = KwsedApp(device, catalog=cat.Catalog([]))
-        async with app.run_test() as pilot:
-            await pilot.pause()
-            app._sources["RAM1"] = _copied_source()
-            # deliberately leave RAM3 out
-            app._fill((0, banks.Kind.PERFORMANCE))
-            app.query_one("#slot-table").focus()
-            await pilot.press("y")
-            await settle(pilot)
-            assert isinstance(app.screen, CopyPerformanceScreen)
-            screen = app.screen
-
-            ids = [b.id for b in screen._destinations]
-            screen._dest_index = ids.index("RAM3")
-            screen._ensure_context()
-            await settle(pilot, 20)
-
-            assert "RAM3" in app._sources
-            assert len(perfcopy.active_performances(app._sources["RAM3"])) == 2
-
-            assert isinstance(app.screen, CopyPerformanceScreen)
-            state = str(app.screen.query_one("#copy-perf-state", Static).content)
-            assert "target Performance slot 02" in state
-            assert "destination active performances" in state
-
-            # firing is refused while a bank load is still in flight
-            screen._loading = {"RAM3"}
-            screen._armed = True
-            screen.action_fire()
-            await settle(pilot)
-            assert "still reading the banks" in panel_text(app, "#status")
-            assert device.bundle_write_count == 0
-            screen._loading.clear()

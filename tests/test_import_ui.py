@@ -24,6 +24,7 @@ from kwsed.gate import EditGate
 from kwsed.import_bank import WholeBankChoice, WholeBankImportScreen
 from kwsed.import_screen import BankImportScreen
 from kwsed.import_single import SingleImportChoice, SingleImportScreen
+from kwsed.import_source import unit_bank_choices
 from kwsed.target_bank import ImportMenuScreen, TargetBankScreen
 from vinsynlib.ui.modals import ChoiceScreen
 
@@ -110,6 +111,105 @@ async def test_target_bank_screen_q_and_legend() -> None:
         await pilot.press("q")
         await pilot.pause()
         assert not isinstance(app.screen, TargetBankScreen)
+
+
+class _SourceHost:
+    def __init__(self) -> None:
+        self.source_banks: list[Any] = []
+        self.sources: dict[str, Any] = {}
+        self.source_index = 0
+        self.added: list[Any] = []
+
+    def select_source(self, index: int) -> None:
+        self.source_index = index
+
+    def add_source_bank(self, bank: Any, source: Any = None) -> None:
+        self.added.append((bank, source))
+        self.source_banks.append(bank)
+        self.sources[str(bank.scope)] = source if source is not None else bank.source
+
+
+@pytest.mark.asyncio
+async def test_source_menu_offers_file_and_unit_sources(tmp_path: Any) -> None:
+    app = _make_app(tmp_path)
+    host = _SourceHost()
+    pushed: list[Any] = []
+    app.push_screen = lambda s, c=None: pushed.append(s)  # type: ignore[assignment]
+    app._single_source_menu(host)
+    assert isinstance(pushed[0], ImportMenuScreen)
+    assert pushed[0]._choices[-2:] == [
+        "Add another source file…",
+        "Add unit bank (RAM/ROM/Card)…",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_unit_bank_chooser_lists_rom_and_active_card(tmp_path: Any) -> None:
+    app = _make_app(tmp_path)
+    host = _SourceHost()
+    app._active_card_scope = lambda: "CARD/07"  # type: ignore[method-assign]
+    pushed: list[Any] = []
+    app.push_screen = lambda s, c=None: pushed.append(s)  # type: ignore[assignment]
+    app._browse_unit_source(host)
+    assert isinstance(pushed[0], ImportMenuScreen)
+    labels = pushed[0]._choices
+    assert labels[:3] == ["RAM 1", "RAM 2", "RAM 3"]
+    assert labels[-1] == "Card 07"
+    assert "ROM 4" in labels and "ROM 11" in labels
+
+
+@pytest.mark.asyncio
+async def test_add_unit_source_reads_and_keeps_assignments(tmp_path: Any) -> None:
+    app = _make_app(tmp_path)
+    app.notify_status = lambda *a, **k: None  # type: ignore[method-assign]
+    host = _SourceHost()
+    source = _make_bank(scope="RAM2").source
+    calls: list[str] = []
+
+    def fake_read(scope: str) -> Any:
+        calls.append(scope)
+        return source
+
+    app._read_source_offline = fake_read  # type: ignore[method-assign]
+    choice = next(c for c in unit_bank_choices() if c.scope == "RAM2")
+    app._add_unit_source(host, choice)
+    assert calls == ["RAM2"]
+    entry, aliased = host.added[0]
+    assert entry.source_origin == "RAM 2"
+    assert entry.scope == "RAM2"
+    assert aliased.bank_number == banks.bank("RAM2").number
+
+
+@pytest.mark.asyncio
+async def test_add_cached_unit_source_does_not_read(tmp_path: Any) -> None:
+    app = _make_app(tmp_path)
+    host = _SourceHost()
+    source = _make_bank(scope="ROM7").source
+    app._sources["ROM7"] = source
+    calls: list[str] = []
+
+    def _read_source_offline(scope: str) -> Any:
+        calls.append(scope)
+        return source
+
+    app._read_source_offline = _read_source_offline  # type: ignore[method-assign]
+    choice = next(c for c in unit_bank_choices() if c.scope == "ROM7")
+    app._add_unit_source(host, choice)
+    assert calls == []
+    assert host.added[0][0].source_origin == "ROM 7"
+
+
+@pytest.mark.asyncio
+async def test_add_unit_source_read_failure_is_refused(tmp_path: Any) -> None:
+    app = _make_app(tmp_path)
+    host = _SourceHost()
+    statuses: list[str] = []
+    app.notify_status = lambda msg, *a, **k: statuses.append(str(msg))  # type: ignore[method-assign]
+    app._read_source_offline = lambda scope: (_ for _ in ()).throw(OSError("no"))  # type: ignore[method-assign]
+    choice = next(c for c in unit_bank_choices() if c.scope == "RAM1")
+    app._add_unit_source(host, choice)
+    assert host.added == []
+    assert any("could not read" in s for s in statuses)
 
 
 @pytest.mark.asyncio
@@ -302,7 +402,7 @@ async def test_remembered_folder(tmp_path: Any, monkeypatch: Any) -> None:
         "save_import_folder",
         lambda value, path=None: saved.append((value, path)),
     )
-    app._import_kind_chosen(0)
+    app._open_file_picker(0)
     assert (
         any(str(tmp_path / "picked") == s[0] or s[0].endswith("picked") for s in saved)
         or saved
@@ -310,6 +410,33 @@ async def test_remembered_folder(tmp_path: Any, monkeypatch: Any) -> None:
     # at minimum assert save called
     assert len(saved) >= 1
     assert saved[0][1] == cfg_path or saved[0][1] is not None
+
+
+@pytest.mark.asyncio
+async def test_whole_source_menu_offers_file_and_unit(tmp_path: Any) -> None:
+    app = _make_app(tmp_path)
+    pushed: list[Any] = []
+    app.push_screen = lambda s, c=None: pushed.append(s)  # type: ignore[assignment]
+    app._open_whole_source_menu()
+    assert isinstance(pushed[0], ImportMenuScreen)
+    choices = pushed[0]._choices
+    assert choices[0] == "From file…"
+    assert "RAM 1" in choices and "ROM 11" in choices
+
+
+@pytest.mark.asyncio
+async def test_whole_unit_source_opens_whole_screen(tmp_path: Any) -> None:
+    app = _make_app(tmp_path)
+    app.notify_status = lambda *a, **k: None  # type: ignore[method-assign]
+    source = _make_bank(scope="RAM1").source
+    app._read_source_offline = lambda scope: source  # type: ignore[method-assign]
+    pushed: list[Any] = []
+    app.push_screen = lambda s, c=None: pushed.append(s)  # type: ignore[assignment]
+    app._whole_source_chosen(1)  # RAM 1 is not index 1? choices[0] file, 1 RAM1
+    screen = pushed[0]
+    assert isinstance(screen, WholeBankImportScreen)
+    assert screen.banks[0].scope == "RAM1"
+    assert getattr(screen.banks[0], "source_origin", "") == "RAM 1"
 
 
 @pytest.mark.asyncio
@@ -549,7 +676,7 @@ async def test_back_from_whole_returns_to_file_picker(tmp_path: Any) -> None:
     pushed: list[Any] = []
     app.push_screen = lambda s, c=None: pushed.append(s)  # type: ignore[assignment]
     app._import_whole_bank_chosen([bank], None)
-    assert pushed and isinstance(pushed[0], FilePickerScreen)
+    assert pushed and isinstance(pushed[0], ImportMenuScreen)
 
 
 @pytest.mark.asyncio
