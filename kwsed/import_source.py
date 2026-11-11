@@ -131,6 +131,56 @@ def unit_bank_choices() -> List[UnitBankChoice]:
     return out
 
 
+def source_bank_number_for(source: deps.Source) -> Optional[int]:
+    """The real bank number for a Source, falling back to its scope."""
+    if source.bank_number is not None:
+        return int(source.bank_number)
+    return source_bank_number(source.bank_id)
+
+
+def same_source_bank(left: deps.Source, right: deps.Source) -> bool:
+    left_number = source_bank_number_for(left)
+    right_number = source_bank_number_for(right)
+    return left_number is not None and left_number == right_number
+
+
+def merge_source_components(
+    existing: deps.Source, incoming: deps.Source
+) -> Optional[deps.Source]:
+    """Combine complementary performance/patch/waveseq files.
+
+    A SoundArtMedia-style package often has ``*_Performances.syx``,
+    ``*_Patches.syx`` and ``*_Waveseq.syx`` instead of one complete bank.
+    This merges them when each side supplies a non-overlapping component.
+    Two performance banks, two patch banks or two waveseq banks are *not*
+    merged; those are real alternatives and get session aliases.
+    """
+    if existing.performances and incoming.performances:
+        return None
+    if existing.patches and incoming.patches:
+        return None
+    if existing.waveseq and incoming.waveseq:
+        return None
+    if not (incoming.performances or incoming.patches or incoming.waveseq):
+        return None
+    perfs = list(existing.performances or incoming.performances)
+    patches = list(existing.patches or incoming.patches)
+    waveseq = existing.waveseq or incoming.waveseq
+    if (
+        perfs == existing.performances
+        and patches == existing.patches
+        and waveseq == existing.waveseq
+    ):
+        return None
+    return deps.Source(
+        bank_id=existing.bank_id,
+        performances=perfs,
+        patches=patches,
+        waveseq=waveseq,
+        bank_number=existing.bank_number or incoming.bank_number,
+    )
+
+
 def origin_for_unit(scope: str) -> str:
     """Canonical bank label for a unit scope."""
     if scope == "CARD":

@@ -112,6 +112,43 @@ def test_source_bank_number() -> None:
     assert isrc.source_bank_number("NOPE") is None
 
 
+def test_merge_complementary_fragments() -> None:
+    perfs = deps.Source(
+        bank_id="RAM1",
+        performances=[b"p"],
+        patches=[],
+        waveseq=None,
+        bank_number=0,
+    )
+    patches = deps.Source(
+        bank_id="RAM1",
+        performances=[],
+        patches=[b"q"],
+        waveseq=None,
+        bank_number=0,
+    )
+    merged = isrc.merge_source_components(perfs, patches)
+    assert merged is not None
+    assert merged.performances == [b"p"]
+    assert merged.patches == [b"q"]
+    assert merged.bank_number == 0
+
+    ws = deps.Source(
+        bank_id="RAM1", performances=[], patches=[], waveseq=b"w", bank_number=0
+    )
+    merged2 = isrc.merge_source_components(merged, ws)
+    assert merged2 is not None
+    assert merged2.waveseq == b"w"
+
+
+def test_merge_refuses_conflicting_components() -> None:
+    left = _source()
+    right = _source()
+    assert isrc.merge_source_components(left, right) is None
+    assert isrc.same_source_bank(left, right)
+    assert not isrc.same_source_bank(left, deps.Source("ROM7", [], [], None))
+
+
 def test_source_entry_existing_mapping_source_or_entry() -> None:
     src = _source()
     # keys matter only

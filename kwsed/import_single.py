@@ -39,13 +39,16 @@ _HELP_LINES = [
     "u / Backspace / Delete  unassign focused source",
     "A  assign all unassigned active sources to free/Init slots",
     "U  clear all assignments",
-    "s  choose a source bank already added, or add another file (keeps assignments)",
+    "s  choose a source bank, add another file, or add a RAM/ROM/Card bank",
     "w  toggle write gate",
     "ctrl+s  import the current assignment",
     "r  rebuild",
     "?  this help",
     "Esc  cancel typed slot first, then leave the screen",
     "q  leave the screen",
+    "",
+    "Separate performance, patch and waveseq files for the same bank are",
+    "merged when added through s, so a performance can bring its patches.",
     "",
     "The lower table's 'patches' column shows the destination patch",
     "slots a performance uses or will use.",
@@ -233,6 +236,23 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
         self._source_index = index
         self._clear_slot_entry()
         self._set_status(f"source bank {index + 1}/{len(self._banks)}")
+        self._refresh()
+
+    def replace_source_bank(
+        self, index: int, bank: Any, source: Optional[Any] = None
+    ) -> None:
+        """Replace one session bank after merging components into it."""
+        if not 0 <= index < len(self._banks):
+            return
+        self._banks[index] = bank
+        scope = str(getattr(bank, "scope", ""))
+        self._sources[scope] = (
+            source if source is not None else getattr(bank, "source", None)
+        )
+        self._clear_slot_entry()
+        self._set_status(
+            f"merged into source {getattr(bank, 'label', scope)}; assignments kept"
+        )
         self._refresh()
 
     def add_source_bank(self, bank: Any, source: Optional[Any] = None) -> None:
