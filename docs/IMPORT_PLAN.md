@@ -177,6 +177,6 @@ To make single and multi-performance import into populated banks work reliably w
 - [x] **Multi-selection screen** — `kwsed/import_single.py::SingleImportScreen`: two panes, `Space` auto-assign, exact `Enter`/digit slot assignment including overwrite, `u`/`A`/`U`, live budgets, gate, one batch write.
 - [x] **Browser `I` integration** — Whole bank (cache or unit) and Single/multiple performances; `y` copy and `kwscli copy-perf` use the slot-preserving planner and `before_blocks`.
 - [x] **Tests** — planner adversarial tests, screen pilot tests, app-flow tests, fast-bundle tests.
-- [ ] **Same-scope single import** — a file bank with the same scope as the target (e.g. RAM1 into RAM1) is refused for now; whole-bank import and a different target bank work. Needs a source-scope alias in the planner.
+- [x] **Same-scope and multi-source single import** — imported banks can be held under unique session aliases with the real `Source.bank_number`; several files, including several RAM1 banks, can be assembled into one target bank with assignments preserved across `s`.
 - [ ] **Long writes off the UI thread** — the TUI import write paths are fenced but currently run synchronously; a worker + wait screen is still wanted for multi-second sends.
 - [ ] **Optional CLI `--slot` / explicit replace mode** — append and clean are supported; explicit slot replace is in the TUI copy screen, not yet in `kwscli copy-perf`.

@@ -947,6 +947,31 @@ class TestSlotImport:
             == before7
         )
 
+    def test_session_alias_source_bank_number(self):
+        """Two RAM1 files can be assembled under one target.
+
+        The alias key cannot be resolved by the bank table; its ``Source``
+        carries the real bank number so parts still localize.
+        """
+        alias = "RAM1#2"
+        src = deps.Source(
+            bank_id=alias,
+            performances=[make_performance("Alias", ((0, 0),))],
+            patches=[make_patch("AliasPatch")],
+            bank_number=0,
+        )
+        sources = {alias: src, "RAM3": self._dest_source()}
+        dest = banks.bank("RAM3")
+        plan = perfcopy.plan_slot_import(
+            sources, "RAM3", {0: relations.PerfId(alias, 0)}, destination_bank=dest
+        )
+        assert plan.fits, plan.rejected
+        built = perfcopy.build_slot_import(sources, plan)
+        record = built.performances[0 : r.PERFORMANCE_SIZE]
+        used = [part for part in r.performance_parts(record) if part.used]
+        assert used
+        assert all(part.bank == dest.number for part in used)
+
 
 def test_imports_ok():
     assert True

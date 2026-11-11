@@ -29,7 +29,7 @@ It writes bytes, never the instrument.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Mapping, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from kws import bankbuild, banks, deps, dumps, relations
 from kws import records as rec
@@ -580,13 +580,41 @@ class SlotImportBuilt:
     plan: SlotImportPlan
 
 
-def _source_bank_number(scope_id: str) -> Optional[int]:
+def _source_bank_number(
+    scope_id: str, sources: Optional[Mapping[str, deps.Source]] = None
+) -> Optional[int]:
+    if sources is not None:
+        source = sources.get(scope_id)
+        number = getattr(source, "bank_number", None) if source is not None else None
+        if number is not None:
+            return int(number)
     if scope_id.startswith("CARD/"):
         return banks.bank("CARD").number
     try:
         return banks.bank(scope_id).number
     except LookupError:
         return None
+
+
+def _bank_number_for_source(source: deps.Source) -> Optional[int]:
+    if source.bank_number is not None:
+        return int(source.bank_number)
+    return _source_bank_number(source.bank_id)
+
+
+def _part_is_local(
+    part: Any, scope_id: str, sources: Mapping[str, deps.Source]
+) -> bool:
+    """Whether a part points at the performance's own source bank.
+
+    Canonical scopes resolve through the bank table. A session alias (for
+    assembling two RAM1 files into one target) carries its real bank number
+    on the ``Source`` instead.
+    """
+    number = _source_bank_number(scope_id, sources)
+    if number is not None:
+        return bool(part.bank == number)
+    return bool(relations.resolve_part_scope(part.bank, scope_id) == scope_id)
 
 
 def _find_target_scope(
@@ -762,7 +790,7 @@ def plan_slot_import(  # noqa: C901
         local_map: Dict[relations.PatchId, int] = {}
         unique_patches: List[relations.PatchId] = []
         for part in parts:
-            if relations.resolve_part_scope(part.bank, scope) != scope:
+            if not _part_is_local(part, scope, srcs):
                 continue
             pid = relations.PatchId(scope, part.patch)
             if pid not in local_map:
@@ -782,7 +810,7 @@ def plan_slot_import(  # noqa: C901
         if missing:
             continue
 
-        source_bank_number = _source_bank_number(scope)
+        source_bank_number = _source_bank_number(scope, srcs)
 
         # source seq seeds filtered
         seeds = []
@@ -927,7 +955,7 @@ def plan_slot_import(  # noqa: C901
         for part in parts:
             if not part.used:
                 continue
-            if relations.resolve_part_scope(part.bank, scope) != scope:
+            if not _part_is_local(part, scope, srcs):
                 continue
             pid = relations.PatchId(scope, part.patch)
             part_patch_slots[part.index] = pid_to_slot[pid]
@@ -1073,7 +1101,7 @@ def build_slot_import(  # noqa: C901
         for patch_id, target_slot in alloc.allocated_patches:
             holder = srcs[patch_id.scope_id]
             record = bytearray(holder.patches[patch_id.number])
-            source_bank_number = _source_bank_number(patch_id.scope_id)
+            source_bank_number = _source_bank_number(patch_id.scope_id, srcs)
             for wave in rec.patch_waves(record):
                 if not wave.is_sequence:
                     continue
@@ -1139,7 +1167,7 @@ def copy_slots_into_bank(
 
 
 def relocate_bank(source: deps.Source, destination_bank: banks.Bank) -> RelocatedBank:
-    sbn = _source_bank_number(source.bank_id)
+    sbn = _bank_number_for_source(source)
     perf_bytes = bytearray(b"".join(source.performances))
     if sbn is not None:
         for i in range(len(source.performances)):
