@@ -4,6 +4,7 @@
 """Multi Mode Setup edit: round trip and the write fence."""
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -161,6 +162,7 @@ class _RecordingDemo(DemoDevice):
         backup_dir: str,
         verify: bool = True,
         timeout: float | None = None,
+        before_blocks: Any = None,
     ) -> dict[str, object]:
         result = super().write_bank_bundle(
             bank,
@@ -170,6 +172,7 @@ class _RecordingDemo(DemoDevice):
             backup_dir=backup_dir,
             verify=verify,
             timeout=timeout,
+            before_blocks=before_blocks,
         )
         entry = banks_mod.bank(bank)
         blocks: dict[str, bytes] = {}

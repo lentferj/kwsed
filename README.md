@@ -304,7 +304,7 @@ kwsed --port "U6MIDI Pro:U6MIDI Pro MIDI 1 44:0" --device-channel 5
 | `d` / `D` | show the selection's dependencies / show-hide the dependency pane — silent, remembered |
 | `p` | show/hide the patch rows in the bank list — remembered (they can be inspected, not selected) |
 | `y` | copy this performance, with private copies of its patches, into RAM 1–3 or the Card — silent until armed |
-| `I` | import a file/disk: whole bank into the cache, or one performance into a bank |
+| `I` | import a file/disk: whole bank (into cache or a unit bank) or single/multiple performances into a bank |
 | `z` / `w` | undo the last write / toggle the write gate |
 | `C` / `L` / `X` | capture the inserted card / label it / sweep HCard banks — read-only on the unit |
 | `i` / `?` / `q` | device identity / help / quit |
@@ -519,36 +519,55 @@ same readers; `--list` before choosing is cheap and needs no unit.
 
 #### From the browser
 
-`I` opens a `ChoiceScreen` — `Whole bank into cache` or `Performance into a
-bank` — then a `FilePickerScreen`: one directory at a time, `..` to go up,
-import files sorted first, `enter` opens a directory or file, `r` refreshes,
-`esc`/`q` cancels. The start folder is remembered in `ui-state.toml` under
-`[import] folder`. The chosen file is read with `importers.read_file` and a
-`BankImportScreen` previews the banks (label/scope/active performance
-count/patch count/waveseq yes/no); `ctrl+s`/`enter` selects one.
+`I` opens a `ChoiceScreen` — **Whole bank** or **Single / multiple
+performances** — then a `FilePickerScreen`: one directory at a time, `..` to
+go up, import files sorted first, `enter` opens a directory or file, `r`
+refreshes, `esc`/`q` cancels. The start folder is remembered in
+`ui-state.toml` under `[import] folder`.
 
-- **Whole bank into cache** writes to the local bank cache only; nothing is
-  sent to the unit. Multisets are not cached.
-- **Performance into a bank** saves the bank to the cache, then lists the
-  active performances; choosing one opens the existing fenced
-  `CopyPerformanceScreen` (`a` arm, `w` write, `b` bank, `m` mode,
-  backup/undo), which writes with the normal `a`/`w` fence.
+**Whole bank** opens `WholeBankImportScreen`:
 
-Flow: `I` → Whole bank into cache / Performance into a bank → file picker →
-preview → `ctrl+s`/`enter`.
+- it previews the source bank's active performances, patches and sequence
+  bank;
+- `s` switches source bank when the file holds several (ZIP, IMG, all-banks
+  `.syx`);
+- `b` chooses the destination (`RAM 1`, `RAM 2`, `RAM 3`, `Card`);
+- `w` arms the write gate; `c` saves to the local cache only; `ctrl+s` writes
+  the whole bank to the unit in one fenced bundle;
+- interior `PartRef`/`WaveRef` bank numbers are relocated to the destination
+  bank automatically; ROM references stay in ROM;
+- the app reuses the destination bank it already read, and the bridge skips
+  unchanged kinds, so a whole-bank write does not re-read and resend all three
+  banks blindly.
 
-The CLI remains the scriptable path; the browser `I` uses the same readers and
-cache.
+**Single / multiple performances** opens the source-bank chooser and then a
+target-bank chooser. `SingleImportScreen` shows the source performances on the
+left and all 50 destination slots on the right, with a live budget:
 
-```sh
-kwscli import "card07.syx" --as CARD/07
-kwscli import "factory.syx" --list
-kwscli import "DANGER WORLD.img" --list
-kwscli import "set.zip" --label "set.zip / DANGER WORLD.img / DANGERW.SYX [RAM1]"
-kwscli copy-perf RAM1:3 --to RAM3 --from-file "factory.syx" --out staged
-kwscli copy-perf RAM1:3 --to RAM3 --from-file "DANGER WORLD.img" --mode clean --out staged
-kwscli copy-perf RAM1:3 --to RAM3 --from-file "factory.syx" --yes
+```text
+Space        assign the focused source to the first free/Init target slot
+Enter / 0-9  assign to a chosen exact slot 00-49 (overwrite allowed)
+u / Backspace / Delete   unassign
+A / U        assign all unassigned / clear all
+s            switch source bank
+w            toggle the write gate
+ctrl+s       write the whole assignment in one batch
 ```
+
+`Init` and free slots are available; occupied slots are overwritten only when
+chosen. Each assignment is checked against the 50 performance, 35 patch, 32
+sequence and 501 step budgets, so the screen refuses an assignment before it
+can make a bank that does not fit. For a file bank that already has the same
+scope as the target (for example RAM 1 into RAM 1), choose a different target
+bank for now; the same-scope source alias is not implemented yet. The app reads the destination bank once,
+the slot-preserving planner keeps every untouched destination slot and every
+surviving shared/ROM reference, and `ctrl+s` writes one fenced bundle with one
+undo step instead of one slow single-performance operation per row.
+
+The copy screen (`y`) uses the same slot-preserving planner for append and
+overwrite, the whole-bank replace for clean, and the same `before_blocks` fast
+path. The CLI remains the scriptable path; the browser `I` uses the same
+readers, planner and cache.
 
 #### What each source supplies
 

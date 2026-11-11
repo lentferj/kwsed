@@ -1071,7 +1071,11 @@ def _write_atomic_files(
 
 
 def _copy_perf_fence(
-    device: Any, args: argparse.Namespace, destination: Any, built: Any
+    device: Any,
+    args: argparse.Namespace,
+    destination: Any,
+    built: Any,
+    before_blocks: Optional[Mapping[str, bytes]] = None,
 ) -> int:
     """Name what the destination holds, then write only with ``--yes``."""
     from kws import backup
@@ -1100,12 +1104,16 @@ def _copy_perf_fence(
         return spec.EXIT_OK
 
     where = args.backup_dir or backup.default_dir()
+    kwargs: Dict[str, Any] = {}
+    if before_blocks is not None:
+        kwargs["before_blocks"] = before_blocks
     result = device.write_bank_bundle(
         destination.number,
         performances=built.performances,
         patches=built.patches,
         waveseq=built.waveseq,
         backup_dir=where,
+        **kwargs,
     )
     print(f"\nbacked up to: {result['backup']}")
     if result["verified"] is True:
@@ -1326,6 +1334,119 @@ def _cmd_copy_perf(device: Any, args: argparse.Namespace) -> int:
         allow_card_slots=allowed,
     )
 
+    from kws import records as _rec
+
+    target_source = sources.get(target_scope)
+
+    def _before_blocks(src: Any, bank: Any) -> Dict[str, bytes]:
+        from kws import banks as _banks
+        from kws import messages as _m
+
+        result: Dict[str, bytes] = {}
+        if src is None:
+            return result
+        perf_data = b"".join(getattr(src, "performances", ()) or ())
+        expected_perf = _banks.PERFORMANCES_PER_BANK * _rec.PERFORMANCE_SIZE
+        if len(perf_data) == expected_perf:
+            result["performances"] = _m.frame_bulk(
+                _m.Function.ALL_PERFORMANCE_DUMP,
+                bank.sysex,
+                perf_data,
+                channel=getattr(device, "channel", 0),
+            )
+        patch_data = b"".join(getattr(src, "patches", ()) or ())
+        expected_patch = _banks.PATCHES_PER_BANK * _rec.PATCH_SIZE
+        if len(patch_data) == expected_patch:
+            result["patches"] = _m.frame_bulk(
+                _m.Function.ALL_PATCH_DUMP,
+                bank.sysex,
+                patch_data,
+                channel=getattr(device, "channel", 0),
+            )
+        ws = getattr(src, "waveseq", None)
+        if ws is not None and len(ws) == _rec.WAVESEQ_BANK_SIZE:
+            result["waveseq"] = _m.frame_bulk(
+                _m.Function.ALL_WAVESEQ_DUMP,
+                bank.sysex,
+                ws,
+                channel=getattr(device, "channel", 0),
+            )
+        return result
+
+    before_blocks = _before_blocks(target_source, destination) or None
+
+    if (
+        args.mode == "clean"
+        or target_source is None
+        or not (
+            getattr(target_source, "performances", None)
+            and len(target_source.performances) == bk.PERFORMANCES_PER_BANK
+            and getattr(target_source, "patches", None)
+            and len(target_source.patches) == bk.PATCHES_PER_BANK
+        )
+    ):
+        built = perfcopy.copy_into_bank(
+            sources,
+            target_scope,
+            chosen,
+            mode=args.mode,
+            destination_bank=destination,
+        )
+        if built.plan.rejected:
+            print(
+                "error: the copy does not fit the destination: "
+                + "; ".join(built.plan.rejected),
+                file=sys.stderr,
+            )
+            return spec.EXIT_ERROR
+        _print_atomic_remap(built.plan)
+        _print_atomic_usage(built.plan)
+        if args.out is not None:
+            _write_atomic_files(
+                args.out,
+                destination,
+                (args.channel or 1) - 1,
+                built,
+            )
+            return spec.EXIT_OK
+        return _copy_perf_fence(device, args, destination, built, before_blocks)
+    # append with loaded target: slot-preserving
+    if args.mode == "append":
+        free_slots = [
+            i
+            for i in range(bk.PERFORMANCES_PER_BANK)
+            if perfcopy.is_empty_performance(target_source.performances[i])
+        ]
+        if len(free_slots) < len(chosen):
+            print(
+                f"error: not enough free performance slots "
+                f"({len(free_slots)} free, {len(chosen)} needed)",
+                file=sys.stderr,
+            )
+            return spec.EXIT_ERROR
+        assignments = {free_slots[i]: chosen[i] for i in range(len(chosen))}
+        built = perfcopy.copy_slots_into_bank(  # type: ignore[assignment]
+            sources, target_scope, assignments, destination_bank=destination
+        )
+        if built.plan.rejected:
+            print(
+                "error: the copy does not fit the destination: "
+                + "; ".join(built.plan.rejected),
+                file=sys.stderr,
+            )
+            return spec.EXIT_ERROR
+        _print_atomic_remap(built.plan)
+        _print_atomic_usage(built.plan)
+        if args.out is not None:
+            _write_atomic_files(
+                args.out,
+                destination,
+                (args.channel or 1) - 1,
+                built,
+            )
+            return spec.EXIT_OK
+        return _copy_perf_fence(device, args, destination, built, before_blocks)
+    # fallback
     built = perfcopy.copy_into_bank(
         sources,
         target_scope,
@@ -1342,7 +1463,6 @@ def _cmd_copy_perf(device: Any, args: argparse.Namespace) -> int:
         return spec.EXIT_ERROR
     _print_atomic_remap(built.plan)
     _print_atomic_usage(built.plan)
-
     if args.out is not None:
         _write_atomic_files(
             args.out,
@@ -1351,7 +1471,7 @@ def _cmd_copy_perf(device: Any, args: argparse.Namespace) -> int:
             built,
         )
         return spec.EXIT_OK
-    return _copy_perf_fence(device, args, destination, built)
+    return _copy_perf_fence(device, args, destination, built, before_blocks)
 
 
 def _cmd_backup_list(_args: argparse.Namespace) -> int:

@@ -702,6 +702,86 @@ class TestWritingABundle:
         assert result["verified"] is False
         assert "differs" in str(result["mismatch"])
 
+    def test_before_blocks_skips_backup_reads_and_unchanged_kinds(self, tmp_path):
+        unit = Unit()
+        functions = self._functions()
+        before = {
+            "performances": self._payload(len(PERFORMANCE_BANK), b"WasPerf"),
+            "patches": self._payload(len(PATCH_BANK), b"WasPatch"),
+            "waveseq": self._payload(len(WAVESEQ_BANK), b"WasSeq"),
+        }
+        for kind, data in before.items():
+            unit.dumps[(CARD_SYSEX, functions[kind])] = data
+        frames = {
+            kind: m.frame_bulk(functions[kind], CARD_SYSEX, data, channel=0)
+            for kind, data in before.items()
+        }
+        provided = self._provided()
+        provided["patches"] = before["patches"]
+        provided["waveseq"] = before["waveseq"]
+
+        result = unit.bridge.write_bank_bundle(
+            11,
+            performances=provided["performances"],
+            patches=provided["patches"],
+            waveseq=provided["waveseq"],
+            backup_dir=str(tmp_path),
+            before_blocks=frames,
+        )
+
+        assert result["kinds"] == ["performances"]
+        assert set(result["unchanged"]) == {"patches", "waveseq"}
+        assert result["verified"] is True
+        assert unit.sent_by_function(m.Function.PATCH_BANK_REQUEST) == []
+        assert unit.sent_by_function(m.Function.WAVESEQ_BANK_REQUEST) == []
+        assert unit.sent_by_function(m.Function.ALL_PATCH_DUMP) == []
+        assert unit.sent_by_function(m.Function.ALL_WAVESEQ_DUMP) == []
+        saved = backup.load(result["backup"])
+        assert saved.blocks == frames
+
+    def test_all_unchanged_sends_nothing(self, tmp_path):
+        unit = Unit()
+        functions = self._functions()
+        before = {
+            "performances": self._payload(len(PERFORMANCE_BANK), b"WasPerf"),
+            "patches": self._payload(len(PATCH_BANK), b"WasPatch"),
+            "waveseq": self._payload(len(WAVESEQ_BANK), b"WasSeq"),
+        }
+        for kind, data in before.items():
+            unit.dumps[(CARD_SYSEX, functions[kind])] = data
+        frames = {
+            kind: m.frame_bulk(functions[kind], CARD_SYSEX, data, channel=0)
+            for kind, data in before.items()
+        }
+
+        result = unit.bridge.write_bank_bundle(
+            11,
+            performances=before["performances"],
+            patches=before["patches"],
+            waveseq=before["waveseq"],
+            backup_dir=str(tmp_path),
+            before_blocks=frames,
+        )
+
+        assert result["kinds"] == []
+        assert set(result["unchanged"]) == {"waveseq", "patches", "performances"}
+        assert result["verified"] is True
+        assert unit.dump_frames_sent() == []
+        assert unit.sent_by_function(m.Function.PATCH_BANK_REQUEST) == []
+        assert unit.sent_by_function(m.Function.PERFORMANCE_BANK_REQUEST) == []
+        assert unit.sent_by_function(m.Function.WAVESEQ_BANK_REQUEST) == []
+
+    def test_a_malformed_before_block_is_refused_before_a_byte_is_sent(self, tmp_path):
+        unit = Unit()
+        with pytest.raises(ValueError, match="before-block"):
+            unit.bridge.write_bank_bundle(
+                11,
+                performances=self._provided()["performances"],
+                backup_dir=str(tmp_path),
+                before_blocks={"performances": b"not sysex"},
+            )
+        assert unit.midi_out.sent == []
+
     def test_a_rom_bank_is_refused_before_a_byte_is_sent(self, tmp_path):
         unit = Unit()
         with pytest.raises(DeviceError) as caught:

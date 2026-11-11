@@ -24,7 +24,7 @@ A favourites database is injected rather than opened, so a test cannot
 write into the user's real one.
 """
 
-from typing import Any, Optional
+from typing import Any, Mapping, Optional
 
 import pytest
 from textual.widgets import DataTable, Label, Static
@@ -2141,6 +2141,7 @@ class _RecordingDemo(DemoDevice):
         backup_dir: str,
         verify: bool = True,
         timeout: Optional[float] = None,
+        before_blocks: Optional[Mapping[str, bytes]] = None,
     ) -> dict[str, Any]:
         result = super().write_bank_bundle(
             bank,
@@ -2150,6 +2151,7 @@ class _RecordingDemo(DemoDevice):
             backup_dir=backup_dir,
             verify=verify,
             timeout=timeout,
+            before_blocks=before_blocks,
         )
         entry = banks.bank(bank)
         blocks: dict[str, bytes] = {}
@@ -2614,7 +2616,7 @@ class TestCopyPerformance:
 
         def full_ram3():
             perfs = [
-                make_performance(f"Filled {i:02d}", ((0, i),)) for i in range(35)
+                make_performance(f"Filled {i:02d}", ((2, i),)) for i in range(35)
             ] + [make_performance("", ()) for _ in range(15)]
             patches = [make_patch(f"Patch {i:02d}") for i in range(35)]
             return deps.Source(

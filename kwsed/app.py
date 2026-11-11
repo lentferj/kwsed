@@ -86,6 +86,8 @@ from kws import undo as _undo
 from kwsed.gate import EditGate
 from kwsed.file_picker import FilePickerScreen
 from kwsed.import_screen import BankImportScreen
+from kwsed.import_bank import WholeBankImportScreen
+from kwsed.import_single import SingleImportScreen
 from kwsed.target_screen import TargetSlotScreen
 
 # The legend's wrapping and the widget that draws it are the family's; see
@@ -1245,12 +1247,19 @@ class CopyPerformanceScreen(ModalScreen[Optional[Dict[str, Any]]]):
                 f"free performance slots: {50 - len(active)}; "
                 f"patches used: {used_patches}/35"
             )
+        if mode == "clean":
+            return self._plan_preview_clean(lines, merged, dest)
+        return self._plan_preview_slot(lines, merged, dest, mode)
+
+    def _plan_preview_clean(
+        self, lines: List[str], merged: Any, dest: Any
+    ) -> List[str]:
         try:
             result = perfcopy.copy_into_bank(
                 merged,
                 dest.id,
                 [self.perf],
-                mode=mode,
+                mode="clean",
                 replace_slot=self._target_slot,
                 destination_bank=dest,
             )
@@ -1265,10 +1274,6 @@ class CopyPerformanceScreen(ModalScreen[Optional[Dict[str, Any]]]):
                 )
             lines.append(f"cannot copy: {reasons}")
             return lines
-        # In append mode the plan also contains the destination's existing
-        # performances. The requested copy is the *last* allocation for this
-        # source, not the first one, which may be the same performance already
-        # sitting in the destination.
         chosen = next(
             (
                 alloc
@@ -1287,6 +1292,53 @@ class CopyPerformanceScreen(ModalScreen[Optional[Dict[str, Any]]]):
             f"Patches {plan.patch_count}/35, "
             f"Wave Seqs {len(plan.sequence_map)}/32, "
             f"Steps {plan.steps_used}/501"
+        )
+        return lines
+
+    def _plan_preview_slot(
+        self, lines: List[str], merged: Any, dest: Any, mode: str
+    ) -> List[str]:
+        target_src = merged.get(dest.id)
+        if target_src is None:
+            return lines + ["waiting for destination bank..."]
+        if mode == "replace" and self._target_slot is not None:
+            slot = int(self._target_slot)
+        else:
+            found = next(
+                (
+                    index
+                    for index in range(50)
+                    if perfcopy.is_empty_performance(target_src.performances[index])
+                ),
+                None,
+            )
+            if found is None:
+                return lines + ["cannot copy: no free performance slot"]
+            slot = int(found)
+        try:
+            slot_plan: Any = perfcopy.plan_slot_import(
+                merged, dest.id, {slot: self.perf}, destination_bank=dest
+            )
+        except Exception as exc:
+            return lines + [f"cannot copy: {exc}"]
+        if slot_plan.rejected:
+            reasons = "; ".join(slot_plan.rejected)
+            if len(slot_plan.rejected) > 2:
+                reasons = "; ".join(slot_plan.rejected[:2]) + (
+                    f"; ... ({len(slot_plan.rejected) - 2} more)"
+                )
+            lines.append(f"cannot copy: {reasons}")
+            return lines
+        chosen = slot_plan.allocations[0] if slot_plan.allocations else None
+        lines.append(f"target Performance slot {slot:02d}")
+        if chosen is not None:
+            slots = sorted(set(chosen.part_patch_slots.values()))
+            if slots:
+                lines.append(f"target Patch slots {slots[0]:02d}..{slots[-1]:02d}")
+        lines.append(
+            f"budget: Patches {slot_plan.patch_count}/35, "
+            f"Wave Seqs {slot_plan.sequence_count}/32, "
+            f"Steps {slot_plan.steps_used}/501"
         )
         return lines
 
@@ -2216,6 +2268,83 @@ class KwsedApp(App[None]):
             bank_id=scope, performances=perfs_list, patches=patches_list, waveseq=wb
         )
 
+    def _before_blocks(self, source: Any, bank: Any) -> Dict[str, bytes]:
+        from kws import banks as _banks
+        from kws import messages as _m
+
+        result: Dict[str, bytes] = {}
+        if source is None:
+            return result
+        perf_data = b"".join(getattr(source, "performances", ()) or ())
+        expected_perf = _banks.PERFORMANCES_PER_BANK * rec.PERFORMANCE_SIZE
+        if len(perf_data) == expected_perf:
+            result["performances"] = _m.frame_bulk(
+                _m.Function.ALL_PERFORMANCE_DUMP,
+                bank.sysex,
+                perf_data,
+                channel=self.device.channel,
+            )
+        patch_data = b"".join(getattr(source, "patches", ()) or ())
+        expected_patch = _banks.PATCHES_PER_BANK * rec.PATCH_SIZE
+        if len(patch_data) == expected_patch:
+            result["patches"] = _m.frame_bulk(
+                _m.Function.ALL_PATCH_DUMP,
+                bank.sysex,
+                patch_data,
+                channel=self.device.channel,
+            )
+        ws = getattr(source, "waveseq", None)
+        if ws is not None and len(ws) == rec.WAVESEQ_BANK_SIZE:
+            result["waveseq"] = _m.frame_bulk(
+                _m.Function.ALL_WAVESEQ_DUMP,
+                bank.sysex,
+                ws,
+                channel=self.device.channel,
+            )
+        return result
+
+    def _build_copy_perf(
+        self,
+        local_sources: Dict[str, Any],
+        dest_scope: str,
+        perf: Any,
+        mode: str,
+        replace_slot: Optional[int],
+        destination: Any,
+    ) -> Any:
+        if mode == "clean":
+            return perfcopy.copy_into_bank(
+                local_sources,
+                dest_scope,
+                [perf],
+                mode=mode,
+                replace_slot=replace_slot,
+                destination_bank=destination,
+            )
+        if mode == "replace" and replace_slot is not None:
+            chosen_slot = int(replace_slot)
+        else:
+            dest_src = local_sources.get(dest_scope)
+            found = None
+            if dest_src is not None:
+                found = next(
+                    (
+                        index
+                        for index in range(50)
+                        if perfcopy.is_empty_performance(dest_src.performances[index])
+                    ),
+                    None,
+                )
+            if found is None:
+                raise RuntimeError("no free performance slot")
+            chosen_slot = int(found)
+        return perfcopy.copy_slots_into_bank(
+            local_sources,
+            dest_scope,
+            {chosen_slot: perf},
+            destination_bank=destination,
+        )
+
     @work(thread=True)
     def _copy_perf_write_worker(
         self,
@@ -2242,13 +2371,8 @@ class KwsedApp(App[None]):
                         local_sources[dest_scope] = self._read_source_offline(
                             dest_scope
                         )
-                    built = perfcopy.copy_into_bank(
-                        local_sources,
-                        dest_scope,
-                        [perf],
-                        mode=mode,
-                        replace_slot=replace_slot,
-                        destination_bank=destination,
+                    built = self._build_copy_perf(
+                        local_sources, dest_scope, perf, mode, replace_slot, destination
                     )
                     if not built.plan.allocations:
                         raise RuntimeError("no performance slot allocated")
@@ -2259,12 +2383,16 @@ class KwsedApp(App[None]):
                     from kws import backup as _backup
 
                     where = getattr(self, "_backup_dir", None) or _backup.default_dir()
+                    before = self._before_blocks(
+                        local_sources.get(dest_scope), destination
+                    )
                     write_result = self.device.write_bank_bundle(
                         destination.number,
                         performances=built.performances,
                         patches=built.patches,
                         waveseq=built.waveseq,
                         backup_dir=where,
+                        before_blocks=before or None,
                     )
                     if (
                         not isinstance(write_result, dict)
@@ -2980,9 +3108,7 @@ class KwsedApp(App[None]):
 
     def action_import(self) -> None:
         self.push_screen(
-            ChoiceScreen(
-                "Import", ["Whole bank into cache", "Performance into a bank"]
-            ),
+            ChoiceScreen("Import", ["Whole bank", "Single / multiple performances"]),
             self._import_kind_chosen,
         )
 
@@ -3018,22 +3144,20 @@ class KwsedApp(App[None]):
         if not banks_list:
             self.notify_status("import: no banks found")
             return
+        if kind == 0:
+            self.push_screen(
+                WholeBankImportScreen(
+                    path=path, banks=banks_list, gate=self._write_gate
+                ),
+                lambda choice: self._import_whole_bank_chosen(banks_list, choice),
+            )
+            return
         self.push_screen(
             BankImportScreen(path=path, banks=banks_list),
-            lambda index: self._import_bank_chosen(kind, banks_list, index),
+            lambda index: self._import_single_source_chosen(path, banks_list, index),
         )
 
-    def _import_bank_chosen(
-        self, kind: int, banks_list: Sequence[Any], index: Optional[int]
-    ) -> None:
-        if index is None:
-            return
-        try:
-            bank = banks_list[index]
-        except (IndexError, TypeError):
-            return
-        if bank is None:
-            return
+    def _save_imported_bank(self, bank: Any) -> None:
         self._sources[bank.scope] = bank.source
         if self._bankstore_dir is not None:
             try:
@@ -3052,17 +3176,241 @@ class KwsedApp(App[None]):
         n_perf = sum(1 for r in perfs if r and any(r))
         n_patch = sum(1 for r in patches if r and any(r))
         has_ws = bool(bank.source.waveseq)
-        if kind == 0:
-            msg = (
-                f"imported {bank.label} into cache {bank.scope}: "
-                f"{n_perf} performances, {n_patch} patches, "
-                f"waveseq={'yes' if has_ws else 'no'}"
-            )
-            if getattr(bank, "multisets", ()):
-                msg += "; multisets not cached"
-            self.notify_status(msg)
+        msg = (
+            f"imported {bank.label} into cache {bank.scope}: "
+            f"{n_perf} performances, {n_patch} patches, "
+            f"waveseq={'yes' if has_ws else 'no'}"
+        )
+        if getattr(bank, "multisets", ()):
+            msg += "; multisets not cached"
+        self.notify_status(msg)
+
+    def _import_whole_bank_chosen(self, banks_list: Sequence[Any], choice: Any) -> None:
+        if choice is None:
             return
-        # kind == 1
+        try:
+            bank = banks_list[choice.source_index]
+        except (IndexError, TypeError, AttributeError):
+            return
+        if bank is None:
+            return
+        if not getattr(choice, "write_to_unit", False):
+            self._save_imported_bank(bank)
+            return
+        self._import_whole_bank_write(bank, choice)
+
+    def _import_whole_bank_write(self, bank: Any, choice: Any) -> None:
+        if not self._write_gate.armed:
+            self.notify_status("write gate is locked", refused=True)
+            return
+        from kws import banks as _banks
+        from kws import backup as _backup
+
+        target = _banks.bank(choice.target_bank)
+        sources = self._sources_with_store()
+        target_source = sources.get(target.id)
+        if target_source is None:
+            target_source = self._read_source_offline(target.id)
+        relocated = perfcopy.relocate_bank(bank.source, target)
+        before = self._before_blocks(target_source, target)
+        try:
+            result = self.device.write_bank_bundle(
+                target.number,
+                performances=relocated.performances,
+                patches=relocated.patches,
+                waveseq=relocated.waveseq,
+                backup_dir=_backup.default_dir(),
+                before_blocks=before if before else None,
+            )
+        except Exception as exc:
+            self.notify_status(f"import: {exc}", refused=True)
+            return
+        if hasattr(self, "_record_write"):
+            self._record_write(result)
+        # update sources
+        perfs = [
+            relocated.performances[
+                i * rec.PERFORMANCE_SIZE : (i + 1) * rec.PERFORMANCE_SIZE
+            ]
+            for i in range(len(relocated.performances) // rec.PERFORMANCE_SIZE)
+        ]
+        patches = [
+            relocated.patches[i * rec.PATCH_SIZE : (i + 1) * rec.PATCH_SIZE]
+            for i in range(len(relocated.patches) // rec.PATCH_SIZE)
+        ]
+        new_source = deps.Source(
+            bank_id=target.id,
+            performances=perfs,
+            patches=patches,
+            waveseq=relocated.waveseq,
+        )
+        self._sources[target.id] = new_source
+        if self._bankstore_dir is not None:
+            try:
+                bankstore.save(
+                    target.id,
+                    performances=relocated.performances,
+                    patches=relocated.patches,
+                    waveseq=relocated.waveseq,
+                    directory=self._bankstore_dir,
+                )
+            except OSError:
+                pass
+        self.notify_status(
+            f"imported {bank.label} into {target.label}: {len(perfs)} performances"
+        )
+
+    def _import_single_source_chosen(
+        self, path: str, banks_list: Sequence[Any], index: Optional[int]
+    ) -> None:
+        if index is None:
+            return
+        try:
+            bank = banks_list[index]
+        except (IndexError, TypeError):
+            return
+        if bank is None:
+            return
+        from kws import banks as _banks
+
+        writable = [b for b in _banks.writable_banks() if b.id != bank.scope]
+        if not writable:
+            writable = _banks.writable_banks()
+        if not writable:
+            self.notify_status("no writable target banks", refused=True)
+            return
+        self.push_screen(
+            ChoiceScreen("Target bank", [b.label for b in writable]),
+            lambda ti: self._import_single_target_chosen(path, bank, writable, ti),
+        )
+
+    def _import_single_target_chosen(
+        self, path: str, bank: Any, writable: Sequence[Any], target_index: Optional[int]
+    ) -> None:
+        if target_index is None:
+            return
+        try:
+            target = writable[target_index]
+        except (IndexError, TypeError):
+            return
+        if target is None:
+            return
+        if bank.scope == target.id:
+            self.notify_status(
+                "import: source and target bank have the same scope; not supported yet",
+                refused=True,
+            )
+            return
+        sources = self._sources_with_store()
+        target_source = sources.get(target.id)
+        if target_source is None:
+            try:
+                target_source = self._read_source_offline(target.id)
+            except Exception as exc:
+                self.notify_status(
+                    f"import: could not read {target.label}: {exc}", refused=True
+                )
+                return
+            self._sources[target.id] = target_source
+            sources = self._sources_with_store()
+        sources = dict(sources)
+        sources[bank.scope] = bank.source
+        sources[target.id] = target_source
+        self._import_single_sources = sources
+        self._import_single_bank = bank
+        self.push_screen(
+            SingleImportScreen(
+                path=path,
+                banks=[bank],
+                sources=sources,
+                target_bank=target,
+                target_source=target_source,
+                gate=self._write_gate,
+            ),
+            lambda choice: self._import_single_chosen(choice, target, bank, sources),
+        )
+
+    def _import_single_chosen(  # noqa: C901 - one flow, with fence and cache
+        self, choice: Any, target: Any, bank: Any, sources: Any
+    ) -> None:
+        if choice is None:
+            return
+        if not self._write_gate.armed:
+            self.notify_status("write gate is locked", refused=True)
+            return
+        from kws import banks as _banks
+        from kws import backup as _backup
+
+        target_bank = _banks.bank(getattr(choice, "target_bank", target.id))
+        target_scope = target_bank.id
+        assignments = getattr(choice, "assignments", {}) or {}
+        if not assignments:
+            self.notify_status("import: no assignments")
+            return
+        try:
+            built = perfcopy.copy_slots_into_bank(
+                sources, target_scope, assignments, destination_bank=target_bank
+            )
+        except (ValueError, LookupError) as exc:
+            self.notify_status(f"import does not fit: {exc}", refused=True)
+            return
+        if getattr(built.plan, "rejected", None):
+            self.notify_status(
+                "import does not fit: " + "; ".join(built.plan.rejected),
+                refused=True,
+            )
+            return
+        target_source = sources.get(target_scope)
+        if target_source is None:
+            target_source = sources.get(target.id)
+        before = (
+            self._before_blocks(target_source, target_bank)
+            if target_source is not None
+            else {}
+        )
+        try:
+            result = self.device.write_bank_bundle(
+                target_bank.number,
+                performances=built.performances,
+                patches=built.patches,
+                waveseq=built.waveseq,
+                backup_dir=_backup.default_dir(),
+                before_blocks=before if before else None,
+            )
+        except Exception as exc:
+            self.notify_status(f"import: {exc}", refused=True)
+            return
+        if hasattr(self, "_record_write"):
+            self._record_write(result)
+        new_source = self._source_from_built(target_scope, built)
+        self._sources[target_scope] = new_source
+        if self._bankstore_dir is not None:
+            try:
+                bankstore.save(
+                    target_scope,
+                    performances=built.performances,
+                    patches=built.patches,
+                    waveseq=built.waveseq,
+                    directory=self._bankstore_dir,
+                )
+            except OSError:
+                pass
+        self.notify_status(f"imported into {target_bank.label}")
+
+    def _import_bank_chosen(
+        self, kind: int, banks_list: Sequence[Any], index: Optional[int]
+    ) -> None:
+        if index is None:
+            return
+        try:
+            bank = banks_list[index]
+        except (IndexError, TypeError):
+            return
+        if bank is None:
+            return
+        if kind == 0:
+            self._save_imported_bank(bank)
+            return
         active = list(perfcopy.active_performances(bank.source))
         if not active:
             self.notify_status("import: no performances in this bank")
@@ -5657,9 +6005,9 @@ switch the HCard.
   D   show or hide the dependency pane that follows the selection
       (remembered between runs)
   y   copy a Performance (with its patches) into a writable bank
-  I   import a file, disk image or zip; whole bank into the local cache,
-      or one performance into a writable bank (a/w fence). Cache import
-      sends nothing to the unit.
+  I   import a file, disk image or zip: whole bank into the local cache or
+      a writable bank, or single/multiple performances into a writable bank,
+      with a target-slot map and one batch write.
   z   undo the last write (the write gate must be armed)
   w   arm or lock the write gate (or start with --allow-write)
   i   device identity and the unit's global channel

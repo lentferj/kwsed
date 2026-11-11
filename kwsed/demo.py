@@ -27,7 +27,7 @@ per CLAUDE.md, from a pool obviously not Korg's.
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from kws import backup
 from kws import banks
@@ -425,6 +425,7 @@ class DemoDevice:
         backup_dir: str,
         verify: bool = True,
         timeout: Optional[float] = None,
+        before_blocks: Optional[Mapping[str, bytes]] = None,
     ) -> Dict[str, Any]:
         """Accept several kinds for one bank, stored in the bridge's order."""
         self._tick()

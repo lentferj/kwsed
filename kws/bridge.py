@@ -52,7 +52,7 @@ import re
 import signal
 import sys
 import time
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
 
 import rtmidi
 
@@ -1131,6 +1131,7 @@ class WavestationBridge:
         backup_dir: str,
         verify: bool = True,
         timeout: Optional[float] = None,
+        before_blocks: Optional[Mapping[str, bytes]] = None,
     ) -> Dict[str, Any]:
         """Replace several kinds in one bank as **one** undoable write.
 
@@ -1183,18 +1184,66 @@ class WavestationBridge:
             raise ValueError("nothing to write")
 
         # --- 1. back every destination up, or do not write any of them ------
+        # For kinds supplied in before_blocks, use the provided raw framed
+        # dump and do not read the destination. Parse it now, before anything
+        # is sent, so a malformed frame fails fast.
         before: Dict[str, bytes] = {}
+        predecoded: Dict[str, bytes] = {}
         for kind, function in _BUNDLE_FUNCTIONS.items():
             if kind not in payloads:
                 continue
-            try:
-                before[kind] = self.read_raw(entry.sysex, function, timeout=timeout)
-            except Exception as exc:
-                raise DeviceError(
-                    f"could not read {entry.label} {kind} before writing it, "
-                    f"so nothing was sent ({exc}). kwsed does not overwrite a "
-                    f"bank it has not backed up."
-                ) from exc
+            supplied = None
+            if before_blocks is not None and kind in before_blocks:
+                supplied = before_blocks[kind]
+            if supplied is not None:
+                raw = bytes(supplied)
+                packet = m.parse(raw)
+                if packet is None:
+                    raise ValueError(
+                        f"{kind} before-block is not a valid Wavestation frame"
+                    )
+                try:
+                    decoded = packet.data()
+                except Exception as exc:
+                    raise ValueError(
+                        f"{kind} before-block could not be decoded: {exc}"
+                    ) from exc
+                if len(decoded) != _BUNDLE_SIZES[kind]:
+                    raise ValueError(
+                        f"{kind} before-block decodes to {len(decoded)} bytes; "
+                        f"expected {_BUNDLE_SIZES[kind]}"
+                    )
+                before[kind] = raw
+                predecoded[kind] = decoded
+            else:
+                try:
+                    raw = self.read_raw(entry.sysex, function, timeout=timeout)
+                except Exception as exc:
+                    raise DeviceError(
+                        f"could not read {entry.label} {kind} before writing it, "
+                        f"so nothing was sent ({exc}). kwsed does not overwrite a "
+                        f"bank it has not backed up."
+                    ) from exc
+                before[kind] = raw
+                packet = m.parse(raw)
+                if packet is None:
+                    raise ValueError(
+                        f"{entry.label} {kind} read back is not a valid frame"
+                    )
+                predecoded[kind] = packet.data()
+
+        # --- unchanged kinds are skipped entirely ---------------------------
+        unchanged: List[str] = [
+            kind
+            for kind in _BUNDLE_FUNCTIONS
+            if kind in payloads and payloads[kind] == predecoded[kind]
+        ]
+        sent_kinds: List[str] = [
+            kind
+            for kind in _BUNDLE_FUNCTIONS
+            if kind in payloads and kind not in unchanged
+        ]
+
         saved = backup.save(
             backup_dir,
             kind="bank-bundle",
@@ -1205,11 +1254,24 @@ class WavestationBridge:
             blocks=before,
         )
 
+        # All unchanged: nothing to send or read back.
+        if not sent_kinds:
+            result: Dict[str, Any] = {
+                "bank": entry.label,
+                "kind": "bank-bundle",
+                "kinds": [],
+                "backup": saved,
+                "verified": True,
+                "mismatch": None,
+                "unchanged": unchanged,
+            }
+            return result
+
         # --- 2. send, wave sequences first and performances last ------------
         self._drain()
         sent: Dict[str, bytes] = {}
         for kind, function in _BUNDLE_FUNCTIONS.items():
-            if kind not in payloads:
+            if kind not in sent_kinds:
                 continue
             frame = m.frame_bulk(
                 function,
@@ -1220,21 +1282,21 @@ class WavestationBridge:
             sent[kind] = frame
             self._send(frame)
 
-        written = [kind for kind in _BUNDLE_FUNCTIONS if kind in payloads]
-        result: Dict[str, Any] = {
+        result = {
             "bank": entry.label,
             "kind": "bank-bundle",
-            "kinds": written,
+            "kinds": sent_kinds,
             "backup": saved,
             "verified": None,
             "mismatch": None,
+            "unchanged": unchanged,
         }
         if not verify:
             return result
 
-        # --- 3. read every written kind back and compare --------------------
+        # --- 3. read every sent kind back and compare -----------------------
         mismatch: Optional[str] = None
-        for kind in written:
+        for kind in sent_kinds:
             try:
                 after = self.read_raw(
                     entry.sysex, _BUNDLE_FUNCTIONS[kind], timeout=timeout
