@@ -22,88 +22,17 @@ Two panes: bank-and-kind on the left, that bank's slots on the right.
  bank    kind  n         #    name
  RAM 1   perf  50        00   Glass Meridian
  RAM 1   patc  35        01   Slow Tideline
-▸Card    patc  35        02   Amber Drift
+ ▸Card    patc  35        02   Amber Drift
  ROM 4   perf  50  ro    03   Kelp Forest
 
  Card patch 02  Amber Drift
 ```
 
-## Support this project
-
-kwsed is free software and always will be. Nothing is behind a paywall, no
-feature is withheld, and none of what follows changes that.
-
-But if it has been useful — if it saved you an evening of mapping zones
-by hand, or got a library onto a machine that had no way of reading it, or
-**best of all, if it has your vintage instrument switched on and in use more often
-than it was, and you are having more fun with it** — then please consider
-supporting the work.
-
-**Because here is what it has actually cost:**
-
-- **Real machines on a real bench.** Much of what these tools know about these
-  formats was measured on hardware rather than read anywhere, because for most
-  of it there is nowhere to read it. That needs the machines — the instruments
-  themselves — and it puts hours of wear on hardware that has been locked up and
-  recovered more than once in the course of it. Some of these instruments were
-  bought specifically to add and verify a format; the others were already here,
-  because the person doing this is a vintage instrument enthusiast first and the
-  projects exist because the instruments were in the room.
-- **Dozens — realistically hundreds — of hours of human time.** Format
-  reverse-engineering is slow: measure, be wrong, measure again. A single
-  parameter law in this README can represent an evening at the bench.
-- **AI assistance, which is a paid service**, used heavily throughout and not
-  cheap at this volume.
-
-**This is support, not a donation — and the distinction is a legal one, not a
-turn of phrase.** The maintainer is based in Germany, where payments like these
-are *not* `Spenden` in the tax sense: they count as **taxable income** for the
-recipient and are **not tax-deductible** for the giver. So this section is
-titled *Support*, deliberately, and no receipt for tax purposes can be issued.
-(That is a statement of how it is handled here, not tax advice.)
-
-If the project saved you the work, you can support it through
-**[GitHub Sponsors](https://github.com/sponsors/lentferj)** — the *Sponsor*
-button at the top of the repository. Payment is handled entirely by GitHub and
-Stripe, so bank and tax details are never handed to the person paying.
-
-**Support is not expected, and it is not the only currency.**
-
-- **Bug reports** — ideally with the bank, preset or disk image that produced
-  them. A tool's failures are usually specific to one file rather than
-  general, and without that file they are very hard to reproduce.
-- **Confirmations from hardware that is not on this bench**, which matters more
-  here than for a single-machine tool. These tools write for whole *families*
-  of instruments, and the bench holds only a subset. Whether a variant accepts
-  what we write is genuinely unknown, and several notes say "on this unit" for
-  that reason. A "loads fine here too", or a "no, mine refuses it", is worth a
-  great deal.
-- **Corrections to the reverse-engineering notes.** The wrong turns are
-  recorded next to the findings in `docs/RESOLUTION_NOTES.md` — retractions
-  included, because a finding that was withdrawn is as useful as one that
-  stood. If any of it is wrong in a way that is still costing someone time,
-  saying so improves the record.
-
----
-
-## AI assistance & human authorship
-
-kwsed was built by its human author together with AI assistance. The
-**ideas, the project vision, and every feature** came from the human author;
-AI assisted with **writing the code and analyzing the binary formats**.
-Crucially, the **reverse engineering rests on hands-on human work** — all testing
-and verification on real hardware, creating the reference images/banks on those
-instruments (disk saves, SysEx probes), and aural A/B comparison of presets —
-which is what makes the results correct.
-Full account in [DISCLAIMER.md](DISCLAIMER.md).
-
----
-
 ---
 
 ## ⚠️ Use at your own risk — back up first
 
- is provided **as is, with absolutely no warranty and no liability**
+kwsed is provided **as is, with absolutely no warranty and no liability**
 for data loss or **hardware damage**. You assume all risk. Full terms:
 [DISCLAIMER.md](DISCLAIMER.md).
 
@@ -153,8 +82,6 @@ unit or emulator **before** connecting irreplaceable equipment.
 - **Imports whole banks and single performances** from SysEx, Standard MIDI,
   SoundDiver `.LIB`, SoundQuest/MidiQuest `.sqs`, FAT12 floppy images, `.zip`
   archives and `.bnk` bundles, in the browser with `I` or via `kwscli import`.
-  See [Importing banks and
-  performances](#importing-banks-and-performances).
 - **Caches whole bank records locally**, not just names. The browser,
   `deps` and `copy-perf` all use the same per-bank cache.
 - **Writes behind a fence, with backups and undo.** Every write reads the
@@ -173,11 +100,11 @@ Feature map:
 
 | feature | documented in |
 |---|---|
-| Cards, physical cards, HCard | [Cards](#cards-card_mode), [docs/CARDS.md](docs/CARDS.md) |
+| Cards, physical cards, HCard | [Cards](#cards-card_mode), [docs/CARDS.md](docs/CARDS.md), [docs/HCARD.md](docs/HCARD.md) |
 | Multisets and multi-card staging | [Multisets and multi-card staging](#multisets-and-multi-card-staging) |
 | Atomic performance copy and dependencies | [Dependencies and atomic copying](#dependencies-and-atomic-copying) |
 | Bank builder | [Building a favourites bank](#building-a-favourites-bank), [docs/BANK_BUILDER.md](docs/BANK_BUILDER.md) |
-| Imports, disk images, `.LIB`, `.sqs` | [Importing banks and performances](#importing-banks-and-performances) |
+| Imports, disk images, `.LIB`, `.sqs` | [Importing banks and performances](#importing-banks-and-performances), [docs/IMPORT_PLAN.md](docs/IMPORT_PLAN.md) |
 | Bank cache | [Local bank cache](#local-bank-cache) |
 | Writes, backups and undo | [Writes, backups and undo](#writes-backups-and-undo) |
 | Favourites, tags, notes, ratings | [Favourites, tags, notes and ratings](#favourites-tags-notes-and-ratings) |
@@ -206,7 +133,7 @@ show_card_defaults = false   # hcard: show the manual's bank names before captur
   per bank, and `show_card_defaults` shows the manual's bank names for banks
   not captured yet.
 
-See [docs/CARDS.md](docs/CARDS.md).
+See [docs/CARDS.md](docs/CARDS.md) and [docs/HCARD.md](docs/HCARD.md).
 
 ### Multi mode, and the word's two meanings
 
@@ -266,6 +193,8 @@ Multiset in Multi mode), never a patch. `kwscli select` and the browser both
 refuse patch slots; a patch is heard through a performance that uses it. See
 [TODO.md](TODO.md).
 
+---
+
 ## Install
 
 ```sh
@@ -284,6 +213,8 @@ published version in this environment only:
 `--system-site-packages` here is deliberate: ALSA's sequencer and the
 system `python-rtmidi` are used rather than a fresh build.
 
+---
+
 ## Run
 
 ```sh
@@ -294,7 +225,7 @@ kwsed --port "U6MIDI Pro:U6MIDI Pro MIDI 1 44:0" --device-channel 5
 
 ### Keys
 
-| | |
+| key | action |
 |---|---|
 | arrows, `tab` | move; `tab` switches pane |
 | `enter` | select this sound — **it will sound** |
@@ -502,7 +433,9 @@ Mode Setup as one fenced bundle; `z` restores all of it. The budgets and the
 full staging rules are in [docs/BANK_BUILDER.md](docs/BANK_BUILDER.md).
 `kwscli multi --all` includes empty Multisets.
 
-### Command line
+---
+
+## Command line
 
 `kwscli` covers the same ground without the TUI. "No" in the unit column
 means the command works from the local archives/cache.
@@ -554,14 +487,16 @@ bank scan), `--device-channel`, `--demo`, `--catalog`, `--live-names`.
 `c`. The app adds `--config`, `--favorites` and `--allow-write`. Run
 `kwscli --help` or `kwsed --help` for the rest.
 
-### Importing banks and performances
+---
+
+## Importing banks and performances
 
 `kwscli import` reads a whole bank into the local bank cache; the browser and
 `copy-perf` then use it. `kwscli copy-perf --from-file` reads a file, disk or
 archive as the source of one performance and its dependencies. Both use the
 same readers; `--list` before choosing is cheap and needs no unit.
 
-#### From the browser
+### From the browser
 
 `I` opens a `ChoiceScreen` — **Whole bank** or **Single / multiple
 performances**. Whole bank asks for a file or unit source; single/multiple
@@ -692,7 +627,7 @@ with `s`, adjust the map, arm the gate and write one batch. The target write
 is the same fenced bundle and one undo step. The CLI remains the scriptable
 path; the browser `I`/`y` use the same readers, planner and cache.
 
-#### What each source supplies
+### What each source supplies
 
 | source | extensions | performances | patches | wave sequences | multisets | notes |
 |---|---|---|---|---|---|---|
@@ -720,7 +655,7 @@ it carries has RAM1 and RAM2 only. The `.LIB` multisets are genuinely absent
 from the example libraries; an unknown entry type is reported, never guessed
 at.
 
-#### Choosing a bank
+### Choosing a bank
 
 - `--list` prints the labels. A `.syx` lists its performances; a `.LIB` lists
   its entries; an `.img`/`.zip` prints one compact line per bank with counts.
@@ -734,7 +669,7 @@ at.
 - `--bankstore DIR` overrides the cache directory. The default is
   `~/.local/share/kwsed/banks` on Linux.
 
-#### Import and copy options
+### Import and copy options
 
 | option | command | meaning |
 |---|---|---|
@@ -764,6 +699,8 @@ A SoundDiver `.LIB` brings its own RAM1 wave-sequence bank, so its
 sequence-based performances copy too. A patch that points at a different
 sequence bank still needs that bank supplied. Multisets are read for listing
 but are not stored in the bank cache.
+
+---
 
 ## Building a favourites bank
 
@@ -807,6 +744,8 @@ It writes `.syx` files and **never touches the instrument** -- loading them
 is the machine's own business, through its front panel. See
 [docs/BANK_BUILDER.md](docs/BANK_BUILDER.md).
 
+---
+
 ## Development checks
 
 The toolchain is pinned in `requirements-dev.txt` and installed into the same
@@ -837,6 +776,8 @@ None of them suppresses a *new* finding: the rules are all enabled, and the
 per-file exemptions name specific codes, so a long line added to a file whose
 complexity is ignored is still caught.
 
+---
+
 ## Names are not included
 
 kwsed ships **no** Korg content. The bank table and the numbering are its
@@ -856,6 +797,8 @@ Screenshots of the demo browser are captured with
 Where two files hold the same bank and kind, the **first wins** and the rest
 are reported. Silently keeping whichever was read last would produce a
 catalog matching no actual instrument.
+
+---
 
 ## How the dump format was worked out
 
@@ -877,6 +820,8 @@ from dumps the machine produced, then confirmed on hardware:
 
 `docs/RESOLUTION_NOTES.md` records it in full, including the wrong turns.
 
+---
+
 ## Edisyn
 
 [Edisyn](https://github.com/eclab/edisyn) has Wavestation support and is
@@ -885,6 +830,79 @@ read **only as a reference for interface facts** — the bank list, the nibble
 encoding, the dump sizes — each of which is independently evidenced by dumps
 this instrument produced. **No Edisyn code is used or derived here.** See
 [LICENSE](LICENSE) and `docs/RESOLUTION_NOTES.md` §2.
+
+---
+
+## AI assistance & human authorship
+
+kwsed was built by its human author together with AI assistance. The
+**ideas, the project vision, and every feature** came from the human author;
+AI assisted with **writing the code and analyzing the binary formats**.
+Crucially, the **reverse engineering rests on hands-on human work** — all testing
+and verification on real hardware, creating the reference images/banks on those
+instruments (disk saves, SysEx probes), and aural A/B comparison of presets —
+which is what makes the results correct.
+Full account in [DISCLAIMER.md](DISCLAIMER.md).
+
+---
+
+## Support this project
+
+kwsed is free software and always will be. Nothing is behind a paywall, no
+feature is withheld, and none of what follows changes that.
+
+But if it has been useful — if it saved you an evening of mapping zones
+by hand, or got a library onto a machine that had no way of reading it, or
+**best of all, if it has your vintage instrument switched on and in use more often
+than it was, and you are having more fun with it** — then please consider
+supporting the work.
+
+**Because here is what it has actually cost:**
+
+- **Real machines on a real bench.** Much of what these tools know about these
+  formats was measured on hardware rather than read anywhere, because for most
+  of it there is nowhere to read it. That needs the machines — the instruments
+  themselves — and it puts hours of wear on hardware that has been locked up and
+  recovered more than once in the course of it. Some of these instruments were
+  bought specifically to add and verify a format; the others were already here,
+  because the person doing this is a vintage instrument enthusiast first and the
+  projects exist because the instruments were in the room.
+- **Dozens — realistically hundreds — of hours of human time.** Format
+  reverse-engineering is slow: measure, be wrong, measure again. A single
+  parameter law in this README can represent an evening at the bench.
+- **AI assistance, which is a paid service**, used heavily throughout and not
+  cheap at this volume.
+
+**This is support, not a donation — and the distinction is a legal one, not a
+turn of phrase.** The maintainer is based in Germany, where payments like these
+are *not* `Spenden` in the tax sense: they count as **taxable income** for the
+recipient and are **not tax-deductible** for the giver. So this section is
+titled *Support*, deliberately, and no receipt for tax purposes can be issued.
+(That is a statement of how it is handled here, not tax advice.)
+
+If the project saved you the work, you can support it through
+**[GitHub Sponsors](https://github.com/sponsors/lentferj)** — the *Sponsor*
+button at the top of the repository. Payment is handled entirely by GitHub and
+Stripe, so bank and tax details are never handed to the person paying.
+
+**Support is not expected, and it is not the only currency.**
+
+- **Bug reports** — ideally with the bank, preset or disk image that produced
+  them. A tool's failures are usually specific to one file rather than
+  general, and without that file they are very hard to reproduce.
+- **Confirmations from hardware that is not on this bench**, which matters more
+  here than for a single-machine tool. These tools write for whole *families*
+  of instruments, and the bench holds only a subset. Whether a variant accepts
+  what we write is genuinely unknown, and several notes say "on this unit" for
+  that reason. A "loads fine here too", or a "no, mine refuses it", is worth a
+  great deal.
+- **Corrections to the reverse-engineering notes.** The wrong turns are
+  recorded next to the findings in `docs/RESOLUTION_NOTES.md` — retractions
+  included, because a finding that was withdrawn is as useful as one that
+  stood. If any of it is wrong in a way that is still costing someone time,
+  saying so improves the record.
+
+---
 
 ## Licence
 
