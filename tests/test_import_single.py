@@ -683,3 +683,70 @@ async def test_initial_assignments_survive_add_and_switch() -> None:
         screen.select_source(1)
         await settle(pilot)
         assert screen.assignments == before
+
+
+@pytest.mark.asyncio
+async def test_p_toggles_patch_mode() -> None:
+    screen = _screen(active_slots=[0])
+    host = _host()
+    async with host.run_test() as pilot:
+        host.push_screen_cb(screen)
+        await settle(pilot)
+        assert screen._share_patches is True
+        await pilot.press("p")
+        await settle(pilot)
+        assert screen._share_patches is False
+        assert "fresh" in screen._status_message.lower()
+        await pilot.press("p")
+        await settle(pilot)
+        assert screen._share_patches is True
+        assert "shared" in screen._status_message.lower()
+
+
+@pytest.mark.asyncio
+async def test_fresh_patch_mode_changes_planned_patch_slot() -> None:
+    # target bank contains a byte-identical pinned patch
+    bank = _source_bank("RAM1", [0])
+    # make source patch 0
+    from tests.test_bankbuild import make_patch
+
+    shared_patch = make_patch("Shared")
+    bank.source.patches[0] = shared_patch
+    target_bank = banks.bank("RAM2")
+    target_perfs = [bytes(rec.PERFORMANCE_SIZE) for _ in range(50)]
+    target_perfs[0] = make_performance("Keep", ((target_bank.number, 2),))
+    target_patches = [bytes(rec.PATCH_SIZE) for _ in range(35)]
+    target_patches[2] = shared_patch
+    target_source = deps.Source(
+        bank_id=target_bank.id,
+        performances=target_perfs,
+        patches=target_patches,
+        waveseq=None,
+    )
+    sources = {bank.scope: bank.source, target_bank.id: target_source}
+    screen = SingleImportScreen(
+        path="x.syx",
+        banks=[bank],
+        sources=sources,
+        target_bank=target_bank,
+        target_source=target_source,
+        gate=EditGate(armed=True),
+    )
+    host = _host()
+    async with host.run_test() as pilot:
+        host.push_screen_cb(screen)
+        await settle(pilot)
+        src = screen.query_one("#source-table", DataTable)
+        src.move_cursor(row=0)
+        await settle(pilot)
+        await pilot.press("space")
+        await settle(pilot)
+        plan_default = screen._plan()
+        default_slot = plan_default.allocations[0].part_patch_slots
+        # default reuses slot 2
+        assert 2 in list(default_slot.values())
+        await pilot.press("p")
+        await settle(pilot)
+        plan_fresh = screen._plan()
+        fresh_slot = next(iter(plan_fresh.allocations[0].part_patch_slots.values()))
+        assert fresh_slot != 2

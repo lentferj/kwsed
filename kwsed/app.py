@@ -3997,9 +3997,14 @@ class KwsedApp(App[None]):
         if not assignments:
             self.notify_status("import: no assignments")
             return
+        share_existing = bool(getattr(choice, "share_patches", True))
         try:
             built = perfcopy.copy_slots_into_bank(
-                sources, target_scope, assignments, destination_bank=target_bank
+                sources,
+                target_scope,
+                assignments,
+                destination_bank=target_bank,
+                share_existing=share_existing,
             )
         except (ValueError, LookupError) as exc:
             self.notify_status(f"import does not fit: {exc}", refused=True)

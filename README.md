@@ -571,7 +571,10 @@ left-trimmed, so the right-hand file name is never cut off when the terminal
 is narrow. `Init` and free slots are available; occupied slots are overwritten
 only when chosen. Each assignment is checked against the 50
 performance, 35 patch, 32 sequence and 501 step budgets, so the screen refuses
-an assignment before it can make a bank that does not fit.
+an assignment before it can make a bank that does not fit. Pressing `p` toggles
+whether byte-identical patches already in the target bank are reused (default)
+or the import gets its own fresh patch copies; fresh copies keep the imported
+performance independent when you later edit patches.
 
 `s` opens the session's source-bank chooser. It lists every bank already added
 and has **Add another source file…** and **Add unit bank (RAM/ROM/Card)…**.

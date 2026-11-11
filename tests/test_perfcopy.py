@@ -972,6 +972,73 @@ class TestSlotImport:
         assert used
         assert all(part.bank == dest.number for part in used)
 
+    def test_share_existing_false_gives_fresh_patch_copies(self):
+        # destination bank RAM3: perf at slot 0 uses patch 2 (pinned)
+        dest_src = self._dest_source()
+        dest_src.performances[0] = make_performance("Keep", ((2, 2),))
+        # source performance RAM1:0 uses patch 0
+        src = deps.Source(
+            bank_id="RAM1",
+            patches=[make_patch("SrcPatch")],
+            performances=[make_performance("SrcPerf", ((0, 0),))],
+            waveseq=make_waveseq({0: [40, 41]})[0],
+        )
+        # make source patch 0 byte-identical to dest patch 2
+        dest_src.patches[2] = make_patch("Shared")
+        src.patches[0] = dest_src.patches[2]
+        sources = {"RAM1": src, "RAM3": dest_src}
+        dest = banks.bank("RAM3")
+
+        # default: reuse slot 2
+        plan_default = perfcopy.plan_slot_import(
+            sources,
+            "RAM3",
+            {10: relations.PerfId("RAM1", 0)},
+            destination_bank=dest,
+        )
+        assert plan_default.fits
+        alloc_default = plan_default.allocations[0]
+        assert 2 in list(alloc_default.part_patch_slots.values())
+
+        # fresh: not 2, and one of free slots (not 0, not 2)
+        plan_fresh = perfcopy.plan_slot_import(
+            sources,
+            "RAM3",
+            {10: relations.PerfId("RAM1", 0)},
+            destination_bank=dest,
+            share_existing=False,
+        )
+        assert plan_fresh.fits
+        alloc_fresh = plan_fresh.allocations[0]
+        fresh_slot = next(iter(alloc_fresh.part_patch_slots.values()))
+        assert fresh_slot != 2
+        assert fresh_slot not in (0, 2)
+
+        # batch dedup within one plan with share_existing=False
+        # need second identical source perf record; assign same PerfId to two slots
+        plan_batch = perfcopy.plan_slot_import(
+            sources,
+            "RAM3",
+            {10: relations.PerfId("RAM1", 0), 20: relations.PerfId("RAM1", 0)},
+            destination_bank=dest,
+            share_existing=False,
+        )
+        assert plan_batch.fits
+        slots = [
+            next(iter(a.part_patch_slots.values())) for a in plan_batch.allocations
+        ]
+        assert slots[0] == slots[1]
+        assert slots[0] not in (0, 2)
+
+        # build fresh plan: fresh slot holds patch bytes; pinned slot 2 unchanged
+        pinned_before = bytes(dest_src.patches[2])
+        built = perfcopy.build_slot_import(sources, plan_fresh)
+        assert (
+            built.patches[fresh_slot * r.PATCH_SIZE : (fresh_slot + 1) * r.PATCH_SIZE]
+            == src.patches[0]
+        )
+        assert built.patches[2 * r.PATCH_SIZE : 3 * r.PATCH_SIZE] == pinned_before
+
 
 def test_imports_ok():
     assert True

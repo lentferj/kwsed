@@ -39,6 +39,8 @@ _HELP_LINES = [
     "u / Backspace / Delete  unassign focused source",
     "A  assign all unassigned active sources to free/Init slots",
     "U  clear all assignments",
+    "p  toggle shared/fresh patches (fresh = the import gets its own",
+    "   patch copies, independent of the target bank)",
     "s  choose a source bank, add another file, or add a RAM/ROM/Card bank",
     "w  toggle write gate",
     "ctrl+s  import the current assignment",
@@ -62,6 +64,7 @@ class SingleImportChoice:
     #: Every source bank in the session, including aliases for additional
     #: files and the target bank's current records.
     sources: Dict[str, Any] = field(default_factory=dict)
+    share_patches: bool = True
 
 
 def _escape(text: str) -> str:
@@ -165,6 +168,7 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
         Binding("delete", "unassign", "Unassign"),
         Binding("A", "assign_all", "All"),
         Binding("U", "clear_all", "Clear"),
+        Binding("p", "toggle_patches", "Patches"),
         Binding("s", "cycle_source", "Source"),
         Binding("w", "toggle_gate", "Gate"),
         Binding("ctrl+s", "import_choice", "Import", priority=True),
@@ -209,6 +213,7 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
         )
         self._active_sources: List[int] = []
         self._status_message = initial_status
+        self._share_patches = True
         #: Target slot digits typed straight into the source row. No modal:
         #: the target column shows the digits while they are entered.
         self._slot_entry = ""
@@ -407,6 +412,7 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
             self._target_scope,
             self._assignments,
             destination_bank=self._target_bank,
+            share_existing=self._share_patches,
         )
 
     def _set_status(self, message: str) -> None:
@@ -441,10 +447,11 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
         self._refresh_source_table()
         self._refresh_target_table(plan)
         with suppress(Exception):
+            patch_mode = "shared" if self._share_patches else "fresh"
             budget_text = (
                 f"Assigned: {len(self._assignments)} · "
                 f"Performances: {len(self._assignments)}/50 · "
-                f"Patches: {plan.patch_count}/35 · "
+                f"Patches: {plan.patch_count}/35 ({patch_mode}) · "
                 f"Wave Seqs: {plan.sequence_count}/32 · "
                 f"Steps: {plan.steps_used}/501"
             )
@@ -713,7 +720,11 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
         new = dict(self._assignments)
         new[free] = perf_id
         plan = perfcopy.plan_slot_import(
-            self._sources, self._target_scope, new, destination_bank=self._target_bank
+            self._sources,
+            self._target_scope,
+            new,
+            destination_bank=self._target_bank,
+            share_existing=self._share_patches,
         )
         if not plan.fits:
             rejected = plan.rejected[:2]
@@ -757,7 +768,11 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
         new = dict(self._assignments)
         new[target_slot] = perf_id
         plan = perfcopy.plan_slot_import(
-            self._sources, self._target_scope, new, destination_bank=self._target_bank
+            self._sources,
+            self._target_scope,
+            new,
+            destination_bank=self._target_bank,
+            share_existing=self._share_patches,
         )
         if not plan.fits:
             rejected = plan.rejected[:2]
@@ -815,6 +830,7 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
                 self._target_scope,
                 new,
                 destination_bank=self._target_bank,
+                share_existing=self._share_patches,
             )
             if not plan.fits:
                 rejected = plan.rejected[:2]
@@ -838,6 +854,20 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
         self._clear_slot_entry()
         self._assignments.clear()
         self._set_status("cleared all assignments")
+        self._refresh()
+
+    def action_toggle_patches(self) -> None:
+        self._clear_slot_entry()
+        self._share_patches = not self._share_patches
+        if self._share_patches:
+            self._set_status(
+                "patches: shared — byte-identical patches in the target bank are reused"
+            )
+        else:
+            self._set_status(
+                "patches: fresh — the import gets its own copies, "
+                "independent of the target bank"
+            )
         self._refresh()
 
     def action_cycle_source(self) -> None:
@@ -884,6 +914,7 @@ class SingleImportScreen(ModalScreen[Optional[SingleImportChoice]]):
                 self._target_bank.id,
                 dict(self._assignments),
                 dict(self._sources),
+                share_patches=self._share_patches,
             )
         )
 

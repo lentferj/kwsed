@@ -698,7 +698,20 @@ def plan_slot_import(  # noqa: C901
     *,
     destination_bank: Optional[banks.Bank] = None,
     budget: bankbuild.Budget = _DEFAULT_BUDGET,
+    share_existing: bool = True,
 ) -> SlotImportPlan:
+    """Plan a slot import.
+
+    ``share_existing`` controls whether byte-identical patches already
+    present in the target bank are reused. When True (default), the seed
+    map is populated from pinned patches, so an import that carries a
+    patch identical to a pinned one reuses that slot. When False, the seed
+    map starts empty and every patch the import carries is copied into a
+    fresh free slot, making the imported performances independent of the
+    target bank's existing patches. Dedup within a single plan (two
+    assigned performances needing the same source patch) still applies in
+    both modes: ``patch_bytes_to_slot`` grows as planning proceeds.
+    """
     if destination_bank is not None:
         dest = destination_bank
     elif target_scope.startswith("CARD/") or target_scope == "CARD":
@@ -770,9 +783,12 @@ def plan_slot_import(  # noqa: C901
     used_new_seq_slots: Set[int] = set()
     used_new_patch_slots: Set[int] = set()
     new_steps_count = 0
-    patch_bytes_to_slot: Dict[bytes, int] = {
-        b: s for s, b in pinned_patch_bytes.items()
-    }
+    if share_existing:
+        patch_bytes_to_slot: Dict[bytes, int] = {
+            b: s for s, b in pinned_patch_bytes.items()
+        }
+    else:
+        patch_bytes_to_slot = {}
     new_patch_slots_used: Set[int] = set()
 
     for slot, perf_id in plan.assignments:
@@ -1155,6 +1171,7 @@ def copy_slots_into_bank(
     *,
     destination_bank: Optional[banks.Bank] = None,
     budget: bankbuild.Budget = _DEFAULT_BUDGET,
+    share_existing: bool = True,
 ) -> SlotImportBuilt:
     plan = plan_slot_import(
         sources,
@@ -1162,6 +1179,7 @@ def copy_slots_into_bank(
         assignments,
         destination_bank=destination_bank,
         budget=budget,
+        share_existing=share_existing,
     )
     return build_slot_import(sources, plan)
 

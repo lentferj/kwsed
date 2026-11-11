@@ -101,6 +101,10 @@ for **Whole bank** and feed the selected unit snapshot to
 - [x] 7. Complementary same-bank fragments merge automatically:
   `*_Performances.syx` + `*_Patches.syx` + `*_Waveseq.syx` become one source
   bank. Conflicting banks remain separate session aliases.
+- [x] 8. Single-import screen `p` toggles shared/fresh patches: `share_existing`
+  on `plan_slot_import`/`copy_slots_into_bank` controls whether byte-identical
+  patches already in the target bank are reused (default) or the import gets
+  its own fresh patch copies.
 - [ ] Korg Legacy VST `.wsram`/`.fxb` native files remain unsupported; the
   `.syx`/`.MID` files in the same packages are the supported route.
 
