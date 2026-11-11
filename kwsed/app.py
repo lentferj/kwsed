@@ -1659,6 +1659,7 @@ class KwsedApp(App[None]):
         #: True while an audition's staging is on the unit and `z` can still
         #: take it back out; the import screen's exit says so.
         self._pending_staging = False
+        self._quit_after_undo = False
         try:
             self.device.progress = self._progress_report
         except Exception:  # noqa: S110 - decoration, not protocol
@@ -2297,6 +2298,14 @@ class KwsedApp(App[None]):
         self._undo_log.settle(results)
         if results and all(results):
             self._pending_staging = False
+            if self._quit_after_undo:
+                self._quit_after_undo = False
+                self.exit()
+        elif self._quit_after_undo:
+            self._quit_after_undo = False
+            self.notify_status(
+                "the staging could not be restored; z retries", warn=True
+            )
 
     @work(thread=True)
     def _undo_worker(self, records: list[Any]) -> None:
@@ -2724,6 +2733,50 @@ class KwsedApp(App[None]):
                 "patches": patch_slots,
             }
         )
+
+    async def action_quit(self) -> None:
+        """Confirm before leaving with an audition's staging still applied."""
+        if not self._pending_staging:
+            self.exit()
+            return
+        self.push_screen(
+            ChoiceScreen(
+                "Leave with staged audition changes?",
+                [
+                    "restore the staging, then quit",
+                    "quit and forget the staged changes",
+                    "cancel — stay in kwsed",
+                ],
+                0,
+            ),
+            self._quit_choice,
+        )
+
+    def _quit_choice(self, index: Optional[int]) -> None:
+        if index == 0:
+            self._restore_staging_then_quit()
+            return
+        if index == 1:
+            # The undo record lives in this process; leaving drops it and
+            # the staged bytes stay on the unit until overwritten.
+            self._pending_staging = False
+            self.exit()
+            return
+        self.notify_status("quit cancelled")
+
+    def _restore_staging_then_quit(self) -> None:
+        if not self._undo_log:
+            self.exit()
+            return
+        if self._busy or self._exchange.locked():
+            self.notify_status("busy — try quitting again in a moment", warn=True)
+            return
+        # Choosing "restore" is a deliberate write, so the gate may be armed
+        # for it even when the user left it locked.
+        if not self._write_gate.armed:
+            self._write_gate.toggle()
+        self._quit_after_undo = True
+        self.action_undo()
 
     def action_undo(self) -> None:
         if not self._write_gate.armed:
@@ -6151,15 +6204,22 @@ class KwsedApp(App[None]):
             # A worker can outlive the screen stack during teardown.
             return
         setter = getattr(screen, "set_progress", None)
+        try:
+            own = self.query_one("#progress", Static)
+        except Exception:
+            own = None
         if callable(setter):
+            # The screen covers the app's bar. Clear the app's own one, or
+            # its last text stays there and reappears when the screen closes.
+            if own is not None:
+                own.update("")
+                own.display = False
             setter(text)
             return
-        try:
-            widget = self.query_one("#progress", Static)
-        except Exception:
+        if own is None:
             return
-        widget.update(text)
-        widget.display = bool(text)
+        own.update(text)
+        own.display = bool(text)
 
     def _progress_text(self) -> str:
         if not self._progress_active:

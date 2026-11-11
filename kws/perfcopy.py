@@ -387,9 +387,11 @@ def build_atomic_bank(  # noqa: C901
                 rec.set_step_links(
                     waveseq,
                     moved[pool + (old,)],
-                    forward=moved.get(pool + (info["forward"],), 0),
-                    back=moved.get(pool + (info["back"],), 0),
-                    loop=moved.get(pool + (info["loop"],), 0),
+                    forward=_step_link(
+                        info["forward"], moved.get(pool + (info["forward"],))
+                    ),
+                    back=_step_link(info["back"], moved.get(pool + (info["back"],))),
+                    loop=_step_link(info["loop"], moved.get(pool + (info["loop"],))),
                 )
                 if info["wave"] < rec.ROM_WAVE_BASE:
                     quoted = (src_id, wave_bank, info["wave"])
@@ -583,6 +585,26 @@ class SlotImportBuilt:
     patches: bytes
     waveseq: Optional[bytes]
     plan: SlotImportPlan
+
+
+#: Step links at or above this are sentinels, not pool indices. The
+#: manual names 0xFFFF: "pointer to loop start (0xFFFF except last step)".
+_STEP_SENTINEL = 0xFFF0
+
+
+def _step_link(value: int, mapped: Any) -> int:
+    """Where a moved step's link points in the destination pool.
+
+    A link not in the copied chain is a sentinel and must stay one. The
+    naive ``moved.get(..., 0)`` turned "no loop link" into 0 -- pool step
+    0, which is another sequence's step or an empty one -- and a sequence
+    that loops into an empty step is a quiet or truncated sequence.
+    """
+    if mapped is not None:
+        return int(mapped)
+    if value >= _STEP_SENTINEL:
+        return int(value)
+    return 0
 
 
 def _source_bank_number(
@@ -1124,9 +1146,11 @@ def build_slot_import(  # noqa: C901
                 rec.set_step_links(
                     waveseq,
                     moved[(key, old)],
-                    forward=moved.get((key, info["forward"]), 0),
-                    back=moved.get((key, info["back"]), 0),
-                    loop=moved.get((key, info["loop"]), 0),
+                    forward=_step_link(
+                        info["forward"], moved.get((key, info["forward"]))
+                    ),
+                    back=_step_link(info["back"], moved.get((key, info["back"]))),
+                    loop=_step_link(info["loop"], moved.get((key, info["loop"]))),
                 )
                 if info["wave"] < rec.ROM_WAVE_BASE:
                     quoted = (key[0], key[1], info["wave"])

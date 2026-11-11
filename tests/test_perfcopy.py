@@ -367,6 +367,48 @@ class TestZeroFragmentation:
 
 
 class TestWaveSequence:
+    def test_moved_steps_keep_their_no_loop_sentinel(self):
+        """0xFFFF is "no loop link"; writing 0 points at pool step 0.
+
+        That is another sequence's step or an empty one, and a sequence
+        that loops into an empty step is a quiet one -- which is how a
+        staged pad auditioned silent while its patch and steps were right.
+        """
+        bank, starts = make_waveseq({0: [40, 41]})
+        bank = bytearray(bank)
+        first = starts[0]
+        r.set_step_links(bank, first, forward=first + 1, back=0, loop=0xFFFF)
+        r.set_step_links(bank, first + 1, forward=0, back=first, loop=first)
+        src = deps.Source(
+            bank_id="RAM1",
+            patches=[make_patch("Q", waves=((0, 0),) * 4)],
+            performances=[make_performance("Perf", ((0, 0),))],
+            waveseq=bytes(bank),
+        )
+        target = deps.Source(
+            "RAM3",
+            performances=[bytes(r.PERFORMANCE_SIZE)] * banks.PERFORMANCES_PER_BANK,
+            patches=[bytes(r.PATCH_SIZE)] * banks.PATCHES_PER_BANK,
+            waveseq=bytes(r.WAVESEQ_BANK_SIZE),
+        )
+        sources = {"RAM1": src, "RAM3": target}
+        plan = perfcopy.plan_slot_import(
+            sources,
+            "RAM3",
+            {0: relations.PerfId("RAM1", 0)},
+            destination_bank=RAM3,
+        )
+        assert plan.fits, plan.rejected
+        built = perfcopy.build_slot_import(sources, plan)
+        assert built.waveseq is not None
+        slot = plan.sequence_map[("RAM1", 0, 0)]
+        chain = deps.walk_sequence(built.waveseq, slot)
+        steps = sorted(chain.steps)
+        assert r.step(built.waveseq, steps[0])["loop"] == 0xFFFF, (
+            "a no-loop sentinel must stay one"
+        )
+        assert r.step(built.waveseq, steps[-1])["loop"] == steps[0]
+
     def test_waveseq(self):
         waveseq = make_waveseq({0: [40, 41, 7], 7: [50, 51]})[0]
         src = deps.Source(

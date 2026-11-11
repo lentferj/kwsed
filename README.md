@@ -312,7 +312,7 @@ kwsed --port "U6MIDI Pro:U6MIDI Pro MIDI 1 44:0" --device-channel 5
 | `I` | import/copy: whole bank from a file or unit bank, or select performances from files, RAM, ROM or Card into one target bank |
 | `z` / `w` | undo the last write / toggle the write gate |
 | `C` / `L` / `X` | capture the inserted card / label it / sweep HCard banks — read-only on the unit |
-| `i` / `?` / `q` | device identity / help / quit |
+| `i` / `?` / `q` | device identity / help / quit (with staged audition changes still on the unit, quitting asks first: restore them, leave them, or cancel) |
 
 **Moving the cursor never sends anything**, enforced by a test.
 

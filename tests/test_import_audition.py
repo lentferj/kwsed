@@ -38,6 +38,7 @@ from kwsed.demo import DemoDevice
 from kwsed.gate import EditGate
 from kwsed.import_single import SingleImportChoice, SingleImportScreen
 from tests.test_bankbuild import make_patch, make_performance, make_waveseq
+from vinsynlib.ui.modals import ChoiceScreen
 
 RAM3 = banks.bank("RAM3")
 PERF_SIZE = r.PERFORMANCE_SIZE
@@ -791,9 +792,92 @@ async def test_leaving_the_screen_says_the_staging_is_still_on_the_unit(tmp_path
         status = app.query_one("#status", Static)
         assert "staging is still on the unit" in str(status.content)
         assert status.has_class("warning")
+        bar = app.query_one("#progress", Static)
+        assert bar.display is False, "the prefetch bar must not stay behind"
 
         await pilot.press("z")
         await app.workers.wait_for_complete()
         await _settle(pilot)
+        assert app._pending_staging is False
+        assert device.read_patch("RAM3", 27) == before
+
+
+async def _stage_and_leave(app: KwsedApp, pilot: Any) -> Any:
+    """Open the screen, stage the focused row, leave it again."""
+    await _open_import_screen(app, pilot)
+    await pilot.press("w")
+    await _settle(pilot)
+    await pilot.press("t")
+    await app.workers.wait_for_complete()
+    await _settle(pilot)
+    assert app._pending_staging is True
+    await pilot.press("q")
+    await _settle(pilot)
+    assert not isinstance(app.screen, SingleImportScreen)
+
+
+@pytest.mark.asyncio
+async def test_quitting_with_staging_asks_before_leaving(tmp_path):
+    device = DemoDevice()
+    app = KwsedApp(
+        device, catalog=cat.Catalog([]), config_path=_staging_config(tmp_path)
+    )
+    exits: list[int] = []
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.exit = lambda *a, **k: exits.append(1)  # type: ignore[method-assign]
+        app._sources["RAM1"] = _pcm_source()
+        app._sources["RAM3"] = _target_source(keep=False)
+        await _stage_and_leave(app, pilot)
+
+        await pilot.press("q")
+        await _settle(pilot)
+        chooser = app.screen
+        assert isinstance(chooser, ChoiceScreen), "quit must ask first"
+        assert exits == []
+
+        chooser._current = 2  # cancel
+        chooser.action_confirm()
+        await _settle(pilot)
+        assert exits == []
+        assert app._pending_staging is True
+
+        await pilot.press("q")
+        await _settle(pilot)
+        chooser = app.screen
+        assert isinstance(chooser, ChoiceScreen)
+        chooser._current = 1  # quit and forget
+        chooser.action_confirm()
+        await _settle(pilot)
+        assert exits == [1]
+        assert app._pending_staging is False
+
+
+@pytest.mark.asyncio
+async def test_quitting_can_restore_the_staging_first(tmp_path):
+    device = DemoDevice()
+    app = KwsedApp(
+        device, catalog=cat.Catalog([]), config_path=_staging_config(tmp_path)
+    )
+    exits: list[int] = []
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.exit = lambda *a, **k: exits.append(1)  # type: ignore[method-assign]
+        app._sources["RAM1"] = _pcm_source()
+        app._sources["RAM3"] = _target_source(keep=False)
+        before = device.read_patch("RAM3", 27)
+        await _stage_and_leave(app, pilot)
+        assert device.read_patch("RAM3", 27) != before
+
+        await pilot.press("q")
+        await _settle(pilot)
+        chooser = app.screen
+        assert isinstance(chooser, ChoiceScreen)
+        chooser._current = 0  # restore, then quit
+        chooser.action_confirm()
+        await app.workers.wait_for_complete()
+        await _settle(pilot)
+
+        assert exits == [1]
         assert app._pending_staging is False
         assert device.read_patch("RAM3", 27) == before
