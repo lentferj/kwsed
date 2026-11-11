@@ -89,6 +89,52 @@ class TestRecords:
         r.set_performance_part(rec, 0, bank=bank, patch=7)
         got = r.performance_parts(rec)[0]
         assert got.bank == bank and got.patch == 7
+        if bank == 2:
+            assert rec[r.PART_BASE] == 2
+            assert (rec[r.PART_BASE + 4] >> 6) & 3 == 1
+        elif bank == 10:
+            assert rec[r.PART_BASE] == 2
+            assert (rec[r.PART_BASE + 4] >> 6) & 3 == 0
+        elif bank == 11:
+            assert rec[r.PART_BASE] == 3
+            assert (rec[r.PART_BASE + 4] >> 6) & 3 == 0
+
+    @pytest.mark.parametrize("bank", range(12))
+    def test_patch_wave_bank_survives_bank_exp_split(self, bank):
+        for i in range(4):
+            rec = bytearray(make_patch())
+            r.set_patch_wave(rec, i, bank=bank, wave=40)
+            waves = r.patch_waves(rec)
+            assert waves[i].bank == bank
+            if bank == 2:
+                at = r.OSC_BASE + i * r.OSC_SIZE
+                assert rec[r.PATCH_BANK_EXP] & (1 << i)
+                assert rec[at + 2] == 2
+
+    def test_inactive_oscillators_and_init_patches_are_not_sequences(self):
+        rec = bytearray(r.PATCH_SIZE)
+        r.set_patch_wave(rec, 2, bank=0, wave=5)
+        rec[r.PATCH_NUM_WAVES] = 0
+        waves = r.patch_waves(rec)
+        assert waves[0].used is True
+        assert waves[1].used is False
+        assert waves[2].used is False
+        assert waves[3].used is False
+        assert waves[2].is_sequence is False
+
+        rec2 = bytearray(r.PATCH_SIZE)
+        rec2[r.PATCH_NUM_WAVES] = 1
+        waves2 = r.patch_waves(rec2)
+        assert waves2[0].used is True
+        assert waves2[2].used is True
+        assert waves2[1].used is False
+        assert waves2[3].used is False
+
+        rec3 = bytearray(make_patch("Init", waves=((0, 0), (0, 0), (0, 0), (0, 0))))
+        waves3 = r.patch_waves(rec3)
+        for w in waves3:
+            assert w.used is False
+            assert w.is_sequence is False
 
     def test_rewriting_a_part_leaves_partmode_settings_alone(self):
         rec = bytearray(make_performance())

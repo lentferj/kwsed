@@ -53,7 +53,7 @@ sequence; the real figure is about a fifth.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Sequence, Tuple
 
 __all__ = [
     "PERFORMANCE_SIZE",
@@ -76,6 +76,8 @@ __all__ = [
     "set_step_wave",
     "ROM_WAVE_BASE",
     "UNUSED_PATCH",
+    "PATCH_NUM_WAVES",
+    "PATCH_BANK_EXP",
 ]
 
 # --- sizes -------------------------------------------------------------------
@@ -97,6 +99,15 @@ PART_SIZE = 18
 OSC_BASE = 90
 OSC_SIZE = 84
 
+#: Patch byte offsets for number of waves and bank exp.
+PATCH_NUM_WAVES = 86
+PATCH_BANK_EXP = 88
+
+#: Interior Bank_Exp (0-11) -> display Bank.number (0-11).
+_EXP_TO_BANK: Tuple[int, ...] = (0, 1, 10, 11, 3, 4, 2, 5, 6, 7, 8, 9)
+
+#: Display Bank.number (0-11) -> interior Bank_Exp (0-11).
+_BANK_TO_EXP: Tuple[int, ...] = (0, 1, 6, 4, 5, 7, 8, 9, 10, 11, 2, 3)
 #: Wave sequence bank.
 SEQ_BASE = 0
 SEQ_SIZE = 16
@@ -154,11 +165,11 @@ def performance_parts(record: Sequence[int]) -> List[PartRef]:
     out = []
     for i in range(PARTS_PER_PERFORMANCE):
         at = PART_BASE + i * PART_SIZE
-        low = record[at]
+        low = record[at] & 3
         mode = record[at + 4]
-        out.append(
-            PartRef(index=i, bank=low + ((mode >> 6) & 3) * 4, patch=record[at + 1])
-        )
+        exp_bank = low + ((mode >> 6) & 3) * 4
+        bank = _EXP_TO_BANK[exp_bank]
+        out.append(PartRef(index=i, bank=bank, patch=record[at + 1]))
     return out
 
 
@@ -175,8 +186,9 @@ def set_performance_part(
     if not 0 <= bank <= 11:
         raise ValueError(f"bank {bank} is outside 0-11")
     at = PART_BASE + index * PART_SIZE
-    record[at] = bank % 4
-    record[at + 4] = (record[at + 4] & 0x3F) | ((bank // 4) << 6)
+    exp_bank = _BANK_TO_EXP[bank]
+    record[at] = exp_bank % 4
+    record[at + 4] = (record[at + 4] & 0x3F) | ((exp_bank // 4) << 6)
     record[at + 1] = patch & 0xFF
 
 
@@ -190,26 +202,51 @@ class WaveRef:
     index: int
     bank: int
     wave: int
+    used: bool = True
 
     @property
     def is_sequence(self) -> bool:
-        return 0 <= self.wave < ROM_WAVE_BASE
+        return self.used and 0 <= self.wave < ROM_WAVE_BASE
+
+
+def _active_patch_oscillators(record: Sequence[int]) -> Tuple[int, ...]:
+    if not any(record):
+        return ()
+    name_bytes = record[:16]
+    chars = []
+    for b in name_bytes:
+        if b == 0:
+            break
+        if 32 <= b <= 126:
+            chars.append(chr(b))
+        else:
+            chars.append(" ")
+    name = "".join(chars).strip().lower()
+    if name in ("init", "init patch", "init patch.", "unnamed"):
+        return ()
+    num_waves = record[PATCH_NUM_WAVES]
+    if num_waves == 0:
+        return (0,)
+    if num_waves == 1:
+        return (0, 2)
+    return (0, 1, 2, 3)
 
 
 def patch_waves(record: Sequence[int]) -> List[WaveRef]:
     """The four oscillators' wave references."""
     if len(record) < PATCH_SIZE:
         raise ValueError(f"a patch is {PATCH_SIZE} bytes; got {len(record)}")
+    active = _active_patch_oscillators(record)
+    bank_exp = record[PATCH_BANK_EXP]
     out = []
     for i in range(OSCILLATORS_PER_PATCH):
         at = OSC_BASE + i * OSC_SIZE
-        out.append(
-            WaveRef(
-                index=i,
-                bank=record[at + 2],
-                wave=_u16(record, at + 3) + _s8(record[at + 83]),
-            )
-        )
+        bita = (bank_exp >> i) & 1
+        bitb = (bank_exp >> (i + 4)) & 1
+        exp_bank = (record[at + 2] & 3) + (8 if bitb else (4 if bita else 0))
+        bank = _EXP_TO_BANK[exp_bank]
+        wave = _u16(record, at + 3) + _s8(record[at + 83])
+        out.append(WaveRef(index=i, bank=bank, wave=wave, used=(i in active)))
     return out
 
 
@@ -222,8 +259,23 @@ def set_patch_wave(record: bytearray, index: int, *, bank: int, wave: int) -> No
     """
     if not 0 <= index < OSCILLATORS_PER_PATCH:
         raise ValueError(f"oscillator {index} is outside 0-{OSCILLATORS_PER_PATCH - 1}")
+    if not 0 <= bank <= 11:
+        raise ValueError(f"bank {bank} is outside 0-11")
+    exp_bank = _BANK_TO_EXP[bank]
     at = OSC_BASE + index * OSC_SIZE
-    record[at + 2] = bank & 0xFF
+    record[at + 2] = exp_bank % 4
+    mask = ~((1 << index) | (1 << (index + 4))) & 0xFF
+    if exp_bank >= 8:
+        bits = 1 << (index + 4)
+    elif exp_bank >= 4:
+        bits = 1 << index
+    else:
+        bits = 0
+    record[PATCH_BANK_EXP] = (record[PATCH_BANK_EXP] & mask) | bits
+    if index in (1, 3) and record[PATCH_NUM_WAVES] < 2:
+        record[PATCH_NUM_WAVES] = 2
+    elif index == 2 and record[PATCH_NUM_WAVES] < 1:
+        record[PATCH_NUM_WAVES] = 1
     _put_u16(record, at + 3, wave & 0xFFFF)
     record[at + 83] = 0
 

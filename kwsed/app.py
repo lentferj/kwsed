@@ -4505,7 +4505,20 @@ class KwsedApp(App[None]):
 
     @staticmethod
     def _where_used(graph: Any, patch: Any, current: Any) -> str:
-        """Other Performances that use ``patch``, as ``SCOPE:NN``, no names."""
+        """Other Performances that use ``patch``, as ``SCOPE:NN``, no names.
+
+        Only writable patch banks are reported: a ROM patch cannot be
+        overwritten, so listing every factory ROM performance that also
+        plays ``ROM11:16`` adds noise without warning of a shared-slot edit.
+        """
+        try:
+            if (
+                not patch.scope_id.startswith("CARD/")
+                and not banks.bank(patch.scope_id).writable
+            ):
+                return ""
+        except LookupError:
+            pass
         others = [
             perf for perf in graph.performances_using_patch(patch) if perf != current
         ]
@@ -4540,6 +4553,13 @@ class KwsedApp(App[None]):
             if psrc is not None and psrc.patches and patch.number < len(psrc.patches):
                 try:
                     pname = dumps_mod.record_name(psrc.patches[patch.number])
+                except Exception:
+                    pname = ""
+            if not pname:
+                try:
+                    pname = self._scope_slot_name(
+                        patch.scope_id, banks.Kind.PATCH, patch.number
+                    )
                 except Exception:
                     pname = ""
             used = self._where_used(graph, patch, pid)
@@ -4596,6 +4616,9 @@ class KwsedApp(App[None]):
             lines.extend(f"  Osc {i} -> (not loaded)" for i in range(1, 5))
         else:
             for i, wave in enumerate(rec.patch_waves(record), start=1):
+                if not wave.used:
+                    lines.append(f"  Osc {i} -> (off)")
+                    continue
                 if wave.is_sequence:
                     seq_scope = relations.resolve_part_scope(wave.bank, scope)
                     lines.append(

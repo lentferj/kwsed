@@ -290,3 +290,41 @@ def test_performance_relation_missing_raises():
 
     with pytest.raises(LookupError):
         graph.performance_relation(rel.PerfId("RAM1", 0))
+
+
+def test_init_performances_do_not_pollute_where_used_or_shared():
+    src_ram1 = deps.Source(
+        bank_id="RAM1",
+        patches=[make_patch("P", ((0, 40), (0, 40), (0, 40), (0, 40)))],
+        performances=[
+            make_performance("RealPerf", ((0, 0),)),
+            make_performance("Init", ((0, 0),)),
+        ],
+        waveseq=None,
+    )
+    src_ram2 = deps.Source(
+        bank_id="RAM2",
+        patches=[make_patch("P", ((0, 40), (0, 40), (0, 40), (0, 40)))],
+        performances=[make_performance("Init", ((0, 0),))],
+        waveseq=None,
+    )
+    sources = {"RAM1": src_ram1, "RAM2": src_ram2}
+    graph = rel.RelationGraph(sources)
+    assert graph.performances_using_patch(rel.PatchId("RAM1", 0)) == [
+        rel.PerfId("RAM1", 0)
+    ]
+    assert graph.shared_patches_in_bank("RAM1") == {}
+
+
+def test_rom11_bank_exp_2_resolves_to_rom11_not_ram3():
+    rec_bytes = bytearray(make_performance("P", ()))
+    rec_bytes[r.PART_BASE] = 2
+    rec_bytes[r.PART_BASE + 1] = 16
+    rec_bytes[r.PART_BASE + 4] = 0
+    src = deps.Source(
+        bank_id="RAM1", patches=[], performances=[bytes(rec_bytes)], waveseq=None
+    )
+    sources = {"RAM1": src}
+    graph = rel.RelationGraph(sources)
+    rela = graph.performance_relation(rel.PerfId("RAM1", 0))
+    assert rela.parts[0].source_patch == rel.PatchId("ROM11", 16)

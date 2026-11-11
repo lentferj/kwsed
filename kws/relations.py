@@ -163,7 +163,9 @@ def patch_structural_digest(
     hasher = hashlib.sha256()
     if include_name:
         _feed(hasher, bytes(patch_record[0:16]))
-    _feed(hasher, bytes(patch_record[16:90]))
+    settings = bytearray(patch_record[16:90])
+    settings[rec.PATCH_BANK_EXP - 16] = 0
+    _feed(hasher, bytes(settings))
 
     waves = rec.patch_waves(patch_record)
     srcs = dict(sources)
@@ -177,6 +179,9 @@ def patch_structural_digest(
         _feed(hasher, bytes(slc))
 
         wave = waves[osc_index]
+        if not wave.used:
+            _feed(hasher, "UNUSED")
+            continue
         if not wave.is_sequence:
             _feed(hasher, "ROM", wave.wave)
             continue
@@ -229,6 +234,30 @@ def patch_structural_digest(
                 _feed(hasher, fwd_rel, back_rel, loop_rel)
 
     return hasher.hexdigest()
+
+
+def _is_empty_performance(record: Sequence[int]) -> bool:
+    parts = rec.performance_parts(record)
+    if not any(p.used for p in parts):
+        return True
+    name = dumps_mod.record_name(record).strip().lower()
+    if name not in (
+        "",
+        "init",
+        "init perf",
+        "init perf.",
+        "init performance",
+        "unnamed",
+    ):
+        return False
+    return all(not p.used or (p.bank == 0 and p.patch == 0) for p in parts)
+
+
+def _is_empty_patch(record: Sequence[int]) -> bool:
+    if not any(record):
+        return True
+    name = dumps_mod.record_name(record).strip().lower()
+    return name in ("", "init", "init patch", "init patch.", "unnamed")
 
 
 class RelationGraph:
@@ -336,6 +365,8 @@ class RelationGraph:
         result: List[PerfId] = []
         for scope_id, src in self.sources.items():
             for number in range(len(src.performances)):
+                if _is_empty_performance(src.performances[number]):
+                    continue
                 perf = PerfId(scope_id, number)
                 try:
                     rel = self.performance_relation(perf)
@@ -353,6 +384,8 @@ class RelationGraph:
             if scope != scope_id:
                 continue
             for number in range(len(src.performances)):
+                if _is_empty_performance(src.performances[number]):
+                    continue
                 perf = PerfId(scope, number)
                 try:
                     rel = self.performance_relation(perf)
@@ -374,6 +407,8 @@ class RelationGraph:
         referenced: set[int] = set()
         for scope, src in self.sources.items():
             for number in range(len(src.performances)):
+                if _is_empty_performance(src.performances[number]):
+                    continue
                 perf = PerfId(scope, number)
                 try:
                     rel = self.performance_relation(perf)
@@ -406,6 +441,8 @@ class RelationGraph:
         groups: Dict[str, List[int]] = {}
         for number in range(len(src.patches)):
             rec_bytes = src.patches[number]
+            if _is_empty_patch(rec_bytes):
+                continue
             digest = patch_structural_digest(
                 rec_bytes, scope_id, self.sources, include_name=False
             )
