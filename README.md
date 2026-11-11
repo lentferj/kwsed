@@ -476,7 +476,11 @@ is on the slot the audition is meant for rather than whatever was current.
 `preaudit_backup` defaults to true: what the staging slots hold is read
 once per screen session and `z` puts it back. Setting it to false skips
 those reads (and the per-patch backup envelopes) -- the audition is
-quicker, but `z` no longer restores the staged patches.
+quicker, but `z` no longer restores the staged patches. The staging bank
+itself is read when the import screen opens, so the whole-bank fallback
+does not wait for it during `t`; a unit that refuses the single-patch
+write is remembered for the session and later auditions skip straight to
+the bank dump.
 A staged audition writes each needed patch on its own (one 426-byte
 dump and an `EXECUTE_WRITE`, read back to prove it landed), so it costs a
 fraction of a second per patch instead of a whole bank. Only the target's

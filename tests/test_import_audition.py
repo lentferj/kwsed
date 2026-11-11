@@ -635,3 +635,46 @@ async def test_backups_can_be_switched_off_for_the_staging_slots(tmp_path):
         assert len(app._undo_log) == 0, "nothing captured, nothing to undo"
         assert "not backed up" in _status(screen)
         assert device.read_patch("RAM3", 27) == _pcm_patch()
+
+
+@pytest.mark.asyncio
+async def test_the_staging_bank_is_read_when_the_screen_opens(tmp_path, monkeypatch):
+    """The fallback's base read is prefetched, not paid during `t`."""
+    device = DemoDevice()
+    app = KwsedApp(
+        device, catalog=cat.Catalog([]), config_path=_staging_config(tmp_path)
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._sources["RAM1"] = _pcm_source()
+        app._sources["RAM3"] = _target_source(keep=False)
+
+        bank_reads: list[Any] = []
+        original = device.read_bank
+
+        def counting(*args: Any, **kwargs: Any) -> Any:
+            bank_reads.append(args[0] if args else kwargs.get("bank"))
+            return original(*args, **kwargs)
+
+        device.read_bank = counting  # type: ignore[method-assign]
+        await _open_import_screen(app, pilot)
+        await app.workers.wait_for_complete()
+        await _settle(pilot)
+        assert bank_reads, "the staging bank is read while the user picks rows"
+
+        bank_reads.clear()
+
+        def refused(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+            return {"verified": False, "status": None}
+
+        monkeypatch.setattr(device, "write_patch", refused)
+        await pilot.press("w")
+        await _settle(pilot)
+
+        await pilot.press("t")
+        await app.workers.wait_for_complete()
+        await _settle(pilot)
+
+        assert bank_reads == [], "the fallback reused the prefetched bank"
+        assert device.bundle_write_count == 1
+        assert device.read_patch("RAM3", 27) == _pcm_patch()

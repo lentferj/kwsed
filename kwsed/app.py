@@ -1649,6 +1649,10 @@ class KwsedApp(App[None]):
         self._progress_active = False
         self._progress_generation = 0
         self._progress_hold = 0
+        #: Whether this unit takes a single-patch EXECUTE_WRITE. None until
+        #: an audition has tried; False makes later auditions skip the
+        #: attempt and go straight to the bank dump.
+        self._preaudit_single_writes: Optional[bool] = None
         try:
             self.device.progress = self._progress_report
         except Exception:  # noqa: S110 - decoration, not protocol
@@ -3389,18 +3393,20 @@ class KwsedApp(App[None]):
             self.notify_status(f"copy: {target.label} has no free slot", refused=True)
             return
         initial = {free: relations.PerfId(entry.scope, perf.number)}
+        screen = SingleImportScreen(
+            path=origin,
+            banks=[entry],
+            sources=sources,
+            target_bank=target,
+            target_source=target_source,
+            gate=self._write_gate,
+            initial_assignments=initial,
+            on_source_request=self._single_source_menu,
+            on_audition_request=self._audition_focused,
+        )
+        self._begin_staging_prefetch(screen)
         self.push_screen(
-            SingleImportScreen(
-                path=origin,
-                banks=[entry],
-                sources=sources,
-                target_bank=target,
-                target_source=target_source,
-                gate=self._write_gate,
-                initial_assignments=initial,
-                on_source_request=self._single_source_menu,
-                on_audition_request=self._audition_focused,
-            ),
+            screen,
             lambda choice: self._import_single_chosen(
                 choice,
                 target,
@@ -3548,17 +3554,19 @@ class KwsedApp(App[None]):
             read_only=not self._unit_scope_is_writable(scope),
         )
         sources[entry.scope] = entry.source
+        screen = SingleImportScreen(
+            path=origin,
+            banks=[entry],
+            sources=sources,
+            target_bank=target,
+            target_source=target_source,
+            gate=self._write_gate,
+            on_source_request=self._single_source_menu,
+            on_audition_request=self._audition_focused,
+        )
+        self._begin_staging_prefetch(screen)
         self.push_screen(
-            SingleImportScreen(
-                path=origin,
-                banks=[entry],
-                sources=sources,
-                target_bank=target,
-                target_source=target_source,
-                gate=self._write_gate,
-                on_source_request=self._single_source_menu,
-                on_audition_request=self._audition_focused,
-            ),
+            screen,
             lambda choice: self._import_single_chosen(
                 choice, target, entry, sources, origin, [entry], writable
             ),
@@ -3914,18 +3922,20 @@ class KwsedApp(App[None]):
         sources[target.id] = target_source
         self._import_single_sources = sources
         self._import_single_bank = bank
+        screen = SingleImportScreen(
+            path=path,
+            banks=[wrapped],
+            sources=sources,
+            target_bank=target,
+            target_source=target_source,
+            gate=self._write_gate,
+            on_source_request=self._single_source_menu,
+            on_audition_request=self._audition_focused,
+            initial_status=note,
+        )
+        self._begin_staging_prefetch(screen)
         self.push_screen(
-            SingleImportScreen(
-                path=path,
-                banks=[wrapped],
-                sources=sources,
-                target_bank=target,
-                target_source=target_source,
-                gate=self._write_gate,
-                on_source_request=self._single_source_menu,
-                on_audition_request=self._audition_focused,
-                initial_status=note,
-            ),
+            screen,
             lambda choice: self._import_single_chosen(
                 choice, target, bank, sources, path, banks_list, writable
             ),
@@ -4085,6 +4095,9 @@ class KwsedApp(App[None]):
         save_backup = _cfg2.load_preaudit_backup(self._config_path)
 
         def work() -> Any:
+            event = getattr(screen, "_staging_prefetch", None)
+            if event is not None:
+                event.wait(180)
             undo_entries, seq_note, patch_path = self._stage_banks(
                 target_source,
                 plan,
@@ -4128,6 +4141,45 @@ class KwsedApp(App[None]):
 
         self.notify_status("staging the audition...")
         self._device_worker(work, done, "auditioning from the staging area")
+
+    def _begin_staging_prefetch(self, screen: Any) -> None:
+        """Read the staging bank while the user is still picking rows.
+
+        The whole-bank fallback needs the staging bank's content to keep
+        the slots it is not staging, and that read is what the unit spends
+        its time on. Started here, it overlaps with choosing assignments;
+        `t` then usually finds the answer waiting. A read costs nothing on
+        the unit's memory, so no write gate is involved.
+        """
+        import threading as _threading
+
+        from kws import config as _cfg
+
+        patch_area = _cfg.load_preaudit_patch_area(self._config_path)
+        if patch_area is None:
+            return
+        staging = self._staging_cache_for(screen)
+        if staging.get("bank") is not None:
+            return
+        bank = patch_area[0]
+        event = _threading.Event()
+        try:
+            screen._staging_prefetch = event
+        except Exception:
+            return
+
+        def work() -> Any:
+            dump = self.device.read_bank(bank.id, banks.Kind.PATCH)
+            return b"".join(dump.records)
+
+        def done(result: Any, failure: BaseException | None) -> None:
+            try:
+                if failure is None and result is not None:
+                    staging["bank"] = bytes(result)
+            finally:
+                event.set()
+
+        self._device_worker(work, done, f"preparing {bank.label} for auditions")
 
     def _staging_cache_for(self, screen: Any) -> dict[str, Any]:
         """What this screen's staging slots hold, from the first read on.
@@ -4209,6 +4261,21 @@ class KwsedApp(App[None]):
         from kws import messages as _m
 
         bank = patch_area[0]
+        if self._preaudit_single_writes is False:
+            # This unit already showed it does not commit a single patch;
+            # the writes and read-backs would only cost time.
+            return (
+                self._stage_patches_as_bank(
+                    target_source,
+                    built,
+                    fresh,
+                    patch_area,
+                    {},
+                    staging,
+                    save_backup,
+                ),
+                "bank",
+            )
         cache_slots: dict[int, bytes] = (
             staging["slots"] if isinstance(staging, dict) else {}
         )
@@ -4288,6 +4355,7 @@ class KwsedApp(App[None]):
                     }
                 )
         if written and not self._staged_patch_landed(bank, *written[-1]):
+            self._preaudit_single_writes = False
             return (
                 self._stage_patches_as_bank(
                     target_source,
@@ -4300,6 +4368,8 @@ class KwsedApp(App[None]):
                 ),
                 "bank",
             )
+        if written:
+            self._preaudit_single_writes = True
         return entries, "single"
 
     def _staged_patch_landed(self, bank: Any, slot: int, expected: bytes) -> bool:
@@ -5934,7 +6004,10 @@ class KwsedApp(App[None]):
         self._progress_value = 1.0
         self._progress_paint()
         generation = self._progress_generation
-        self.set_timer(0.4, lambda: self._progress_hide(generation))
+        try:
+            self.set_timer(0.4, lambda: self._progress_hide(generation))
+        except Exception:  # noqa: S110 - the app may be shutting down
+            pass
 
     def _progress_hold_begin(self, label: str) -> None:
         """Show the bar for a whole operation, not only its messages.
@@ -5967,7 +6040,11 @@ class KwsedApp(App[None]):
 
     def _progress_paint(self) -> None:
         text = self._progress_text()
-        screen = self.screen
+        try:
+            screen = self.screen
+        except Exception:
+            # A worker can outlive the screen stack during teardown.
+            return
         setter = getattr(screen, "set_progress", None)
         if callable(setter):
             setter(text)
