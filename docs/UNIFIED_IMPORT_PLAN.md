@@ -98,6 +98,11 @@ for **Whole bank** and feed the selected unit snapshot to
 - [x] 4. `y` opens the unified screen prefilled and writes one batch.
 - [x] 5. Whole-bank source choice (file or unit) uses the same source loader.
 - [x] 6. README/docs/tests; full gate still to be run after the final doc pass.
+- [x] 7. Complementary same-bank fragments merge automatically:
+  `*_Performances.syx` + `*_Patches.syx` + `*_Waveseq.syx` become one source
+  bank. Conflicting banks remain separate session aliases.
+- [ ] Korg Legacy VST `.wsram`/`.fxb` native files remain unsupported; the
+  `.syx`/`.MID` files in the same packages are the supported route.
 
 ## Acceptance
 

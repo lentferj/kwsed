@@ -93,7 +93,9 @@ from kwsed.import_single import SingleImportScreen
 from kwsed.import_source import (
     SourceEntry,
     make_source_entry,
+    merge_source_components,
     origin_for_unit,
+    same_source_bank,
     unit_bank_choices,
 )
 from kwsed.target_bank import ImportMenuScreen, TargetBankScreen
@@ -3334,7 +3336,7 @@ class KwsedApp(App[None]):
         if kind == 0:
             self._open_whole_source_menu()
             return
-        self._open_file_picker(kind)
+        self._open_single_source_menu()
 
     def _open_file_picker(self, kind: int) -> None:
         picker = FilePickerScreen(
@@ -3357,22 +3359,106 @@ class KwsedApp(App[None]):
             elif kind == 0:
                 self._open_whole_source_menu()
             else:
-                # Escape from the file picker goes back to the Import menu,
-                # not all the way to the browser.
-                self.action_import()
+                # Escape from the file picker goes back to the source chooser.
+                self._open_single_source_menu()
 
         self.push_screen(picker, done)
 
     def _open_whole_source_menu(self) -> None:
-        choices = ["From file…"] + [
+        choices = ["From file…"] + self._unit_source_labels()
+        self.push_screen(
+            ImportMenuScreen("Whole bank source", choices),
+            self._whole_source_chosen,
+        )
+
+    def _unit_source_labels(self) -> List[str]:
+        return [
             origin_for_unit(
                 self._active_card_scope() if choice.scope == "CARD" else choice.scope
             )
             for choice in unit_bank_choices()
         ]
+
+    def _open_single_source_menu(self) -> None:
+        choices = ["From file…"] + self._unit_source_labels()
         self.push_screen(
-            ImportMenuScreen("Whole bank source", choices),
-            self._whole_source_chosen,
+            ImportMenuScreen("Single / multiple source", choices),
+            self._single_initial_source_chosen,
+        )
+
+    def _single_initial_source_chosen(self, index: Optional[int]) -> None:
+        if index is None:
+            self.action_import()
+            return
+        if index == 0:
+            self._open_file_picker(1)
+            return
+        try:
+            choice = unit_bank_choices()[index - 1]
+        except (IndexError, TypeError):
+            return
+        scope = self._active_card_scope() if choice.scope == "CARD" else choice.scope
+        origin = origin_for_unit(scope)
+        source = self._load_unit_source(scope, origin)
+        if source is None:
+            return
+        writable = banks.writable_banks()
+        self.push_screen(
+            TargetBankScreen("Target bank", [b.label for b in writable]),
+            lambda ti: self._unit_single_target_chosen(
+                source, scope, origin, writable, ti
+            ),
+        )
+
+    def _unit_single_target_chosen(
+        self,
+        source: deps.Source,
+        scope: str,
+        origin: str,
+        writable: Sequence[Any],
+        target_index: Optional[int],
+    ) -> None:
+        if target_index is None:
+            self._open_single_source_menu()
+            return
+        try:
+            target = writable[target_index]
+        except (IndexError, TypeError):
+            return
+        sources = dict(self._sources_with_store())
+        target_source = sources.get(target.id)
+        if target_source is None:
+            try:
+                target_source = self._read_source_offline(target.id)
+            except Exception as exc:
+                self.notify_status(
+                    f"import: could not read {target.label}: {exc}", refused=True
+                )
+                return
+            self._sources[target.id] = target_source
+        sources[target.id] = target_source
+        entry = make_source_entry(
+            label=origin,
+            scope=scope,
+            source=source,
+            origin=origin,
+            existing=sources,
+            read_only=not self._unit_scope_is_writable(scope),
+        )
+        sources[entry.scope] = entry.source
+        self.push_screen(
+            SingleImportScreen(
+                path=origin,
+                banks=[entry],
+                sources=sources,
+                target_bank=target,
+                target_source=target_source,
+                gate=self._write_gate,
+                on_source_request=self._single_source_menu,
+            ),
+            lambda choice: self._import_single_chosen(
+                choice, target, entry, sources, origin, [entry], writable
+            ),
         )
 
     def _whole_source_chosen(self, index: Optional[int]) -> None:
@@ -3814,6 +3900,26 @@ class KwsedApp(App[None]):
             self._add_extra_source(screen, bank, path)
 
     def _add_extra_source(self, screen: Any, bank: Any, path: str = "") -> None:
+        incoming = bank.source
+        for index, existing in enumerate(screen.source_banks):
+            if not same_source_bank(existing.source, incoming):
+                continue
+            merged = merge_source_components(existing.source, incoming)
+            if merged is None:
+                continue
+            entry = SourceEntry(
+                label=str(getattr(existing, "label", "source")),
+                scope=str(getattr(existing, "scope", "source")),
+                source=merged,
+                origin=str(getattr(existing, "source_origin", "")),
+                read_only=bool(getattr(existing, "read_only", False)),
+            )
+            screen.replace_source_bank(index, entry, merged)
+            self.notify_status(
+                f"merged {getattr(bank, 'label', path)} into "
+                f"{entry.label}; assignments kept"
+            )
+            return
         wrapped, aliased = self._session_source(bank, screen.sources, path)
         screen.add_source_bank(wrapped, aliased)
 
@@ -6440,8 +6546,8 @@ once for its 50 performances, once for its 35 patches (`p` hides the patch
 rows). Right: that bank-and-kind's slots. The third pane on the right
 repeats the `d` report for the current selection; `D` hides it.
 
-Shortcuts: I import · y copy performance · d dependencies · D dependency
-pane · z undo · w write gate · ? this help.
+Shortcuts: I import/copy (file, RAM, ROM or Card) · y copy performance ·
+d dependencies · D dependency pane · z undo · w write gate · ? this help.
 
   RAM 1-3   writable; somebody's own work lives here.
   ROM 4-11  read-only.
@@ -6505,10 +6611,11 @@ switch the HCard.
   d   dependency inspector for a Performance, Patch or Multiset
   D   show or hide the dependency pane that follows the selection
       (remembered between runs)
-  y   copy a Performance (with its patches) into a writable bank
-  I   import a file, disk image or zip: whole bank into the local cache or
-      a writable bank, or single/multiple performances into a writable bank,
-      with a target-slot map and one batch write.
+  y   copy a Performance (with its patches) into a writable bank; opens the
+      unified copy screen with that performance prefilled
+  I   import a file, disk image, ZIP, RAM bank, ROM bank or the active Card:
+      whole bank, or single/multiple performances into one writable target
+      bank, with a target-slot map and one batch write.
   z   undo the last write (the write gate must be armed)
   w   arm or lock the write gate (or start with --allow-write)
   i   device identity and the unit's global channel

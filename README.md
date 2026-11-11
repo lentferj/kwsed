@@ -544,9 +544,10 @@ opens `WholeBankImportScreen`:
   unchanged kinds, so a whole-bank write does not re-read and resend all three
   banks blindly.
 
-**Single / multiple performances** opens the source-bank chooser and then a
-target-bank chooser. `SingleImportScreen` shows the source performances on the
-left and all 50 destination slots on the right, with a live budget:
+**Single / multiple performances** first asks for a source: a file, or any
+unit bank (`RAM 1`–`RAM 3`, `ROM 4`–`ROM 11`, or the active `Card`). It then
+asks for the target bank. `SingleImportScreen` shows the source performances
+on the left and all 50 destination slots on the right, with a live budget:
 
 ```text
 Space        assign the focused source to the first free/Init target slot
@@ -580,6 +581,19 @@ switching or adding. Distinct banks with the same scope (two RAM 1 files, or
 RAM 1 into RAM 1) are held under session aliases carrying their real bank
 number, so one target bank can be assembled from several source files and unit
 banks. The target is still single: many sources to one destination bank.
+
+**Copying Card performances to RAM 3:** press `I`, choose **Single / multiple
+performances**, choose **Card** (or the active `Card 07`), choose **RAM 3** as
+the target, select the performances, press `w` to arm and `ctrl+s` to write.
+For one performance, `y` does the same with that performance already assigned;
+add more sources with `s` if needed.
+
+**Separate SoundArtMedia-style files:** a package may split one bank into
+`*_Performances.syx`, `*_Patches.syx` and `*_Waveseq.syx`. Add the performance
+file first, then use `s` → **Add another source file…** for the patches and
+waveseq files. Components for the same bank are merged into the source entry,
+so the performance brings the matching patches and sequence data with it when
+assigned.
 
 The app reads the destination bank once, the slot-preserving planner keeps
 every untouched destination slot and every surviving shared/ROM reference, and
@@ -616,6 +630,15 @@ path; the browser `I`/`y` use the same readers, planner and cache.
 | ZIP archive | `.zip` | if contained | if contained | if contained | if contained (read, not cached) | disk images plus loose `.syx`/`.mid`/`.bnk`; KryoFlux `.7z` members are skipped |
 | `.bnk` bundle | `.bnk` | yes | yes | yes | if present (read, not cached) | an `FR`-prefixed or bare SysEx bundle |
 | KryoFlux flux | `.7z` | — | — | — | — | **not decoded**; use the `.img` files in the same download |
+| Korg Legacy VST | `.wsram` | — | — | — | — | **not decoded**; VST-native `WSra` bank, not hardware SysEx. Use the matching `.syx` performance/patch/waveseq files |
+| Korg Legacy VST | `.fxb` | — | — | — | — | **not decoded**; VST preset/all-RAM state, not hardware SysEx |
+
+`.wsram` is the Korg Legacy Collection **Wavestation VST** native RAM-bank
+format, not a hardware SysEx dump. It begins with the ASCII tag `WSra`, then
+contains VST-specific bank data; its performance/patch/waveseq areas are not
+byte-identical to the hardware `.syx` files. Use the `*_Performances.syx`,
+`*_Patches.syx` and `*_Waveseq.syx` files in the same SoundArtMedia package
+instead. `.fxb` is the VST preset/all-RAM state and likewise unsupported.
 
 All Data `0x50` is the one exception to "all three": the documented structure
 it carries has RAM1 and RAM2 only. The `.LIB` multisets are genuinely absent

@@ -24,7 +24,7 @@ from kwsed.gate import EditGate
 from kwsed.import_bank import WholeBankChoice, WholeBankImportScreen
 from kwsed.import_screen import BankImportScreen
 from kwsed.import_single import SingleImportChoice, SingleImportScreen
-from kwsed.import_source import unit_bank_choices
+from kwsed.import_source import SourceEntry, unit_bank_choices
 from kwsed.target_bank import ImportMenuScreen, TargetBankScreen
 from vinsynlib.ui.modals import ChoiceScreen
 
@@ -119,6 +119,7 @@ class _SourceHost:
         self.sources: dict[str, Any] = {}
         self.source_index = 0
         self.added: list[Any] = []
+        self.replaced: list[Any] = []
 
     def select_source(self, index: int) -> None:
         self.source_index = index
@@ -127,6 +128,22 @@ class _SourceHost:
         self.added.append((bank, source))
         self.source_banks.append(bank)
         self.sources[str(bank.scope)] = source if source is not None else bank.source
+
+    def replace_source_bank(self, index: int, bank: Any, source: Any = None) -> None:
+        self.replaced.append((index, bank, source))
+        self.source_banks[index] = bank
+        self.sources[str(bank.scope)] = source if source is not None else bank.source
+
+
+@pytest.mark.asyncio
+async def test_single_source_menu_offers_file_and_unit_sources(tmp_path: Any) -> None:
+    app = _make_app(tmp_path)
+    pushed: list[Any] = []
+    app.push_screen = lambda s, c=None: pushed.append(s)  # type: ignore[assignment]
+    app._open_single_source_menu()
+    assert isinstance(pushed[0], ImportMenuScreen)
+    assert pushed[0]._choices[0] == "From file…"
+    assert "RAM 3" in pushed[0]._choices and "Card" in pushed[0]._choices
 
 
 @pytest.mark.asyncio
@@ -156,6 +173,44 @@ async def test_unit_bank_chooser_lists_rom_and_active_card(tmp_path: Any) -> Non
     assert labels[:3] == ["RAM 1", "RAM 2", "RAM 3"]
     assert labels[-1] == "Card 07"
     assert "ROM 4" in labels and "ROM 11" in labels
+
+
+@pytest.mark.asyncio
+async def test_add_patch_file_merges_into_performance_source(tmp_path: Any) -> None:
+    app = _make_app(tmp_path)
+    app.notify_status = lambda *a, **k: None  # type: ignore[method-assign]
+    host = _SourceHost()
+    existing_source = deps.Source(
+        bank_id="RAM1",
+        performances=[_perf_record("Perf")] + [bytes(PERF_RECORD_SIZE)] * 49,
+        patches=[],
+        waveseq=None,
+        bank_number=0,
+    )
+    existing = SourceEntry(
+        label="Performance file",
+        scope="RAM1",
+        source=existing_source,
+        origin="/p/Performances.syx",
+    )
+    host.source_banks = [existing]
+    host.sources = {"RAM1": existing_source}
+    patch_bank = SimpleNamespace(
+        label="Patches file",
+        scope="RAM1",
+        source=deps.Source(
+            bank_id="RAM1",
+            performances=[],
+            patches=[bytes(PATCH_RECORD_SIZE)] * 35,
+            waveseq=None,
+        ),
+    )
+    app._add_extra_source(host, patch_bank, "/p/Patches.syx")
+    assert host.replaced
+    _index, replaced, source = host.replaced[0]
+    assert source.performances == existing_source.performances
+    assert len(source.patches) == 35
+    assert replaced.source_origin == "/p/Performances.syx"
 
 
 @pytest.mark.asyncio
@@ -666,7 +721,7 @@ async def test_back_from_source_returns_to_file_picker(tmp_path: Any) -> None:
     pushed: list[Any] = []
     app.push_screen = lambda s, c=None: pushed.append(s)  # type: ignore[assignment]
     app._import_single_source_chosen("p.syx", [bank], None)
-    assert pushed and isinstance(pushed[0], FilePickerScreen)
+    assert pushed and isinstance(pushed[0], ImportMenuScreen)
 
 
 @pytest.mark.asyncio
@@ -684,13 +739,11 @@ async def test_file_picker_cancel_returns_to_import_menu(tmp_path: Any) -> None:
     app = _make_app(tmp_path)
     pushed: list[Any] = []
     app.push_screen = lambda s, c=None: pushed.append((s, c))  # type: ignore[assignment]
-    menus: list[int] = []
-    app.action_import = lambda: menus.append(1)  # type: ignore[method-assign]
-    app._import_kind_chosen(1)
+    app._open_file_picker(1)
     assert pushed
     _picker, done = pushed[0]
     done(None)
-    assert menus == [1]
+    assert isinstance(pushed[-1][0], ImportMenuScreen)
 
 
 @pytest.mark.asyncio
