@@ -1816,6 +1816,83 @@ class WavestationBridge:
         result["mismatch"] = mismatch
         return result
 
+    def copy_bank(
+        self,
+        source: int | str,
+        destination: int | str,
+        *,
+        backup_dir: str,
+        verify: bool = True,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Copy one whole bank into another, kinds together and undoable.
+
+        This is the unit's MIDI/Global BANK COPY, performed over documented
+        requests instead of from the front panel, and fenced: the
+        destination's previous contents are backed up into one envelope
+        before anything is sent, and every written kind is read back and
+        compared. The panel function offers neither, which is why this does
+        not merely trigger it -- there is no documented SysEx request that
+        would.
+
+        All three kinds are copied. A partial copy (performances without the
+        wave-sequence pool they name) silently changes how the destination
+        sounds, so there is no kind selector; slot-preserving partial
+        copying is :mod:`kws.perfcopy`'s job.
+
+        The performance bank is **remapped** the way the panel function
+        remaps it: every part that names the source bank itself is rewritten
+        to name the destination, so the copy is self-contained rather than
+        still playing from where it came from. Parts pointing at ROM, the
+        Card or a third bank are left alone -- see
+        :func:`kws.records.remap_performance_banks`.
+        """
+        src = banks.bank(source)
+        dst = banks.bank(destination)
+        if not src.writable:
+            raise DeviceError(
+                f"{src.label} is ROM and cannot be copied from. The banks "
+                f"that can are: "
+                f"{', '.join(b.label for b in banks.writable_banks())}."
+            )
+        if src.number == dst.number:
+            raise DeviceError(f"copying {src.label} onto itself copies nothing")
+
+        decoded: Dict[str, bytes] = {}
+        for kind, function in _BUNDLE_FUNCTIONS.items():
+            try:
+                raw = self.read_raw(src.sysex, function, timeout=timeout)
+            except Exception as exc:
+                raise DeviceError(
+                    f"could not read {src.label} {kind}, so nothing was sent "
+                    f"({exc}). kwsed does not start a copy it cannot finish."
+                ) from exc
+            packet = m.parse(raw)
+            if packet is None:
+                raise DeviceError(f"{src.label} {kind} read back is not a valid frame")
+            data = packet.data()
+            expected = _BUNDLE_SIZES[kind]
+            if len(data) != expected:
+                raise DeviceError(
+                    f"{src.label} {kind} decoded to {len(data)} bytes; a whole "
+                    f"bank is {expected}"
+                )
+            decoded[kind] = bytes(data)
+
+        decoded["performances"] = records.remap_performance_banks(
+            decoded["performances"], src.number, dst.number
+        )
+
+        return self.write_bank_bundle(
+            dst.number,
+            performances=decoded["performances"],
+            patches=decoded["patches"],
+            waveseq=decoded["waveseq"],
+            backup_dir=backup_dir,
+            verify=verify,
+            timeout=timeout,
+        )
+
     def read_raw(
         self, bank_number: int, function: int, *, timeout: Optional[float] = None
     ) -> bytes:

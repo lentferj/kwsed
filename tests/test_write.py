@@ -958,6 +958,130 @@ class TestTheDemoDeviceStoresWrites:
         assert stored.data()[: len(waveseq)] == bytes(waveseq)
 
 
+class TestBankCopy:
+    """``copy_bank``: read one bank, remap it, write another, fenced."""
+
+    @staticmethod
+    def _load_source(unit: Unit, *, owner: str = "RAM1") -> Tuple[bytes, bytes, bytes]:
+        """Fill one bank with all three kinds; performances name ``owner``.
+
+        Part 0 names the owning bank itself (a self-reference, which the copy
+        must retarget); part 1 names ROM 4 (third-party, which it must not).
+        """
+        bank_byte = banks.bank(owner).sysex
+        position = banks.bank(owner).number
+        patch_bank = bytes((index * 13) % 256 for index in range(14910))
+        waveseq = bytes((index * 7) % 256 for index in range(r.WAVESEQ_BANK_SIZE))
+        records = bytearray()
+        for _ in range(50):
+            rec = bytearray(r.PERFORMANCE_SIZE)
+            rec[0:6] = b"Source"
+            r.set_performance_part(rec, 0, bank=position, patch=4)
+            r.set_performance_part(rec, 1, bank=3, patch=5)  # ROM 4
+            records += rec
+        unit.dumps[(bank_byte, m.Function.ALL_PATCH_DUMP)] = patch_bank
+        unit.dumps[(bank_byte, m.Function.ALL_PERFORMANCE_DUMP)] = bytes(records)
+        unit.dumps[(bank_byte, m.Function.ALL_WAVESEQ_DUMP)] = waveseq
+        return patch_bank, bytes(records), waveseq
+
+    def test_ram1_to_card_is_a_remapped_verified_copy(self, tmp_path):
+        unit = Unit()
+        patch_bank, _perf_bank, waveseq = self._load_source(unit)
+
+        result = unit.bridge.copy_bank("RAM1", "CARD", backup_dir=str(tmp_path))
+
+        assert result["kind"] == "bank-bundle"
+        assert result["kinds"] == ["waveseq", "patches", "performances"]
+        assert result["verified"] is True
+        stored = unit.dumps[(CARD_SYSEX, m.Function.ALL_PATCH_DUMP)]
+        assert stored == patch_bank
+        stored = unit.dumps[(CARD_SYSEX, m.Function.ALL_WAVESEQ_DUMP)]
+        assert stored == waveseq
+        stored = unit.dumps[(CARD_SYSEX, m.Function.ALL_PERFORMANCE_DUMP)]
+        parts = r.performance_parts(stored)
+        # the self-reference now names the Card; ROM 4 stayed ROM 4
+        assert (parts[0].bank, parts[0].patch) == (11, 4)
+        assert (parts[1].bank, parts[1].patch) == (3, 5)
+
+    def test_card_to_ram1_remaps_the_other_way(self, tmp_path):
+        unit = Unit()
+        self._load_source(unit, owner="CARD")
+
+        result = unit.bridge.copy_bank("CARD", "RAM1", backup_dir=str(tmp_path))
+
+        assert result["verified"] is True
+        stored = unit.dumps[(0, m.Function.ALL_PERFORMANCE_DUMP)]
+        parts = r.performance_parts(stored)
+        # the Card self-references now name RAM 1
+        assert (parts[0].bank, parts[0].patch) == (0, 4)
+        assert (parts[1].bank, parts[1].patch) == (3, 5)
+
+    def test_the_destination_is_backed_up_before_anything_is_sent(self, tmp_path):
+        """The fence, for a copy too: what was on the Card survives on disk."""
+        unit = Unit()
+        before = bytes((index * 3) % 256 for index in range(14910))
+        functions = {
+            "patches": m.Function.ALL_PATCH_DUMP,
+            "performances": m.Function.ALL_PERFORMANCE_DUMP,
+            "waveseq": m.Function.ALL_WAVESEQ_DUMP,
+        }
+        unit.dumps[(CARD_SYSEX, m.Function.ALL_PATCH_DUMP)] = before
+        self._load_source(unit)
+
+        result = unit.bridge.copy_bank("RAM1", "CARD", backup_dir=str(tmp_path))
+
+        saved = backup.load(result["backup"])
+        assert saved.blocks["patches"] == m.frame_bulk(
+            functions["patches"], CARD_SYSEX, before, channel=0
+        )
+
+    def test_a_silent_unit_starts_no_copy(self, tmp_path):
+        unit = Unit(answer=False)
+        self._load_source(unit)
+
+        with pytest.raises(DeviceError, match="nothing was sent"):
+            unit.bridge.copy_bank("RAM1", "CARD", backup_dir=str(tmp_path), timeout=0.1)
+        assert unit.dump_frames_sent() == [], "no dump may go out unreadable"
+
+    def test_a_rom_bank_cannot_be_copied_from(self, tmp_path):
+        with pytest.raises(DeviceError, match="ROM 4 is ROM"):
+            Unit().bridge.copy_bank("ROM4", "CARD", backup_dir=str(tmp_path))
+        with pytest.raises(DeviceError, match="ROM 4 is ROM"):
+            Unit().bridge.copy_bank("CARD", "ROM4", backup_dir=str(tmp_path))
+
+    def test_copying_a_bank_onto_itself_is_refused(self, tmp_path):
+        with pytest.raises(DeviceError, match="copies nothing"):
+            Unit().bridge.copy_bank("RAM1", "RAM1", backup_dir=str(tmp_path))
+
+    def test_a_read_back_that_does_not_match_is_reported(self, tmp_path):
+        unit = Unit()
+        self._load_source(unit)
+        original = unit._sent
+
+        def lying(data):
+            original(data)
+            raw = bytes(data)
+            if (
+                len(raw) > 5
+                and raw[4] == m.Function.ALL_PERFORMANCE_DUMP
+                and raw[5] == CARD_SYSEX
+            ):
+                stored = bytearray(
+                    unit.dumps[(CARD_SYSEX, m.Function.ALL_PERFORMANCE_DUMP)]
+                )
+                stored[0] ^= 0xFF
+                unit.dumps[(CARD_SYSEX, m.Function.ALL_PERFORMANCE_DUMP)] = bytes(
+                    stored
+                )
+
+        unit.midi_out.send_message = lying  # type: ignore[method-assign]
+
+        result = unit.bridge.copy_bank("RAM1", "CARD", backup_dir=str(tmp_path))
+
+        assert result["verified"] is False
+        assert result["mismatch"]
+
+
 def test_a_demo_write_multi_returns_a_multi_envelope(tmp_path):
     from kwsed.demo import DemoDevice
 
