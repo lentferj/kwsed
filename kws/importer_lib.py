@@ -17,9 +17,10 @@
 
 from __future__ import annotations
 
+import os
 from typing import List
 
-from kws import sounddiver
+from kws import deps, sounddiver
 from kws.exceptions import UnsupportedFormat
 from kws.types import ImportedBank
 
@@ -35,10 +36,6 @@ def read_lib_file(path: str) -> List[ImportedBank]:
         lib_banks = sounddiver.read_banks(path)
     except (sounddiver.SoundDiverError, ValueError) as exc:
         raise UnsupportedFormat(str(exc)) from exc
-
-    import os
-
-    from kws import deps
 
     result: List[ImportedBank] = []
     for bank in lib_banks:

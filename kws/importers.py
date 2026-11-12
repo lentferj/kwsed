@@ -38,8 +38,6 @@ from kws.importer_container import (
 from kws.importer_lib import looks_like_lib, read_lib_file
 from kws.importer_midi import looks_like_midi, read_midi_data, read_midi_file
 from kws.importer_sqs import looks_like_sqs, read_sqs_file
-
-# Import from format-specific modules
 from kws.importer_syx import looks_like_syx, read_syx_data, read_syx_file
 from kws.types import ImportedBank
 

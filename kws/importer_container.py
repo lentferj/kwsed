@@ -51,9 +51,9 @@ def read_img_data(data: bytes, label: str) -> List[ImportedBank]:
         packets = None
         stream_fmt = "sysex"
         if ext in (".syx", ".sysex", ".bnk"):
-            from kws import dumps
+            from kws.importer_syx import read_syx_data
 
-            packets = dumps.read_syx_data(content)
+            packets = read_syx_data(content)
         elif ext in (".mid", ".midi"):
             try:
                 from kws.importer_midi import read_midi_data
@@ -63,9 +63,9 @@ def read_img_data(data: bytes, label: str) -> List[ImportedBank]:
                 packets = None
             stream_fmt = "midi"
         elif b"\xf0\x42" in content:
-            from kws import dumps
+            from kws.importer_syx import read_syx_data
 
-            packets = dumps.read_syx_data(content)
+            packets = read_syx_data(content)
         else:
             continue
         if not packets:
@@ -86,9 +86,9 @@ def read_img_file(path: str) -> List[ImportedBank]:
 
 def _zip_parse_member(content: bytes, ext: str) -> Optional[Tuple[List[Packet], str]]:
     if ext in (".syx", ".sysex", ".bnk"):
-        from kws import dumps
+        from kws.importer_syx import read_syx_data
 
-        return dumps.read_syx_data(content), "sysex"
+        return read_syx_data(content), "sysex"
     if ext in (".mid", ".midi"):
         try:
             from kws.importer_midi import read_midi_data
@@ -98,9 +98,9 @@ def _zip_parse_member(content: bytes, ext: str) -> Optional[Tuple[List[Packet], 
             return None
     if b"\xf0\x42" not in content:
         return None
-    from kws import dumps
+    from kws.importer_syx import read_syx_data
 
-    return dumps.read_syx_data(content), "sysex"
+    return read_syx_data(content), "sysex"
 
 
 def _zip_member_banks(
