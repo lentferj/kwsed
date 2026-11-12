@@ -582,6 +582,12 @@ def _cmd_copy_bank(device: Any, args: argparse.Namespace) -> int:
         return spec.EXIT_USAGE
 
     print(f"copying: {source.label} -> {destination.label}, all three kinds")
+    if not _confirmed(
+        args,
+        "copy-bank",
+        f"replaces all three kinds in {destination.label} with {source.label}",
+    ):
+        return spec.EXIT_USAGE
     where = args.backup_dir or backup.default_dir()
     try:
         result = device.copy_bank(source.number, destination.number, backup_dir=where)
@@ -2270,6 +2276,9 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument(
         "destination",
         help="destination bank: RAM1, RAM2, RAM3 or CARD (not the source)",
+    )
+    sp.add_argument(
+        "--yes", action="store_true", help="actually write; without it nothing is sent"
     )
     sp.add_argument(
         "--backup-dir",

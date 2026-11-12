@@ -1740,9 +1740,10 @@ class TestCopyPerfFromAFile:
 class TestCopyBank:
     """`copy-bank`: two bank names, one fenced copy, on the demo device."""
 
-    def _args(self, tmp_path, source="RAM1", destination="CARD"):
+    def _args(self, tmp_path, source="RAM1", destination="CARD", yes=True):
+        extra = ["--yes"] if yes else []
         return cli.build_parser().parse_args(
-            ["copy-bank", source, destination, "--backup-dir", str(tmp_path)]
+            ["copy-bank", source, destination, "--backup-dir", str(tmp_path), *extra]
         )
 
     def test_a_demo_copy_is_written_and_verified(self, tmp_path, capsys):
@@ -1750,6 +1751,15 @@ class TestCopyBank:
         out = capsys.readouterr().out
         assert "RAM 1 -> Card" in out
         assert "written and verified" in out
+
+    def test_without_yes_nothing_is_sent(self, tmp_path, capsys):
+        """The command line's arm-then-fire: no --yes, no write."""
+        device = DemoDevice()
+        before = device.read_bank("CARD", banks.Kind.PERFORMANCE)
+        assert cli._cmd_copy_bank(device, self._args(tmp_path, yes=False)) == 2
+        assert "without --yes" in capsys.readouterr().err
+        after = device.read_bank("CARD", banks.Kind.PERFORMANCE)
+        assert after.records == before.records
 
     def test_the_copy_remapped_the_source_self_references(self, tmp_path):
         device = DemoDevice()
@@ -1775,4 +1785,7 @@ class TestCopyBank:
         assert "ROM 4 is ROM" in capsys.readouterr().out
 
     def test_the_demo_run_ends_in_zero(self, capsys, tmp_path):
-        assert run(["copy-bank", "RAM1", "CARD", "--backup-dir", str(tmp_path)]) == 0
+        assert (
+            run(["copy-bank", "RAM1", "CARD", "--backup-dir", str(tmp_path), "--yes"])
+            == 0
+        )
