@@ -117,7 +117,8 @@ def test_header_roundtrip():
 
 def test_extended_types_roundtrip():
     for ext in range(48, 56):
-        raw = bytes([ext - 47] + [0] * 7)
+        # High bits of parameter byte 0 are set to ensure they survive.
+        raw = bytes([(ext - 47) | 0x80] + [0] * 7)
         block = bytearray(FX_SIZE)
         block[0] = 2  # extended marker
         block[1] = 2 | 0x80  # fx2 off, extended enable
@@ -127,6 +128,7 @@ def test_extended_types_roundtrip():
         fb = FxBlock.from_bytes(data)
         assert fb.fx1.type == ext
         assert fb.to_bytes() == data
+        assert fb.fx1.raw[0] & 0x80
 
 
 def test_with_value_noop():

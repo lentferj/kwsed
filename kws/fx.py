@@ -30,7 +30,7 @@ this codec and these tables.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 
 from kws.fx_tables import (
     FX_GROUP as _FX_GROUP_TABLE,
@@ -44,6 +44,7 @@ from kws.fx_tables import (
 __all__ = [
     "FX_SIZE",
     "EffectType",
+    "StorageField",
     "EffectParam",
     "Effect",
     "FxBlock",
@@ -72,23 +73,40 @@ EFFECT_TYPES: Tuple[EffectType, ...] = tuple(
 
 
 # ---------------------------------------------------------------------------
-# Parameters (one bit-field of a processor's 8-byte block).
+# Storage fields and logical parameters.
 # ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
+class StorageField:
+    """One storage field contributing to a logical parameter's value.
+
+    ``byte`` (0-7) and ``bit`` locate the field in the processor's 8-byte
+    block; ``bitlen`` is the field width (negative means sign-extended);
+    ``parambit`` is the bit offset of this field inside the logical value.
+    """
+
+    byte: int  #: 0-7 inside the processor block
+    bit: int
+    bitlen: int  #: negative = sign-extended
+    parambit: int
+
+
+@dataclass(frozen=True)
 class EffectParam:
-    """One bit-field owned by a processor's parameter block."""
+    """A logical parameter assembled from one or more storage fields.
+
+    A parameter is a single logical value; the PCL is the authority on how
+    its storage fields are assembled.  ``fields`` holds every storage field
+    that contributes to the value.
+    """
 
     key: str  #: stable identifier, e.g. "dry_wet"
     label: str  #: what the screen prints
     low: int
     high: int
-    names: Optional[Tuple[str, ...]] = None  #: enumerated values
-    byte: int = 0  #: 0-7 inside the processor block
-    bit: int = 0
-    bitlen: int = 8  #: negative = sign-padded
-    parambit: int = 0
+    names: Optional[Tuple[str, ...]]  #: enumerated values
+    fields: Tuple[StorageField, ...]
 
 
 def _slug(label: str) -> str:
@@ -110,6 +128,16 @@ def _param_index_for(group: int, paramnum: int) -> Optional[int]:
         if pn == paramnum:
             return idx
     return None
+
+
+def _logical_width(row: EffectParam) -> int:
+    if not row.fields:
+        return 0
+    return max(f.parambit + abs(f.bitlen) for f in row.fields)
+
+
+def _is_signed(row: EffectParam) -> bool:
+    return any(f.bitlen < 0 for f in row.fields)
 
 
 # ---------------------------------------------------------------------------
@@ -144,15 +172,29 @@ class Effect:
         return 0
 
     def rows(self) -> Tuple[EffectParam, ...]:
-        """The parameter rows for this effect's group."""
+        """The parameter rows for this effect's group.
+
+        One row per distinct ``paramnum`` in the group's PCL, in the order
+        of first appearance.  The PCL is the authority on storage layout.
+        """
         group = self.group
         if group == 0:
             return ()
         pcl_entries = FX_PCL_LIST[group]
-        result: list[EffectParam] = []
-        seen: set[str] = set()
+        # Group by paramnum, preserving first appearance.
+        ordered: list[int] = []
+        seen_pn: set[int] = set()
+        fields_by_param: dict[int, list[Any]] = {}
         for pcl in pcl_entries:
-            bytenum, bit, bitlen, paramnum, parambit = pcl
+            paramnum = pcl.paramnum
+            fields_by_param.setdefault(paramnum, []).append(pcl)
+            if paramnum not in seen_pn:
+                seen_pn.add(paramnum)
+                ordered.append(paramnum)
+
+        result: list[EffectParam] = []
+        seen_keys: set[str] = set()
+        for paramnum in ordered:
             idx = _param_index_for(group, paramnum)
             info = None
             if idx is not None:
@@ -164,55 +206,84 @@ class Effect:
                 )
             else:
                 label = f"Param {paramnum}"
-                mag = abs(bitlen)
-                if bitlen < 0:
-                    low = -(1 << (mag - 1))
-                    high = (1 << (mag - 1)) - 1
+                fields = fields_by_param[paramnum]
+                w = max(f.parambit + abs(f.bitlen) for f in fields) if fields else 0
+                any_neg = any(f.bitlen < 0 for f in fields)
+                if any_neg:
+                    low = -(1 << (w - 1)) if w > 0 else 0
+                    high = (1 << (w - 1)) - 1 if w > 0 else 0
                 else:
                     low = 0
-                    high = (1 << bitlen) - 1 if bitlen > 0 else 0
+                    high = (1 << w) - 1 if w > 0 else 0
                 names_tuple = None
+
+            storage_fields = tuple(
+                StorageField(
+                    byte=e.bytenum,
+                    bit=e.bit,
+                    bitlen=e.bitlen,
+                    parambit=e.parambit,
+                )
+                for e in fields_by_param[paramnum]
+            )
+            row = EffectParam(
+                key="",  # filled below
+                label=label,
+                low=low,
+                high=high,
+                names=names_tuple,
+                fields=storage_fields,
+            )
             key = _slug(label)
-            if key in seen:
+            if key in seen_keys:
                 suffix = 2
-                while f"{key}_{suffix}" in seen:
+                while f"{key}_{suffix}" in seen_keys:
                     suffix += 1
                 key = f"{key}_{suffix}"
-            seen.add(key)
-            result.append(
-                EffectParam(
-                    key=key,
-                    label=label,
-                    low=low,
-                    high=high,
-                    names=names_tuple,
-                    byte=bytenum,
-                    bit=bit,
-                    bitlen=bitlen,
-                    parambit=parambit,
-                )
+            seen_keys.add(key)
+            # Rebuild with key (dataclass frozen, so construct fresh).
+            row = EffectParam(
+                key=key,
+                label=label,
+                low=low,
+                high=high,
+                names=names_tuple,
+                fields=storage_fields,
             )
+            result.append(row)
         return tuple(result)
+
+    def _assemble(self, row: EffectParam) -> int:
+        w = _logical_width(row)
+        unsigned = 0
+        for f in row.fields:
+            mag = abs(f.bitlen)
+            if mag == 0:
+                continue
+            fm = (1 << mag) - 1
+            field_val = (self.raw[f.byte] >> f.bit) & fm
+            if f.bitlen < 0 and (field_val & (1 << (mag - 1))):
+                field_val -= 1 << mag
+            unsigned |= (field_val & fm) << f.parambit
+        if _is_signed(row) and w > 0 and (unsigned & (1 << (w - 1))):
+            return unsigned - (1 << w)
+        return unsigned
 
     def display(self, row: EffectParam) -> int | str:
         """The value this row currently holds."""
-        mag = abs(row.bitlen)
-        mask = (1 << mag) - 1
-        field = (self.raw[row.byte] >> row.bit) & mask
-        if row.bitlen < 0 and (field & (1 << (mag - 1))):
-            field -= 1 << mag
+        value = self._assemble(row)
         if row.names is not None:
-            if not (0 <= field < len(row.names)):
-                raise ValueError(f"{row.key} {field} is outside 0-{len(row.names) - 1}")
-            return row.names[field]
-        if not (row.low <= field <= row.high):
-            raise ValueError(f"{row.key} {field} is outside {row.low}-{row.high}")
-        return field
+            if not (0 <= value < len(row.names)):
+                raise ValueError(f"{row.key} {value} is outside 0-{len(row.names) - 1}")
+            return row.names[value]
+        if not (row.low <= value <= row.high):
+            raise ValueError(f"{row.key} {value} is outside {row.low}-{row.high}")
+        return value
 
     def with_value(self, row: EffectParam, value: int | str) -> "Effect":  # noqa: C901
         """A copy of this effect with one row set to ``value``."""
-        mag = abs(row.bitlen)
-        mask = (1 << mag) - 1
+        w = _logical_width(row)
+        signed = _is_signed(row)
         if row.names is not None:
             names = row.names
             if isinstance(value, str):
@@ -220,35 +291,43 @@ class Effect:
                     raise ValueError(
                         f"{row.key} has no value {value!r}; it has {', '.join(names)}"
                     )
-                raw_field = names.index(value)
+                raw_logical = names.index(value)
             else:
+                if isinstance(value, bool) or not isinstance(value, int):
+                    raise ValueError(f"{row.key} takes a number, not {value!r}")
                 if not (0 <= value < len(names)):
                     raise ValueError(f"{row.key} {value} is outside 0-{len(names) - 1}")
-                raw_field = value
+                raw_logical = value
         else:
-            if not isinstance(value, int) or isinstance(value, bool):
+            if isinstance(value, bool) or not isinstance(value, int):
                 raise ValueError(f"{row.key} takes a number, not {value!r}")
-            if row.bitlen < 0:
-                if not (-(1 << (mag - 1)) <= value <= (1 << (mag - 1)) - 1):
+            if signed and w > 0:
+                if not (-(1 << (w - 1)) <= value <= (1 << (w - 1)) - 1):
                     raise ValueError(
                         f"{row.key} {value} is outside "
-                        f"{-(1 << (mag - 1))}-{(1 << (mag - 1)) - 1}"
+                        f"{-(1 << (w - 1))}-{(1 << (w - 1)) - 1}"
                     )
-                raw_field = (1 << mag) + value if value < 0 else value
             else:
+                mask = (1 << w) - 1 if w > 0 else 0
                 if not (0 <= value <= mask):
                     raise ValueError(f"{row.key} {value} is outside 0-{mask}")
-                raw_field = value
-            # Honour the declared UI range as well.
             if not (row.low <= value <= row.high):
                 raise ValueError(f"{row.key} {value} is outside {row.low}-{row.high}")
-        if not (0 <= raw_field <= mask):
-            raise ValueError(f"{row.key} {raw_field} is outside 0-{mask}")
-        new_byte = (self.raw[row.byte] & ~(mask << row.bit)) | (
-            (raw_field & mask) << row.bit
-        )
+            raw_logical = value
+
+        uvalue = raw_logical & ((1 << w) - 1) if w > 0 else 0
+
         new_raw = bytearray(self.raw)
-        new_raw[row.byte] = new_byte & 0xFF
+        for f in row.fields:
+            mag = abs(f.bitlen)
+            if mag == 0:
+                continue
+            fm = (1 << mag) - 1
+            field_raw = (uvalue >> f.parambit) & fm
+            new_raw[f.byte] = (new_raw[f.byte] & ~(fm << f.bit)) | (
+                (field_raw & fm) << f.bit
+            )
+            new_raw[f.byte] &= 0xFF
         return Effect(type=self.type, raw=bytes(new_raw))
 
 
@@ -331,7 +410,12 @@ class FxBlock:
             type_bits1 = 2
             ext1 = self.fx1.type - 47
             raw1 = bytearray(self.fx1.raw)
-            raw1[0] = (raw1[0] & 0xF0) | (ext1 & 0x0F)
+            # Extended effects store ``fxtype - 47`` in the low bits of the
+            # processor's first parameter byte.  Extended groups 26-30 do
+            # use bytenum == 0 in their PCL, so that storage overlaps the
+            # extended marker: follow Edisyn's OR semantics (not replace)
+            # so the parameter byte's high bits survive.
+            raw1[0] = raw1[0] | (ext1 & 0x0F)
         else:
             type_bits1 = self.fx1.type + 2
             raw1 = bytearray(self.fx1.raw)
@@ -340,7 +424,7 @@ class FxBlock:
             type_bits2 = 2
             ext2 = self.fx2.type - 47
             raw2 = bytearray(self.fx2.raw)
-            raw2[0] = (raw2[0] & 0xF0) | (ext2 & 0x0F)
+            raw2[0] = raw2[0] | (ext2 & 0x0F)
         else:
             type_bits2 = self.fx2.type + 2
             raw2 = bytearray(self.fx2.raw)
