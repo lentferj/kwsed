@@ -45,6 +45,7 @@ from kwsed.app import (
     favorite_bank_id,
 )
 from kwsed.demo import DemoDevice
+from kwsed.gate import EditGate
 from kwsed.import_single import SingleImportScreen
 from kwsed.target_bank import TargetBankScreen
 from kwsed.target_screen import TargetSlotScreen
@@ -2698,3 +2699,111 @@ class TestFxScreen:
             await settle(pilot, 30)
             assert isinstance(app.screen, FxScreen)
             assert writes == []
+
+    async def test_editing_a_value_changes_only_that_row(self, app: Any) -> None:
+        block = self._block()
+        rows = block.fx1.rows()
+        target = next(row for row in rows if row.label == "Pre Delay")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            screen = FxScreen(block, 0)
+            app.push_screen(screen)
+            await settle(pilot, 3)
+            screen._apply_param(0, target, "300")
+            assert screen._block.fx1.display(target) == 300
+            for row in rows:
+                if row.key != target.key:
+                    assert screen._block.fx1.display(row) == block.fx1.display(row)
+
+    async def test_the_write_path_sends_one_performance(self, app: Any) -> None:
+        calls: list[Any] = []
+
+        def fake(bank: Any, number: int, data: bytes, *, backup_dir: str) -> Any:
+            calls.append((bank, number, bytes(data)))
+            return {
+                "verified": True,
+                "backup": "not-read.json",
+                "kind": "performance",
+                "bank": "RAM 1",
+            }
+
+        app.device.write_performance = fake
+        bank = banks.bank("RAM1")
+        record = bytes(app.device.read_performance(bank.sysex, 0))
+        block = self._block()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._write_gate = EditGate(armed=True)
+            screen = FxScreen(
+                block,
+                0,
+                on_write=lambda new_block, target: app._fx_write(
+                    bank, 0, record, new_block, target
+                ),
+                gate_armed=True,
+            )
+            app.push_screen(screen)
+            await settle(pilot, 3)
+            await pilot.press("a")
+            await pilot.press("w")
+            await settle(pilot, 25)
+            assert len(calls) == 1
+            assert calls[0][2][16:37] == block.to_bytes()
+            assert not isinstance(app.screen, FxScreen)
+
+    async def test_the_locked_gate_refuses_before_a_write(self, app: Any) -> None:
+        calls: list[Any] = []
+        app.device.write_performance = lambda *a, **k: calls.append(1)
+        bank = banks.bank("RAM1")
+        record = bytes(app.device.read_performance(bank.sysex, 0))
+        block = self._block()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._write_gate = EditGate(armed=False)
+            screen = FxScreen(
+                block,
+                0,
+                on_write=lambda new_block, target: app._fx_write(
+                    bank, 0, record, new_block, target
+                ),
+                gate_armed=False,
+            )
+            app.push_screen(screen)
+            await settle(pilot, 3)
+            await pilot.press("a")
+            await settle(pilot, 2)
+            state = str(screen.query_one("#fx-state", Static).content)
+            assert "locked" in state
+            await pilot.press("w")
+            await settle(pilot, 10)
+            assert calls == []
+            assert isinstance(app.screen, FxScreen)
+
+    async def test_a_failed_write_keeps_the_screen_open(self, app: Any) -> None:
+        def bad(*a: Any, **k: Any) -> Any:
+            raise RuntimeError("cable unplugged")
+
+        app.device.write_performance = bad
+        bank = banks.bank("RAM1")
+        record = bytes(app.device.read_performance(bank.sysex, 0))
+        block = self._block()
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._write_gate = EditGate(armed=True)
+            screen = FxScreen(
+                block,
+                0,
+                on_write=lambda new_block, target: app._fx_write(
+                    bank, 0, record, new_block, target
+                ),
+                gate_armed=True,
+            )
+            app.push_screen(screen)
+            await settle(pilot, 3)
+            await pilot.press("a")
+            await pilot.press("w")
+            await settle(pilot, 20)
+            assert isinstance(app.screen, FxScreen)
+            assert "cable unplugged" in str(
+                screen.query_one("#fx-state", Static).content
+            )

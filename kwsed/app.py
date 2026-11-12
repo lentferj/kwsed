@@ -81,7 +81,7 @@ from kws import relations
 from kws import perfcopy
 from kws import records as rec
 from kws.multi import MULTISETS
-from kws.fx import FxBlock
+from kws.fx import EFFECT_TYPES, FxBlock
 from kws import cards as _cards
 from kws import physical as _physical
 from kws import messages as m
@@ -116,6 +116,7 @@ from kwsed.target_screen import TargetSlotScreen
 from vinsynlib.keys import wrap_blocks  # re-exported: it is in __all__
 from vinsynlib.ui.hints import KeyHints
 from vinsynlib.ui.modals import ChoiceScreen, RatingFilter, RatingFilterScreen
+from vinsynlib.ui.confirm import ConfirmScreen
 
 #: Family quiet set plus this tool's own bridge errors.
 _BRIDGE_ERRORS: tuple[type[BaseException], ...] = (
@@ -968,7 +969,7 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
 
 
 class FxScreen(ModalScreen[None]):
-    """Read-only view of one performance's or Multiset's FX block."""
+    """Editable view of one performance's (or Multiset's) FX block."""
 
     DEFAULT_CSS = """
     FxScreen { align: center middle; }
@@ -982,49 +983,630 @@ class FxScreen(ModalScreen[None]):
     BINDINGS = [
         Binding("escape", "close", "Cancel"),
         Binding("q", "close", "Cancel"),
+        Binding("enter", "edit", "Edit", priority=True),
+        Binding("plus", "bump(1)", "Nudge +", show=False),
+        Binding("equals_sign", "bump(1)", "Nudge +", show=False),
+        Binding("minus", "bump(-1)", "Nudge -", show=False),
+        Binding("a", "arm", "Arm", show=False),
+        Binding("w", "fire", "Write", show=False),
     ]
 
-    def __init__(self, block: FxBlock, mode: Optional[int] = None) -> None:
+    def __init__(
+        self,
+        block: FxBlock,
+        mode: Optional[int] = None,
+        on_write: Optional[Callable[[FxBlock, "FxScreen"], Any]] = None,
+        *,
+        gate_armed: Optional[bool] = None,
+        gate: Any = None,
+    ) -> None:
         super().__init__()
         self._block = block
         self._mode = mode
+        self._on_write = on_write
+        self._armed = False
+        self._gate_armed = gate_armed
+        self._gate = gate
+        self._pending_type: Optional[Tuple[int, int]] = None
+        self._rows: list[tuple[Any, ...]] = self._descriptors(block)
+        self.rows = self._rows
+        self.row_descriptors = self._rows
+        self.descriptors = self._rows
+
+    def _descriptors(self, block: FxBlock) -> list[tuple[Any, ...]]:
+        rows: list[tuple[Any, ...]] = []
+        rows.append(("routing", None, "series"))
+        rows.append(("type", 0, "type"))
+        for param in block.fx1.rows():
+            rows.append(("param", 0, param))
+        rows.append(("type", 1, "type"))
+        for param in block.fx2.rows():
+            rows.append(("param", 1, param))
+        rows.append(("mix", None, "mix"))
+        rows.append(("mod_source", None, "mod_source"))
+        rows.append(("mod_amount", None, "mod_amount"))
+        return rows
+
+    def _is_gate_armed(self) -> bool:
+        if self._gate is not None:
+            try:
+                return bool(self._gate.armed)
+            except Exception:  # noqa: S110
+                pass
+        if self._gate_armed is not None:
+            return bool(self._gate_armed)
+        try:
+            app = self.app
+            wg = getattr(app, "_write_gate", None)
+            if wg is not None:
+                return bool(wg.armed)
+        except Exception:  # noqa: S110
+            pass
+        return False
+
+    def _gate_text(self) -> str:
+        if self._gate is not None:
+            try:
+                return str(self._gate.describe())
+            except Exception:  # noqa: S110
+                pass
+        return "write gate ARMED" if self._is_gate_armed() else "write gate locked"
 
     def mode_banner(self) -> str:
-        """Which block the unit is currently playing.
-
-        The system setup's field 4 is Edisyn's MIDI mode parameter:
-        0 = performance effects heard, 1 = Multiset effects heard. The
-        offset comes from the documented system structure and is to
-        confirm on hardware (docs/FX_PLAN.md, step 0).
-        """
         if self._mode == 0:
             return "performance FX are heard (OMNI/POLY)"
         if self._mode == 1:
             return "the Multiset's FX are heard (MULTI/MONO)"
         return "MIDI mode unknown"
 
+    def _title_text(self) -> str:
+        return f"FX ({self._gate_text()})"
+
+    def _status(self, message: str) -> None:
+        try:
+            self.query_one("#fx-state", Static).update(str(message))
+        except Exception:  # noqa: S110
+            pass
+
+    def write_failed(self, message: str) -> None:
+        try:
+            self.query_one("#fx-state", Static).update(str(message))
+        except Exception:  # noqa: S110
+            pass
+
+    def write_done(self, block: Any = None) -> None:
+        if block is not None:
+            self._block = block
+            self._rows = self._descriptors(self._block)
+            self.rows = self._rows
+            self.row_descriptors = self._rows
+            self.descriptors = self._rows
+        self.dismiss(None)
+
     def compose(self) -> ComposeResult:
         with Vertical():
-            yield Label("FX", id="fx-title")
+            yield Label(self._title_text(), id="fx-title")
             yield Static(self.mode_banner(), id="fx-mode-banner")
             yield DataTable(id="fx-table", cursor_type="row")
+            yield Static("", id="fx-state")
+            yield Static(
+                "a arm · w write · +/- nudge · enter edit · esc/q close",
+                id="fx-footer",
+            )
 
     def on_mount(self) -> None:
+        self._draw_table()
+        try:
+            self.query_one("#fx-table", DataTable).focus()
+        except Exception:  # noqa: S110
+            pass
+
+    def _draw_table(self) -> None:
         table = self.query_one("#fx-table", DataTable)
-        table.add_column("param", key="param")
-        table.add_column("value", key="value")
+        try:
+            coord = table.cursor_coordinate
+            row = int(coord.row)
+            column = int(coord.column)
+        except Exception:
+            row = 0
+            column = 0
+        table.clear()
+        try:
+            table.add_column("param", key="param")
+            table.add_column("value", key="value")
+        except Exception:  # noqa: S110
+            pass
+        for i, desc in enumerate(self._rows):
+            table.add_row(self._label(desc), self._value(desc), key=str(i))
+        if table.row_count:
+            row = max(0, min(row, table.row_count - 1))
+            column = max(0, min(column, len(table.columns) - 1))
+            table.move_cursor(row=row, column=column)
+
+    def _label(self, desc: Any) -> str:
+        kind = desc[0]
+        fx_index = desc[1]
+        if kind == "routing":
+            return "routing"
+        if kind == "type":
+            return "FX 1" if fx_index == 0 else "FX 2"
+        if kind == "param":
+            param = desc[2]
+            return str(param.label)
+        if kind == "mix":
+            return "Mix"
+        if kind == "mod_source":
+            return "Mod source"
+        if kind == "mod_amount":
+            return "Mod amount"
+        return str(kind)
+
+    def _value(self, desc: Any) -> str:
+        kind = desc[0]
+        fx_index = desc[1]
         block = self._block
-        table.add_row("routing", "series" if block.series else "parallel")
-        table.add_row("FX 1", block.fx1.name)
-        for row in block.fx1.rows():
-            table.add_row(row.label, str(block.fx1.display(row)))
-        table.add_row("FX 2", block.fx2.name)
-        for row in block.fx2.rows():
-            table.add_row(row.label, str(block.fx2.display(row)))
-        table.add_row("Mix", f"{block.mix[0]} / {block.mix[1]}")
-        table.add_row("Mod source", f"{block.mod_source[0]} / {block.mod_source[1]}")
-        table.add_row("Mod amount", f"{block.mod_amount[0]} / {block.mod_amount[1]}")
-        table.focus()
+        if kind == "routing":
+            return "series" if block.series else "parallel"
+        if kind == "type":
+            effect = block.fx1 if fx_index == 0 else block.fx2
+            return effect.name
+        if kind == "param":
+            param = desc[2]
+            effect = block.fx1 if fx_index == 0 else block.fx2
+            try:
+                v = effect.display(param)
+            except ValueError:
+                return "?"
+            return str(v)
+        if kind == "mix":
+            return f"{block.mix[0]} / {block.mix[1]}"
+        if kind == "mod_source":
+            return f"{block.mod_source[0]} / {block.mod_source[1]}"
+        if kind == "mod_amount":
+            return f"{block.mod_amount[0]} / {block.mod_amount[1]}"
+        return ""
+
+    def _effect(self, fx_index: int) -> Any:
+        return self._block.fx1 if fx_index == 0 else self._block.fx2
+
+    def _current_desc(self) -> Optional[Any]:
+        try:
+            table = self.query_one("#fx-table", DataTable)
+        except Exception:
+            return None
+        if not table.row_count:
+            return None
+        index = table.cursor_row
+        if not (0 <= index < len(self._rows)):
+            return None
+        return self._rows[index]
+
+    def _rebuild(self) -> None:
+        self._rows = self._descriptors(self._block)
+        self.rows = self._rows
+        self.row_descriptors = self._rows
+        self.descriptors = self._rows
+        self._draw_table()
+        try:
+            self.query_one("#fx-title", Label).update(self._title_text())
+        except Exception:  # noqa: S110
+            pass
+
+    def _apply_block(self, new_block: FxBlock) -> None:
+        self._block = new_block
+        self._rebuild()
+
+    def action_edit(self) -> None:
+        desc = self._current_desc()
+        if desc is None:
+            return
+        kind = desc[0]
+        fx_index = desc[1]
+        if kind == "type":
+            self._choose_type(fx_index)
+        elif kind == "param":
+            param = desc[2]
+            effect = self._effect(fx_index)
+            if getattr(param, "names", None) is not None:
+                self._choose_enum(fx_index, param)
+            else:
+                current = ""
+                try:
+                    current = str(effect.display(param))
+                except ValueError:
+                    current = ""
+                self._prompt_param(fx_index, param, current)
+        elif kind == "routing":
+            self._choose_routing()
+        elif kind == "mix":
+            self._prompt_two("Mix", self._block.mix, 0, 15)
+        elif kind == "mod_source":
+            self._prompt_two("Mod source", self._block.mod_source, 0, 15)
+        elif kind == "mod_amount":
+            self._prompt_two("Mod amount", self._block.mod_amount, -15, 15)
+
+    def action_enter(self) -> None:
+        self.action_edit()
+
+    def _choose_type(self, fx_index: int) -> None:
+        effect = self._effect(fx_index)
+        names = [t.name for t in EFFECT_TYPES]
+        current = effect.type
+        if current < 0 or current >= len(names):
+            current = 0
+
+        def picked(index: Optional[int]) -> None:
+            if index is None:
+                return
+            if index == effect.type:
+                self._status("the effect type is unchanged")
+                return
+            self._pending_type = (fx_index, index)
+            self.app.push_screen(
+                ConfirmScreen(
+                    "changing the effect type loads a factory package on the unit; "
+                    "the other parameter bytes keep their stored values until "
+                    "the unit reinterprets them"
+                ),
+                self._type_confirmed,
+            )
+
+        self.app.push_screen(ChoiceScreen("FX type", names, current), picked)
+
+    def _type_confirmed(self, confirmed: Optional[bool]) -> None:
+        pending = self._pending_type
+        self._pending_type = None
+        if not confirmed or pending is None:
+            return
+        fx_index, new_type = pending
+        effect = self._effect(fx_index).with_type(new_type)
+        import dataclasses
+
+        if fx_index == 0:
+            new_block = dataclasses.replace(self._block, fx1=effect)
+        else:
+            new_block = dataclasses.replace(self._block, fx2=effect)
+        self._apply_block(new_block)
+
+    def _choose_enum(self, fx_index: int, param: Any) -> None:
+        names = list(getattr(param, "names", None) or ())
+        effect = self._effect(fx_index)
+        try:
+            current_val = effect.display(param)
+        except ValueError:
+            current_val = names[0] if names else ""
+        current = names.index(current_val) if current_val in names else 0
+
+        def picked(index: Optional[int]) -> None:
+            if index is None:
+                return
+            if not (0 <= index < len(names)):
+                return
+            self._apply_param(fx_index, param, names[index])
+
+        self.app.push_screen(ChoiceScreen(param.label, names, current), picked)
+
+    def _prompt_param(self, fx_index: int, param: Any, current: str) -> None:
+        low = getattr(param, "low", 0)
+        high = getattr(param, "high", 0)
+
+        def done(text: Optional[str]) -> None:
+            if text is None:
+                return
+            text = text.strip()
+            if not text:
+                return
+            try:
+                value = int(text)
+            except ValueError:
+                self.write_failed(f"{text!r} is not a number")
+                return
+            self._apply_param(fx_index, param, value)
+
+        self.app.push_screen(
+            PromptScreen(f"{param.label} ({low} to {high})", current), done
+        )
+
+    def _apply_param(self, fx_index: int, param: Any, value: Any) -> None:
+        if isinstance(value, str) and getattr(param, "names", None) is None:
+            try:
+                value = int(value.strip())
+            except ValueError:
+                pass
+        effect = self._effect(fx_index)
+        try:
+            updated = effect.with_value(param, value)
+        except Exception as exc:
+            self.write_failed(str(exc))
+            return
+        import dataclasses
+
+        if fx_index == 0:
+            new_block = dataclasses.replace(self._block, fx1=updated)
+        else:
+            new_block = dataclasses.replace(self._block, fx2=updated)
+        self._apply_block(new_block)
+
+    def _choose_routing(self) -> None:
+        names = ["Parallel", "Series"]
+        current = 1 if self._block.series else 0
+
+        def picked(index: Optional[int]) -> None:
+            if index is None:
+                return
+            import dataclasses
+
+            new_block = dataclasses.replace(self._block, series=(index == 1))
+            self._apply_block(new_block)
+
+        self.app.push_screen(ChoiceScreen("routing", names, current), picked)
+
+    def _prompt_two(
+        self, label: str, current: Tuple[int, int], low: int, high: int
+    ) -> None:
+        current_text = f"{current[0]} / {current[1]}"
+
+        def done(text: Optional[str]) -> None:
+            if text is None:
+                return
+            text = text.strip()
+            if not text:
+                return
+            parts = text.replace("/", " ").split()
+            if len(parts) != 2:
+                self.write_failed("expected two numbers: a / b")
+                return
+            try:
+                a = int(parts[0])
+                b = int(parts[1])
+            except ValueError:
+                self.write_failed(f"{text!r} is not two numbers")
+                return
+            if not (low <= a <= high and low <= b <= high):
+                self.write_failed(f"{label} takes {low} to {high}")
+                return
+            import dataclasses
+
+            if label == "Mix":
+                new_block = dataclasses.replace(self._block, mix=(a, b))
+            elif label == "Mod source":
+                new_block = dataclasses.replace(self._block, mod_source=(a, b))
+            else:
+                new_block = dataclasses.replace(self._block, mod_amount=(a, b))
+            self._apply_block(new_block)
+
+        self.app.push_screen(
+            PromptScreen(f"{label} ({low} to {high} / {low} to {high})", current_text),
+            done,
+        )
+
+    def action_bump(self, delta: int) -> None:  # noqa: C901
+        desc = self._current_desc()
+        if desc is None:
+            return
+        kind = desc[0]
+        fx_index = desc[1]
+        if kind == "type":
+            self._status("the effect type is a list of names")
+            return
+        if kind == "param":
+            param = desc[2]
+            effect = self._effect(fx_index)
+            try:
+                current = effect.display(param)
+            except ValueError:
+                self.write_failed("value out of range")
+                return
+            names = getattr(param, "names", None)
+            if names is not None:
+                try:
+                    i = names.index(current)
+                except ValueError:
+                    self.write_failed("value out of range")
+                    return
+                j = i + int(delta)
+                if not (0 <= j < len(names)):
+                    self._status(f"{param.label} has no value there")
+                    return
+                self._apply_param(fx_index, param, names[j])
+                return
+            try:
+                self._apply_param(fx_index, param, int(current) + int(delta))
+            except Exception:
+                self._status(f"{param.label} out of range")
+            return
+        if kind == "routing":
+            import dataclasses
+
+            self._apply_block(
+                dataclasses.replace(self._block, series=not self._block.series)
+            )
+            return
+        if kind in ("mix", "mod_source", "mod_amount"):
+            field = (
+                "mix"
+                if kind == "mix"
+                else ("mod_source" if kind == "mod_source" else "mod_amount")
+            )
+            cur = getattr(self._block, field)
+            low, high = (-15, 15) if kind == "mod_amount" else (0, 15)
+            new_val = cur[0] + int(delta)
+            if not (low <= new_val <= high):
+                self._status(f"{kind} out of range")
+                return
+            import dataclasses
+
+            self._apply_block(
+                dataclasses.replace(self._block, **{field: (new_val, cur[1])})  # type: ignore[arg-type]
+            )
+            return
+
+    def action_arm(self) -> None:
+        if not self._is_gate_armed():
+            self.write_failed("gate locked")
+            return
+        self._armed = True
+        self._status("armed")
+
+    def action_fire(self) -> None:
+        if not self._armed:
+            self._status("not armed - press a first")
+            return
+        self._armed = False
+        if self._on_write is None:
+            self.write_failed("no write handler")
+            return
+        try:
+            self._on_write(self._block, self)
+        except Exception as exc:
+            self.write_failed(str(exc))
+
+    def _find_desc_index(self, target: Any) -> Optional[int]:
+        if isinstance(target, int):
+            if 0 <= target < len(self._rows):
+                return target
+            return None
+        if isinstance(target, tuple):
+            for i, d in enumerate(self._rows):
+                if d == target:
+                    return i
+        return None
+
+    def _apply_to_desc(self, desc: Any, value: Any) -> None:  # noqa: C901
+        kind = desc[0]
+        fx_index = desc[1]
+        if kind == "type":
+            names = [t.name for t in EFFECT_TYPES]
+            if isinstance(value, str):
+                if value not in names:
+                    self.write_failed(f"unknown type {value!r}")
+                    return
+                value = names.index(value)
+            if not isinstance(value, int):
+                self.write_failed("type takes an index or name")
+                return
+            effect = self._effect(fx_index).with_type(int(value))
+            import dataclasses
+
+            if fx_index == 0:
+                self._apply_block(dataclasses.replace(self._block, fx1=effect))
+            else:
+                self._apply_block(dataclasses.replace(self._block, fx2=effect))
+            return
+        if kind == "param":
+            param = desc[2]
+            self._apply_param(fx_index, param, value)
+            return
+        if kind == "routing":
+            if isinstance(value, str):
+                series = value.strip().lower().startswith("s")
+            else:
+                series = bool(value)
+            import dataclasses
+
+            self._apply_block(dataclasses.replace(self._block, series=series))
+            return
+        if kind in ("mix", "mod_source", "mod_amount"):
+            field = (
+                "mix"
+                if kind == "mix"
+                else ("mod_source" if kind == "mod_source" else "mod_amount")
+            )
+            if isinstance(value, str):
+                parts = value.replace("/", " ").split()
+                if len(parts) != 2:
+                    self.write_failed("expected two numbers: a / b")
+                    return
+                try:
+                    a = int(parts[0])
+                    b = int(parts[1])
+                except ValueError:
+                    self.write_failed(f"{value!r} is not two numbers")
+                    return
+                value = (a, b)
+            if not (isinstance(value, (tuple, list)) and len(value) == 2):
+                self.write_failed("expected two numbers: a / b")
+                return
+            a, b = int(value[0]), int(value[1])
+            low, high = (-15, 15) if kind == "mod_amount" else (0, 15)
+            if not (low <= a <= high and low <= b <= high):
+                self.write_failed(f"{kind} takes {low} to {high}")
+                return
+            import dataclasses
+
+            self._apply_block(
+                dataclasses.replace(self._block, **{field: (a, b)})  # type: ignore[arg-type]
+            )
+            return
+
+    def edit(self, *args: Any, **kwargs: Any) -> None:  # noqa: C901
+        index: Optional[int] = None
+        value: Any = None
+        if "index" in kwargs or "row" in kwargs:
+            index = kwargs.get("index", kwargs.get("row"))
+        if "value" in kwargs or "v" in kwargs:
+            value = kwargs.get("value", kwargs.get("v"))
+        if len(args) == 1:
+            if value is None and index is None:
+                value = args[0]
+            elif index is None:
+                index = args[0]
+        elif len(args) >= 2:
+            first, second = args[0], args[1]
+            if isinstance(first, int) and (isinstance(second, (int, str, tuple, list))):
+                if 0 <= first < len(self._rows):
+                    index = first
+                    value = second
+                else:
+                    value = first
+            else:
+                idx = self._find_desc_index(first)
+                if idx is not None:
+                    index = idx
+                    value = second
+                else:
+                    value = first
+        if index is None:
+            index = (
+                self._find_desc_index(kwargs.get("descriptor"))
+                if "descriptor" in kwargs
+                else None
+            )
+        if index is None:
+            try:
+                index = self.query_one("#fx-table", DataTable).cursor_row
+            except Exception:
+                index = 0
+        if index is None or not (0 <= index < len(self._rows)):
+            index = 0
+        if value is None:
+            return
+        desc = self._rows[index]
+        self._apply_to_desc(desc, value)
+
+    def edit_value(self, *args: Any, **kwargs: Any) -> None:
+        self.edit(*args, **kwargs)
+
+    def apply_value(self, *args: Any, **kwargs: Any) -> None:
+        self.edit(*args, **kwargs)
+
+    def set_value(self, *args: Any, **kwargs: Any) -> None:
+        self.edit(*args, **kwargs)
+
+    def edit_selected(self, *args: Any, **kwargs: Any) -> None:
+        self.edit(*args, **kwargs)
+
+    def apply(self, *args: Any, **kwargs: Any) -> None:
+        self.edit(*args, **kwargs)
+
+    def update_value(self, *args: Any, **kwargs: Any) -> None:
+        self.edit(*args, **kwargs)
+
+    def on_edit(self, *args: Any, **kwargs: Any) -> None:
+        self.edit(*args, **kwargs)
+
+    def edit_row(self, *args: Any, **kwargs: Any) -> None:
+        self.edit(*args, **kwargs)
 
     def action_close(self) -> None:
         self.dismiss(None)
@@ -7974,9 +8556,66 @@ class KwsedApp(App[None]):
                         mode = setup[4]
                 except Exception:
                     mode = None
-            self.push_screen(FxScreen(block, mode))
+
+            def on_write(new_block: FxBlock, screen: Any) -> None:
+                self._fx_write(bank, number, record, new_block, screen)
+
+            self.push_screen(
+                FxScreen(
+                    block,
+                    mode,
+                    on_write,
+                    gate_armed=self._write_gate.armed,
+                )
+            )
 
         self._device_worker(work, done, "reading FX")
+
+    def _fx_write(
+        self,
+        bank: Any,
+        number: int,
+        record: bytes,
+        block: FxBlock,
+        screen: Any,
+    ) -> None:
+        """Write one performance's FX block through the ordinary fence."""
+        if not self._write_gate.armed:
+            screen.write_failed("the write gate is locked (w on the browser)")
+            return
+        new_record = bytearray(record)
+        new_record[16:37] = block.to_bytes()
+
+        def work() -> Any:
+            from kws import backup as _backup
+
+            where = self._backup_dir or _backup.default_dir()
+            return self.device.write_performance(
+                bank.number, number, bytes(new_record), backup_dir=where
+            )
+
+        def done(result: Any, failure: Any) -> None:
+            if failure is not None:
+                screen.write_failed(str(failure))
+                self.notify_status(f"fx: {failure}", refused=True)
+                return
+            if not isinstance(result, dict) or result.get("verified") is not True:
+                message = (
+                    result.get("mismatch") if isinstance(result, dict) else str(result)
+                )
+                screen.write_failed(str(message))
+                self.notify_status(f"fx: {message}", refused=True)
+                return
+            try:
+                self._record_write(result)
+            except Exception:  # noqa: S110
+                pass
+            self.notify_status(
+                f"FX written to {bank.label} perf {number:02d}, verified"
+            )
+            screen.write_done(block)
+
+        self._device_worker(work, done, "writing FX")
 
     @work(thread=True)
     def _multi_edit_write_worker(
