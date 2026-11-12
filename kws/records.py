@@ -67,6 +67,7 @@ __all__ = [
     "WaveRef",
     "performance_parts",
     "set_performance_part",
+    "remap_performance_banks",
     "patch_waves",
     "set_patch_wave",
     "sequence_names",
@@ -190,6 +191,52 @@ def set_performance_part(
     record[at] = exp_bank % 4
     record[at + 4] = (record[at + 4] & 0x3F) | ((exp_bank // 4) << 6)
     record[at + 1] = patch & 0xFF
+
+
+def remap_performance_banks(perf_bank: bytes, source: int, destination: int) -> bytes:
+    """Point every part that names ``source`` at ``destination``.
+
+    This is the remap the unit's own MIDI/Global BANK COPY performs: a bank
+    copied to another bank would otherwise still play its patches from the
+    bank it was copied from. Only **self-references** move -- a part pointing
+    at ROM, at the Card or at a third bank stays where it points, and a
+    whole-bank copy must not drag those along. Patches and wave sequences
+    need no remap: patches point at waves in PCM ROM, which do not move, and
+    each bank carries its own wave-sequence pool, so the numbers survive the
+    copy unchanged.
+
+    Banks are positions 0-11 as :class:`kws.banks.Bank` numbers them (RAM 1
+    is 0, the Card is 11), the same numbering :class:`PartRef` reports and
+    :func:`set_performance_part` takes. Both halves of the split bank field
+    are rewritten, because rewriting ``bankNum`` alone yields a bank that
+    loads cleanly and plays sounds from somewhere else.
+
+    Returns a new ``bytes``; the input is not modified.
+    """
+    if not 0 <= source <= 11:
+        raise ValueError(f"bank {source} is outside 0-11")
+    if not 0 <= destination <= 11:
+        raise ValueError(f"bank {destination} is outside 0-11")
+    if source == destination:
+        raise ValueError("source and destination are the same bank")
+    if len(perf_bank) == 0 or len(perf_bank) % PERFORMANCE_SIZE:
+        raise ValueError(
+            f"a performance bank is {PERFORMANCE_SIZE} bytes per record; got "
+            f"{len(perf_bank)}"
+        )
+    out = bytearray(perf_bank)
+    for base in range(0, len(out), PERFORMANCE_SIZE):
+        record = bytearray(out[base : base + PERFORMANCE_SIZE])
+        changed = False
+        for part in performance_parts(record):
+            if part.bank == source:
+                set_performance_part(
+                    record, part.index, bank=destination, patch=part.patch
+                )
+                changed = True
+        if changed:
+            out[base : base + PERFORMANCE_SIZE] = record
+    return bytes(out)
 
 
 # --- patch -> wave / wave sequence -------------------------------------------
