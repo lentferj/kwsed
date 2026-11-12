@@ -238,6 +238,7 @@ KEY_HINTS = (
     "d deps",
     "D deps pane",
     "y copy perf",
+    "B copy bank",
     "I import",
     "z undo",
     "w write gate",
@@ -1077,6 +1078,111 @@ class SendScreen(ModalScreen[Optional[Dict[str, Any]]]):
         self.dismiss(None)
 
 
+class BankCopyScreen(ModalScreen[Optional[Dict[str, Any]]]):
+    """Copy one whole bank into another. **Destructive.**
+
+    A sibling of :class:`SendScreen`, with the same three deliberate steps,
+    because a whole-bank copy replaces all fifty performances, all
+    thirty-five patches and the wave-sequence pool at once:
+
+    1. The destination's **current names** are shown, because "Card" means
+       nothing and the names it is about to replace mean everything.
+    2. **Arm.** Nothing has been sent yet.
+    3. **Fire**, a different key, only while armed.
+
+    Opening and arming send nothing, and the names come from the cache --
+    no device read happens here. The write itself is one bundle through the
+    bridge's fence: the destination is backed up first and every kind is
+    read back and verified.
+    """
+
+    DEFAULT_CSS = """
+    BankCopyScreen { align: center middle; }
+    BankCopyScreen > Vertical {
+        width: 80; height: auto; border: thick $error;
+        background: $surface; padding: 1 2;
+    }
+    BankCopyScreen .armed { color: $error; text-style: bold; }
+    BankCopyScreen .what { height: auto; }
+    """
+
+    BINDINGS = [
+        Binding("escape", "close", "Cancel"),
+        Binding("q", "close", "Cancel"),
+        Binding("a", "arm", "Arm", show=False),
+        # Deliberately not Enter, and deliberately not beside "a": the fire
+        # key should not be the one a finger is already resting on.
+        Binding("w", "fire", "Write", show=False),
+    ]
+
+    def __init__(self, app: Any, source: banks.Bank, destination: banks.Bank) -> None:
+        super().__init__()
+        self._app = app
+        self._source = source
+        self._destination = destination
+        self._armed = False
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Label("[b]Copy a whole bank[/b]")
+            yield Static(self._describe(), classes="what")
+            yield Static("", id="bank-copy-state")
+            yield Static("[dim]a to arm, then w to write. esc cancels.[/dim]")
+
+    def _describe(self) -> str:
+        lines = [
+            f"source      {self._source.label}",
+            f"destination {self._destination.label}  "
+            f"({'writable' if self._destination.writable else 'ROM'})",
+            "kind        all three: wave sequences, patches, performances",
+            "backup      the destination's current content is saved first "
+            "(one envelope)",
+        ]
+        source = self._app._sources_with_store().get(self._destination.id)
+        if source is None:
+            lines.append("replacing   (names not read)")
+            return "\n".join(lines)
+        names = [
+            m.decode_name(record)
+            for record in list(source.performances) + list(source.patches)
+        ]
+        shown = ", ".join(f"{n:03d} {name}" for n, name in enumerate(names[:5]))
+        more = " ..." if len(names) > 5 else ""
+        lines.append(f"replacing   {shown}{more}")
+        return "\n".join(lines)
+
+    def action_arm(self) -> None:
+        self._armed = True
+        self.query_one("#bank-copy-state", Static).update(
+            f"[b]ARMED[/b] - w replaces {self._destination.label} with "
+            f"{self._source.label}. Nothing has been sent yet."
+        )
+
+    def action_fire(self) -> None:
+        """Only while armed, and only once."""
+        if not self._armed:
+            self.query_one("#bank-copy-state", Static).update(
+                "[dim]not armed - press a first[/dim]"
+            )
+            return
+        self._armed = False
+        # A failed write must not dismiss: the screen is the only feedback
+        # the user gets, and the bridge already reported the backup's
+        # read-back mismatch. The worker's done callback leaves it open.
+        self._app._copy_bank_write(self._source, self._destination, self)
+
+    def _write_failed(self, message: str) -> None:
+        self.query_one("#bank-copy-state", Static).update(
+            f"[b]write failed[/b] {message}"
+        )
+
+    def _write_done(self, info: Dict[str, Any]) -> None:
+        self.dismiss(info)
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
 class PromptScreen(ModalScreen[Optional[str]]):
     """One line of text."""
 
@@ -1578,6 +1684,7 @@ class KwsedApp(App[None]):
         Binding("D", "toggle_deps_pane", "Deps pane"),
         Binding("p", "toggle_patches", "Patches"),
         Binding("y", "copy_performance", "Copy perf"),
+        Binding("B", "copy_bank", "Copy bank"),
         Binding("I", "import", "Import"),
         Binding("z", "undo", "Undo"),
         Binding("w", "toggle_write_gate", "Write gate"),
@@ -2734,6 +2841,160 @@ class KwsedApp(App[None]):
             }
         )
 
+    def _copy_bank_write(self, source: Any, destination: Any, screen: Any) -> None:
+        """One whole-bank copy off the UI thread, through the fence."""
+
+        def work() -> Any:
+            from kws import backup as _backup
+
+            where = getattr(self, "_backup_dir", None) or _backup.default_dir()
+            return self.device.copy_bank(
+                source.number, destination.number, backup_dir=where
+            )
+
+        def done(result: Any, failure: Any) -> None:
+            self._copy_bank_done(result, failure, source, destination, screen)
+
+        self._device_worker(
+            work, done, f"copying {source.label} to {destination.label}"
+        )
+
+    @staticmethod
+    def _bank_records(blob: bytes, size: int) -> List[bytes]:
+        return [blob[i * size : (i + 1) * size] for i in range(len(blob) // size)]
+
+    def _copy_bank_done(
+        self,
+        result: Any,
+        failure: Any,
+        source: Any,
+        destination: Any,
+        screen: Any,
+    ) -> None:
+        if failure is not None:
+            screen._write_failed(str(failure))
+            self.notify_status(f"copy bank: {failure}", refused=True)
+            return
+        if not isinstance(result, dict) or result.get("verified") is not True:
+            message = (
+                result.get("mismatch") if isinstance(result, dict) else str(result)
+            )
+            screen._write_failed(str(message))
+            self.notify_status(f"copy bank: {message}", refused=True)
+            return
+        written = result["written"]
+        self._remember_bank(
+            destination.id,
+            performances=written["performances"],
+            patches=written["patches"],
+            waveseq=written["waveseq"],
+        )
+        built = SimpleNamespace(
+            performances=written["performances"],
+            patches=written["patches"],
+            waveseq=written["waveseq"],
+        )
+        self._refresh_written_bank(destination.id, built)
+        if destination.id == "CARD":
+            self._adopt_copied_card(written)
+        try:
+            self._record_write(result)
+        except Exception:  # noqa: S110
+            pass
+        # Notify before dismissing, as copy-perf does: the status line is
+        # the browser's confirmation once the screen is gone.
+        self.notify_status(f"copied {source.label} into {destination.label}, verified")
+        screen._write_done(
+            {
+                "ok": True,
+                "source": source.label,
+                "destination": destination.label,
+                "verified": True,
+            }
+        )
+
+    def _adopt_copied_card(self, written: Dict[str, bytes]) -> None:
+        """Re-digest a verified copy into the archive of the active card.
+
+        The copy is fully automatic: the user chose the Card as the
+        destination, so an archive that still described the old content
+        would be stale. ``hcard`` mode updates the active HCard bank in
+        ``cards.json``; ``cards`` mode updates the active ordinary card in
+        ``physical-cards.json``. No prompt stands between the write and
+        the record.
+        """
+        perf_records = self._bank_records(written["performances"], rec.PERFORMANCE_SIZE)
+        patch_records = self._bank_records(written["patches"], rec.PATCH_SIZE)
+        digest = _cards.content_digest(perf_records, patch_records)
+        perf_names = {i: m.decode_name(r) for i, r in enumerate(perf_records)}
+        patch_names = {i: m.decode_name(r) for i, r in enumerate(patch_records)}
+        if self._card_mode == "hcard":
+            self._adopt_copied_hcard(digest, perf_names, patch_names)
+        elif self._card_mode == "cards":
+            self._adopt_copied_physical(digest, perf_names, patch_names, written)
+
+    def _adopt_copied_hcard(
+        self, digest: str, perf_names: Dict[int, str], patch_names: Dict[int, str]
+    ) -> None:
+        number = self._current_card
+        if number is None:
+            return
+        captured = self._archive.get(number)
+        if captured is None:
+            return
+        updated = _cards.CapturedBank(
+            number=captured.number,
+            name=captured.name,
+            captured_at=captured.captured_at,
+            performances=perf_names,
+            patches=patch_names,
+            label=captured.label,
+            digest=digest,
+            verified=True,
+        )
+        self._archive[number] = updated
+        if self._cards_path is not None:
+            try:
+                _cards.save(updated, self._cards_path)
+            except OSError:
+                pass
+        if getattr(self, "_screen_stack", None):
+            self._refresh_card_row(number)
+
+    def _adopt_copied_physical(
+        self,
+        digest: str,
+        perf_names: Dict[int, str],
+        patch_names: Dict[int, str],
+        written: Dict[str, bytes],
+    ) -> None:
+        from datetime import UTC, datetime
+
+        card_id = self._active_physical
+        card = self._physical.get(card_id) if card_id else None
+        if card is None:
+            return
+        updated = _physical.PhysicalCard(
+            id=card.id,
+            label=card.label,
+            digest=digest,
+            captured_at=datetime.now(UTC).isoformat(),
+            performances=perf_names,
+            patches=patch_names,
+            verified=True,
+        )
+        self._remember_physical(updated, updated.id)
+        self._remember_bank(
+            _physical.scope_id(updated.id),
+            performances=written["performances"],
+            patches=written["patches"],
+            waveseq=written["waveseq"],
+        )
+        if getattr(self, "_screen_stack", None):
+            self._build_row_model()
+            self._apply_row_model()
+            self._show_physical_row(updated.id)
+
     async def action_quit(self) -> None:
         """Confirm before leaving with an audition's staging still applied."""
         if not self._pending_staging:
@@ -3384,6 +3645,85 @@ class KwsedApp(App[None]):
         except Exception:
             source_name = ""
         self._open_copy_target_chooser(perf, source_name)
+
+    def action_copy_bank(self) -> None:
+        """Copy the bank under the cursor, all three kinds, into another.
+
+        The source is whichever bank the cursor is in -- RAM or Card, in any
+        direction. Opening the picker sends nothing; the screen that follows
+        does the three-step arm/fire dance.
+        """
+        entry = self._cursor_entry()
+        if entry is None:
+            self.notify_status("nothing under the cursor", refused=True)
+            return
+        try:
+            source = self._bank_for_scope(self._scoped_bank_id(entry))
+        except Exception as exc:
+            self.notify_status(f"copy bank: {exc}", refused=True)
+            return
+        if not source.writable:
+            self.notify_status(
+                f"{source.label} is ROM and cannot be copied from", refused=True
+            )
+            return
+        if not self._write_gate.armed:
+            self.notify_status("write gate is locked", refused=True)
+            return
+        writable = [b for b in banks.writable_banks() if b.number != source.number]
+        if self._card_mode == "none" and (
+            source.id == "CARD" or any(b.id == "CARD" for b in writable)
+        ):
+            self.notify_status("card support is off (card_mode = none)", refused=True)
+            return
+        if (
+            source.id == "CARD"
+            and self._card_mode == "hcard"
+            and self._active_card in range(0, 25)
+        ):
+            self.notify_status(
+                f"Card {self._active_card:02d} is a read-only HCard ROM bank; "
+                "select a user bank (25-39) or RAM 1-3",
+                refused=True,
+            )
+            return
+        if not writable:
+            self.notify_status("no writable destination banks", refused=True)
+            return
+        self.push_screen(
+            TargetBankScreen("Copy bank to", [b.label for b in writable]),
+            lambda index: self._copy_bank_target_chosen(source, writable, index),
+        )
+
+    def _copy_bank_target_chosen(
+        self,
+        source: banks.Bank,
+        writable: Sequence[banks.Bank],
+        target_index: Optional[int],
+    ) -> None:
+        if target_index is None:
+            return
+        try:
+            destination = writable[target_index]
+        except (IndexError, TypeError):
+            return
+        if self._card_mode == "none" and (
+            source.id == "CARD" or destination.id == "CARD"
+        ):
+            self.notify_status("card support is off (card_mode = none)", refused=True)
+            return
+        if (
+            destination.id == "CARD"
+            and self._card_mode == "hcard"
+            and self._active_card in range(0, 25)
+        ):
+            self.notify_status(
+                f"Card {self._active_card:02d} is a read-only HCard ROM bank; "
+                "select a user bank (25-39) or RAM 1-3",
+                refused=True,
+            )
+            return
+        self.push_screen(BankCopyScreen(self, source, destination))
 
     def _open_copy_target_chooser(
         self, perf: relations.PerfId, source_name: str = ""
@@ -7670,7 +8010,8 @@ rows). Right: that bank-and-kind's slots. The third pane on the right
 repeats the `d` report for the current selection; `D` hides it.
 
 Shortcuts: I import/copy (file, RAM, ROM or Card) · y copy performance ·
-d dependencies · D dependency pane · z undo · w write gate · ? this help.
+B copy bank · d dependencies · D dependency pane · z undo · w write gate ·
+? this help.
 
   RAM 1-3   writable; somebody's own work lives here.
   ROM 4-11  read-only.
@@ -7736,6 +8077,8 @@ switch the HCard.
       (remembered between runs)
   y   copy a Performance (with its patches) into a writable bank; opens the
       unified copy screen with that performance prefilled
+  B   copy the whole bank under the cursor into another writable bank --
+      wave sequences, patches and performances together, backed up first
   I   import a file, disk image, ZIP, RAM bank, ROM bank or the active Card:
       whole bank, or single/multiple performances into one writable target
       bank, with a target-slot map and one batch write.
