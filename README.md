@@ -50,11 +50,12 @@ unit or emulator **before** connecting irreplaceable equipment.
   each holding 50 performances and 35 patches.
 - **The HCard's forty banks, archived.** A Hypersynth HCard-101 multiplexes
   forty banks behind the one Card slot; kwsed lists all forty, greys the ones
-  not yet captured, and reads the active one with `C` — card name, performance
-  names and patch names — filing it in `cards.json`. `X` walks them with a
-  prompt to select each bank on the card. Everything is **read-only** on the
-  unit; `kwscli cards` shows the archive and can write one bank out as a
-  names-only `.syx`. Banks 16-18 say when they need a WSC PCM card.
+  not yet captured, and reads the active one with `C` — performance names,
+  patch names and a content digest — filing it in `cards.json`. `X` walks
+  them with a prompt to select each bank on the card. Everything is
+  **read-only** on the unit; `kwscli cards` shows the archive and can write
+  one bank out as a names-only `.syx`. Banks 16-18 say when they need a WSC
+  PCM card.
 - **Reads names off the unit, silently.** `r` asks for a whole bank in one
   System Exclusive message. Nothing is selected and nothing sounds.
 - **Shows transfer progress in the app, not on the unit.** Every System

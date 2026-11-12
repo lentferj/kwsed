@@ -761,3 +761,24 @@ multi editor owns.
 `tools/probe_bank_copy.py move` is the reproduction: with `--yes` it sends
 the four changes and reads both banks back. The measurements above are its
 output, committed as 4736d9b.
+
+## 16. The card name was never in the `0x51` dump
+
+For most of the HCard work this note assumed the System Setup dump carried
+a card name at some offset, and that only the offset was unknown. It was
+the one wire fact marked "confirm against hardware", with a read-only probe
+(`tools/probe_card_name.py`) kept for the day a unit was available.
+
+The probe was run on a bench SR (2026-11-12, global channel 5). The `0x51`
+dump is the documented 34-field `system` structure -- small parameter
+values, not ASCII -- and setting the card name with a Parameter Change did
+not alter it. There is no name in the dump, at offset 0 or anywhere else.
+
+The mistake was not the offset; it was treating "the HCard rewrites the
+Wavestation's card name" as "the synth can be asked for that name". The
+first is a panel behaviour, the second was never documented and is not
+true. `CARD_NAME_OFFSET`, `CARD_NAME_LEN`, `read_card_name()` and the probe
+were removed rather than left behind as a function that reads system
+parameters and calls them a name. Card identity is the content digest
+(`kws.cards.content_digest`), with first-slot fingerprints as the weaker
+fallback -- a signal that never depended on the name we cannot read.

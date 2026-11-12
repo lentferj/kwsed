@@ -606,16 +606,19 @@ alike. Worth doing as shared work rather than five times over.
 
 **Blocked on:** nothing but the decoding. Nothing here depends on it.
 
-## 23. The HCard card-name: reading is closed, writing is possible — parked
+## 23. The HCard card-name: not in the `0x51` dump — read path closed, writing parked
 
-**Status:** read path closed by the documentation; write path designed, not
-built.
+**Status:** resolved negatively on hardware (2026-11-12); the dead read path
+has been removed. Write path designed, not built.
 
 The card name is **not readable** over MIDI, and that is now established
 rather than suspected:
 
 - The System Setup dump (`0x51`) is exactly the 34-field `system` structure
   of Reference Appendix 4 §5.8 and has no name field.
+- The bench probe (2026-11-12, SR, global channel 5) read the `0x51` dump
+  and confirmed it: 34 bytes of small parameter values, not ASCII. Sending a
+  Parameter Change to set the card name did not change the dump either.
 - The accompanying expanded dumps (`0x5C`, `0x61`) are 20 and 9 bytes
   (§5.9, §5.10) and have none either.
 - The dump-request list (§1.1) has **no parameter-read request**.
@@ -623,11 +626,11 @@ rather than suspected:
   (§5.15), and Parameter Change (`0x41`) is a *set* message. Appendix 3
   lists no parameter-change transmission, so the SR never reports it.
 
-`read_card_name()` therefore cannot work; the archive falls back to a local
-label (`cards.json` `label`) plus content evidence (item 25).
-`CARD_NAME_OFFSET` is dead as a read and should be removed when the method
-is next touched; `tools/probe_card_name.py` remains useful only for
-confirming the dump's shape.
+`CARD_NAME_OFFSET`, `CARD_NAME_LEN`, `read_card_name()` and
+`tools/probe_card_name.py` were therefore dead code and have been removed.
+The archive identifies a bank by **content digest** plus first-slot
+fingerprints (item 25), with a local label (`cards.json` `label`) for
+anything the user wants to name.
 
 **Writing** it is documented: Appendix 4 §2.1.17 — function `0x41`,
 parameter #1, the value as 7-bit ASCII with `0x7F` = space and a NUL

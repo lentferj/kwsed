@@ -66,7 +66,6 @@ before-blocks. Normal callers should leave both at their defaults.
 from __future__ import annotations
 
 import contextlib
-import re
 import signal
 import sys
 import threading
@@ -89,8 +88,6 @@ __all__ = [
     "DEFAULT_TIMEOUT",
     "DUMP_TIMEOUT",
     "DEFAULT_SINGLE_OBJECT_TIMEOUT",
-    "CARD_NAME_OFFSET",
-    "CARD_NAME_LEN",
     "MIDI_MODE_PARAMETER",
     "MIDI_MODE_OMNI",
     "MIDI_MODE_POLY",
@@ -140,19 +137,6 @@ MIDI_MODE_MONO = 3
 #: bench: one second was enough, and a bank move is internal -- it does not
 #: move ~30 kB over the wire the way a dump does.
 DEVICE_MOVE_SETTLE = 1.0
-
-#: Where the card-name field sits in the **decoded** System Setup dump
-#: (function ``0x51``), and how long it is.
-#:
-#: CONFIRM AGAINST HARDWARE: the offset is the one wire fact this feature
-#: does not yet have. It is 0 until the read-only probe
-#: (``tools/probe_card_name.py``) is compared against a real unit; until
-#: then :meth:`WavestationBridge.read_card_name` accepts the first sixteen
-#: bytes only when they look like a name, so the archive's identity
-#: resolution treats anything implausible as unknown rather than filing it
-#: under a wrong bank.
-CARD_NAME_OFFSET = 0
-CARD_NAME_LEN = 16
 
 #: Which dump a bank request for a kind draws. The manual documents both;
 #: kwsed sent only the patch one for its whole life and read the end of
@@ -1402,11 +1386,14 @@ class WavestationBridge:
         """The System Setup dump (``0x51``) as decoded bytes. Read-only.
 
         One small request, no selection and no sound. ``None`` rather than
-        a timeout exception: the card name this dump carries is a hint used
-        to identify which HCard bank is in front of the synth, and a unit
-        that does not answer is "unknown", not a failure of the browser.
-        An explicit refusal still raises :class:`DeviceRefused`, because
-        that is a different answer from silence.
+        a timeout exception: a unit that does not answer is "unknown", not
+        a failure of the browser. An explicit refusal still raises
+        :class:`DeviceRefused`, because that is a different answer from
+        silence.
+
+        The dump is the documented 34-field ``system`` structure
+        (Reference Appendix 4 section 5.8). It carries **no card name**;
+        identity comes from the content digest (``kws.cards``).
         """
         self._drain()
         self._send(m.frame(m.Function.SYSTEM_SETUP_REQUEST, [], channel=self.channel))
@@ -1425,32 +1412,6 @@ class WavestationBridge:
                 continue
             return packet.data()
         return None
-
-    def read_card_name(self, *, timeout: Optional[float] = None) -> Optional[str]:
-        """The card name the synth reports, or ``None`` when it has none.
-
-        The HCard rewrites this field whenever a bank is selected on the
-        card (docs/HCARD.md section 2), so it is the only identity signal
-        the Wavestation exposes for "which of the forty banks is active".
-
-        ``None`` is not an error: a real card may hold no name, an empty
-        field decodes to nothing, and a unit that has not answered leaves
-        the question open. The caller resolves identity from the first
-        performance and patch names in that case.
-        """
-        data = self.read_system_setup(timeout=timeout)
-        if data is None:
-            return None
-        end = CARD_NAME_OFFSET + CARD_NAME_LEN
-        if len(data) < end:
-            return None
-        name = m.decode_name(data[CARD_NAME_OFFSET:end]).strip()
-        # CONFIRM AGAINST HARDWARE: while the offset is unconfirmed, trust
-        # the field only if it reads as a name; probes belong in
-        # tools/probe_card_name.py, and garbage here is "no usable name".
-        if re.fullmatch(r"[ -~]{4,}", name) is None:
-            return None
-        return name
 
     def set_midi_mode(self, mode: int, *, channel: Optional[int] = None) -> None:
         """Select OMNI, POLY, MULTI or MONO reception. **Changes device state.**

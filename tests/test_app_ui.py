@@ -519,11 +519,11 @@ class TestTheCardSubList:
     """The Card row expands into the HCard's forty banks (decision 4-A1).
 
     An unread bank is greyed rather than hidden, because the forty rows are
-    why the Card exists here; a captured one shows the name it reported and
-    a `*` where that differs from the printed table.
+    why the Card exists here; a captured one shows its label, or the printed
+    table name when it has none.
     """
 
-    def _app(self, tmp_path, *, card_name=None, seeded=True):
+    def _app(self, tmp_path, *, seeded=True):
         from kws import cards
 
         path = str(tmp_path / "cards.json")
@@ -539,7 +539,7 @@ class TestTheCardSubList:
                 path,
             )
         return KwsedApp(
-            DemoDevice(card_name=card_name),
+            DemoDevice(),
             catalog=cat.Catalog(),
             cards_path=path,
         )
@@ -572,22 +572,10 @@ class TestTheCardSubList:
             assert slot_row(app) == 50
             assert "Opening" in str(app.query_one("#slot-table").get_row_at(0))
 
-    async def test_c_captures_the_active_bank(self, tmp_path):
-        from kws import cards
-
-        app = self._app(tmp_path, card_name='Korg WPC-13 "Performance 3"', seeded=False)
-        async with app.run_test() as pilot:
-            await pilot.pause()
-            app.action_capture_card()
-            await settle(pilot, 30)
-            assert 7 in app._archive
-            assert cards.load(app._cards_path)[7].name == 'Korg WPC-13 "Performance 3"'
-            assert "captured Card 07" in str(app.query_one("#status").content)
-
     async def test_c_files_the_selected_bank_on_your_say_so(self, tmp_path):
-        """The real unit's card-name field is unconfirmed, so a selected
-        Card row is evidence enough to file an uncaptured bank."""
-        app = self._app(tmp_path, card_name=None, seeded=False)
+        """The card name is unreadable, so a selected Card row is evidence
+        enough to file an uncaptured bank."""
+        app = self._app(tmp_path, seeded=False)
         async with app.run_test() as pilot:
             await pilot.pause()
             table = app.query_one("#bank-table")
@@ -623,7 +611,7 @@ class TestTheCardSubList:
     ):
         """A capture with no readable card name must not turn a bank whose
         table entry is a real printed name into "(unnamed)"."""
-        app = self._app(tmp_path, card_name=None, seeded=False)
+        app = self._app(tmp_path, seeded=False)
         async with app.run_test() as pilot:
             await pilot.pause()
             table = app.query_one("#bank-table")
@@ -761,7 +749,7 @@ class TestTheCardSubList:
             assert "was on Card 28" in panel_text(app, "#status")
 
     async def test_an_unlabelled_captured_bank_says_press_l(self, tmp_path):
-        app = self._app(tmp_path, card_name=None, seeded=False)
+        app = self._app(tmp_path, seeded=False)
         async with app.run_test() as pilot:
             await pilot.pause()
             app._fill((banks.bank("CARD").number, banks.Kind.PERFORMANCE), 33)
@@ -773,7 +761,7 @@ class TestTheCardSubList:
     async def test_a_capture_persists_the_active_bank(self, tmp_path):
         from kws import cards
 
-        app = self._app(tmp_path, card_name=None, seeded=False)
+        app = self._app(tmp_path, seeded=False)
         async with app.run_test() as pilot:
             await pilot.pause()
             app._fill((banks.bank("CARD").number, banks.Kind.PERFORMANCE), 33)
@@ -833,7 +821,7 @@ class TestTheCardSubList:
             assert "[dim][i]" in other
 
     async def test_a_capture_moves_the_active_marker(self, tmp_path):
-        app = self._app(tmp_path, card_name=None, seeded=False)
+        app = self._app(tmp_path, seeded=False)
         async with app.run_test() as pilot:
             await pilot.pause()
             app._active_card = 7
@@ -860,7 +848,7 @@ class TestTheCardSubList:
     async def test_the_startup_probe_reports_an_unknown_bank_as_information(
         self, tmp_path
     ):
-        app = self._app(tmp_path, card_name=None, seeded=True)
+        app = self._app(tmp_path, seeded=True)
         async with app.run_test() as pilot:
             await pilot.pause()
             app._auto_capture_card()
@@ -901,7 +889,7 @@ class TestTheCardSubList:
             path,
         )
         app = KwsedApp(
-            DemoDevice(card_name=None),
+            DemoDevice(),
             catalog=cat.Catalog(),
             cards_path=path,
         )
@@ -914,9 +902,7 @@ class TestTheCardSubList:
             assert "captured Card 07" in panel_text(app, "#status")
 
     async def test_c_notifies_the_progress_line_before_the_read(self, tmp_path):
-        from kws import cards
-
-        app = self._app(tmp_path, card_name='Korg WPC-13 "Performance 3"', seeded=False)
+        app = self._app(tmp_path, seeded=False)
         recorded = []
 
         def spy(*args, **kwargs):
@@ -925,15 +911,15 @@ class TestTheCardSubList:
         app.notify_status = spy
         async with app.run_test() as pilot:
             await pilot.pause()
+            app._fill((banks.bank("CARD").number, banks.Kind.PERFORMANCE), 7)
             app.action_capture_card()
             await settle(pilot, 30)
         texts = [str(entry[0][0]) for entry in recorded if entry[0]]
         assert any("capturing the Card bank" in text for text in texts)
         assert any("captured Card" in text for text in texts)
-        assert cards.load(app._cards_path)[7].name == 'Korg WPC-13 "Performance 3"'
 
-    async def test_an_unknown_card_name_is_refused_not_filed(self, tmp_path):
-        app = self._app(tmp_path, card_name="Not In The Table", seeded=False)
+    async def test_a_capture_with_no_evidence_is_refused_not_filed(self, tmp_path):
+        app = self._app(tmp_path, seeded=False)
         async with app.run_test() as pilot:
             await pilot.pause()
             assert app._current_card is None
@@ -1021,7 +1007,7 @@ class TestCardSweep:
     async def test_it_files_the_prompted_bank_and_stops_on_request(self, tmp_path):
         screens = []
         app = KwsedApp(
-            DemoDevice(card_name='WPC-11 "Performance 1"'),
+            DemoDevice(),
             # A non-empty catalog keeps the scan offer from firing and
             # pushing a screen this fake would also have to answer.
             catalog=cat.Catalog(

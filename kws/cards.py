@@ -30,7 +30,7 @@ So this module is the first of the three layers in ``docs/HCARD.md``:
 
 1. **A static table** of what the forty banks are (this module).
 2. A per-bank archive of what was read off the unit (``cards.json``).
-3. Identity resolution from the live card name and its first names.
+3. Identity resolution from the content digest and the bank's first names.
 
 The physical ``CARD`` slot stays ``CARD`` for writes, favourites and
 backups -- decision 8-B1. The forty banks are a browse overlay over it.
@@ -249,15 +249,15 @@ def card_words(captured: bool, needs_pcm: Optional[str]) -> str:
 class CapturedBank:
     """What one HCard bank held when it was read off the unit.
 
-    The card-name field is separate from the slot names on purpose: the
-    name identifies *which* bank is physically in front of the synth, and
+    The identity fields are separate from the slot names on purpose: the
+    digest identifies *which* bank is physically in front of the synth, and
     the slot names are what that bank contains. Keeping them in one record
     means a capture is one atomic statement rather than two files that can
     disagree.
     """
 
     number: int  #: 00-39.
-    name: str  #: The name the card reported, or the table's if it said none.
+    name: str  #: A card-reported name; empty, since the card reports none.
     captured_at: str  #: ISO-8601, UTC.
     performances: Dict[int, str]  #: {slot: name}
     patches: Dict[int, str]  #: {slot: name}

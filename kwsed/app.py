@@ -7123,8 +7123,6 @@ class KwsedApp(App[None]):
         payload: Any = None
         try:
             with self._busy_gate, self._lock:
-                reader = getattr(self.device, "read_card_name", None)
-                name = reader() if callable(reader) else None
                 perf_dump = self.device.read_bank("CARD", banks.Kind.PERFORMANCE)
                 patch_dump = self.device.read_bank("CARD", banks.Kind.PATCH)
                 performances = perf_dump.names()
@@ -7150,7 +7148,7 @@ class KwsedApp(App[None]):
                 }
                 if decoded_waveseq is not None:
                     bundle["waveseq"] = decoded_waveseq
-            payload = (name, performances, patches, digest, bundle)
+            payload = (None, performances, patches, digest, bundle)
         except _BRIDGE_ERRORS as exc:
             failure = exc
         finally:
@@ -7282,11 +7280,7 @@ class KwsedApp(App[None]):
             f"captured Card {number:02d} {captured.name!r}: "
             f"{len(performances)} performances, {len(patches)} patches"
         )
-        if not name:
-            message += (
-                " (no card name read; the card name is not readable over "
-                "MIDI, press L to label it)"
-            )
+        message += " (the card name is not readable over MIDI; press L to label it)"
         message += message_suffix
         self._remember_bank(_cards.scope_id(number), **bundle)
         self.notify_status(message)

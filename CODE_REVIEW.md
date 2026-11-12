@@ -121,16 +121,14 @@ Checksum covers header bytes + nibble data. `write_multi` verifies: "The unit's 
 
 ### Data Integrity Risks
 
-#### ⚠️ `CARD_NAME_OFFSET = 0` Unconfirmed (`kws/bridge.py:120-131`)
-```python
-CARD_NAME_OFFSET = 0
-CARD_NAME_LEN = 16
-```
-**Comment**: "CONFIRM AGAINST HARDWARE: the offset is the one wire fact this feature does not yet have. It is 0 until the read-only probe is compared against a real unit."
-
-**Risk**: If the actual offset differs, `read_card_name` may read garbage or miss the name entirely. The fallback logic (accept first 16 bytes only if they "look like a name") mitigates but doesn't eliminate risk.
-
-**Mitigation**: The probe tool `tools/probe_card_name.py` exists but hasn't been run against hardware. This should be prioritized.
+#### ✅ Resolved: the card-name offset assumption (2026-11-12)
+The review flagged an unconfirmed offset into the `0x51` System Setup dump,
+with a 16-byte field and a "looks like a name" guard. The probe was run on a
+bench SR (2026-11-12, global channel 5): the dump is the documented 34-field
+`system` structure and carries **no card name**, and a Parameter Change
+setting the name did not alter it. The offset constants, the read method and
+the probe were removed. Card identity is the content digest
+(`kws.cards.content_digest`) plus first-slot fingerprints, and a local label.
 
 #### ⚠️ `SINGLE_OBJECT_TIMEOUT = 15.0` Hardcoded (`kws/bridge.py:95-105`)
 Measured at ~9.9s consistently, but 15s may be insufficient on slower interfaces or under load. The comment explains the history: "The old value... was DEFAULT_TIMEOUT, two seconds, which cut every one of them off."
@@ -487,13 +485,13 @@ def __init__(self, midi_in: Any, midi_out: Any, ...)
 
 | Risk | Location | Severity |
 |------|----------|----------|
-| Unconfirmed `CARD_NAME_OFFSET` | `bridge.py:130` | Medium — misidentifies card bank |
+| Card-name offset assumption | `bridge.py` | **Resolved** — no name in `0x51`; read path removed |
 | Short wave sequence dump accepted | `importers.py:270-271` | Low — partial bank, detected on use |
 | Multiset unmodelled tail | `bridge.py:1173-1246` | Low — reported but not failed |
 | `SINGLE_OBJECT_TIMEOUT` too short | `bridge.py:105` | Medium — could timeout on slow hardware |
 | No cache invalidation | `bankstore.py` | Medium — stale names possible |
 
-**Mitigations in place**: Read-back verification catches most write corruptions; structural digests detect content drift; "looks like a name" heuristic for card name.
+**Mitigations in place**: Read-back verification catches most write corruptions; structural digests detect content drift and identify card banks.
 
 ### 2. Write Fence Protects Against All Failure Modes?
 
@@ -554,13 +552,13 @@ def __init__(self, midi_in: Any, midi_out: Any, ...)
 
 | TODO | Location | Impact |
 |------|----------|--------|
-| `CARD_NAME_OFFSET` confirmation | `bridge.py:124-126` | Card identity resolution may misfile |
+| Card-name offset confirmation | `bridge.py` | **Resolved** — no name in `0x51` (2026-11-12); read path removed |
 | Multi request code 0x06 vs 0x32 | `bridge.py:1107-1109` | **Resolved** — 0x06 confirmed |
 | Parameter layout decoding | `records.py:39` | Limits editing, not browsing |
 | HCard remote bank switch | `multistage.py:94` | Physical limitation, documented |
 | Active card reading | `cards.py:430` | Cannot auto-detect; manual capture |
 
-**Only `CARD_NAME_OFFSET` is a correctness risk.** Others are feature gaps or documented hardware limitations.
+**No open correctness risk remains in this list.** The others are feature gaps or documented hardware limitations.
 
 ### 7. Hardware Quirks Handling?
 
@@ -585,7 +583,7 @@ def __init__(self, midi_in: Any, midi_out: Any, ...)
 
 ### High Priority
 
-1. **Confirm `CARD_NAME_OFFSET` against hardware** — run `tools/probe_card_name.py` and update constant. This is the last unverified wire fact.
+1. ~~Confirm the card-name offset against hardware~~ — **resolved 2026-11-12**: the `0x51` dump has no name; the read path was removed.
 
 2. **Make `SINGLE_OBJECT_TIMEOUT` configurable** — add to config with default 15s, allow override for slow interfaces.
 
@@ -629,6 +627,6 @@ def __init__(self, midi_in: Any, midi_out: Any, ...)
 
 kwsed is a **high-quality, production-ready codebase** with deep domain knowledge encoded in its design. The architecture correctly models the Wavestation SR's constraints, the write fence provides strong safety guarantees, and the test suite exercises critical paths including failure modes. 
 
-The primary correctness risk is the unconfirmed `CARD_NAME_OFFSET`, which should be resolved against hardware. Beyond that, the codebase is maintainable, well-documented, and demonstrates expert-level understanding of both the hardware protocol and safe software practices for hardware control tools.
+The one unverified wire fact, the card-name offset, is now settled negatively: the `0x51` dump carries no name, and the dead read path has been removed. Beyond that, the codebase is maintainable, well-documented, and demonstrates expert-level understanding of both the hardware protocol and safe software practices for hardware control tools.
 
-**Overall Rating: A- (would be A with `CARD_NAME_OFFSET` confirmed)**
+**Overall Rating: A**

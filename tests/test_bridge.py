@@ -151,8 +151,7 @@ class Unit:
         self.contents = contents
         self.answer = answer
         self.mode = mode
-        #: The decoded System Setup payload the double answers with. Long
-        #: enough for the card-name field at the constants' current offset.
+        #: The decoded System Setup payload the double answers with.
         self.system_setup = bytearray(64)
         #: The 0x62 message the double answers a multi request with, and
         #: replaces when a multi write is sent (so the read-back sees it).
@@ -289,8 +288,6 @@ class Unit:
     def _system_setup_request(self, data):
         if self.mode == "read_error":
             return m.frame(m.Function.WRITE_ERROR, channel=0)
-        if self.mode == "short_setup":
-            return m.frame(m.Function.SYSTEM_SETUP_DUMP, [0, 0], channel=0)
         return m.frame(
             m.Function.SYSTEM_SETUP_DUMP,
             list(m.to_nibbles(bytes(self.system_setup))),
@@ -694,61 +691,32 @@ class TestTheDrain:
         assert unit.midi_in.queue == [], "the stale reply is gone"
 
 
-class TestReadCardName:
-    """The System Setup dump is the only place a card's name is exposed.
+class TestReadSystemSetup:
+    """The System Setup dump (``0x51``) is the documented ``system`` structure.
 
-    Its offset is the one wire fact docs/HCARD.md leaves open, so these
-    tests pin the contract around it: a name at the constants, nothing at
-    all when the field is empty, and ``None`` rather than an exception when
-    the unit stays silent. A refusal is still a refusal.
+    It carries no card name -- measured on a bench SR, 2026-11-12 -- so
+    these tests pin only the read contract: the bytes come back, silence is
+    ``None`` rather than a timeout error, and a refusal is still a refusal.
     """
 
-    def test_a_blank_field_is_none_not_an_empty_string(self):
-        assert Unit().bridge.read_card_name(timeout=0.1) is None
-
-    def test_the_name_at_the_constants_comes_back(self):
-        unit = Unit()
-        name = b"WPC-13 Perf 3"
-        unit.system_setup[: len(name)] = name
-        assert unit.bridge.read_card_name(timeout=0.1) == "WPC-13 Perf 3"
-
-    def test_a_garbage_field_is_none_not_a_plausible_name(self):
-        """The offset is unconfirmed, so binary in the field is "unknown".
-
-        The first sixteen decoded bytes used to be returned whatever they
-        were; a control-byte field is now no usable name rather than a
-        name that files a capture under the wrong bank.
-        """
-        unit = Unit()
-        unit.system_setup[:16] = bytes(range(1, 17))
-        assert unit.bridge.read_card_name(timeout=0.1) is None
-
-    def test_a_name_shorter_than_four_characters_is_none(self):
-        unit = Unit()
-        unit.system_setup[:2] = b"AB"
-        assert unit.bridge.read_card_name(timeout=0.1) is None
-
-    def test_the_request_is_the_system_setup_one(self):
-        unit = Unit()
-        unit.bridge.read_card_name(timeout=0.1)
-        assert unit.midi_out.sent[-1][4] == m.Function.SYSTEM_SETUP_REQUEST
-
-    def test_silence_is_none_rather_than_a_timeout_error(self):
-        assert Unit(answer=False).bridge.read_card_name(timeout=0.01) is None
-
-    def test_a_refusal_is_still_raised(self):
-        with pytest.raises(DeviceRefused):
-            Unit(mode="read_error").bridge.read_card_name(timeout=0.1)
-
-    def test_a_dump_too_short_for_the_field_is_none(self):
-        assert Unit(mode="short_setup").bridge.read_card_name(timeout=0.1) is None
-
-    def test_the_raw_setup_dump_is_available_for_the_probe(self):
+    def test_the_raw_setup_dump_is_available(self):
         unit = Unit()
         unit.system_setup[0:4] = b"ABCD"
         data = unit.bridge.read_system_setup(timeout=0.1)
         assert data is not None
         assert data[:4] == b"ABCD"
+
+    def test_the_request_is_the_system_setup_one(self):
+        unit = Unit()
+        unit.bridge.read_system_setup(timeout=0.1)
+        assert unit.midi_out.sent[-1][4] == m.Function.SYSTEM_SETUP_REQUEST
+
+    def test_silence_is_none_rather_than_a_timeout_error(self):
+        assert Unit(answer=False).bridge.read_system_setup(timeout=0.01) is None
+
+    def test_a_refusal_is_still_raised(self):
+        with pytest.raises(DeviceRefused):
+            Unit(mode="read_error").bridge.read_system_setup(timeout=0.1)
 
 
 class TestReadBankTimeout:

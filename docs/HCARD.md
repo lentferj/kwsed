@@ -13,7 +13,7 @@ card itself. Sibling tools model *directly addressable* memory (p2ked's
 `roms.py` handles not-installed ROM cards that are each selectable over Bank
 Select). kwsed's differentiator is the harder case: a **multiplexer the synth
 cannot address at all**, where "which bank is active" must be recovered from
-a name field rather than a wire byte.
+the bank's contents rather than a wire byte.
 
 The goal: make those 40 banks — the preloaded Korg ROM cards, factory
 preloads and the user banks — **available in the preset browser**, browsable
@@ -28,8 +28,9 @@ by name, even though only one is physically present to the synth at a time.
   the HCard (touch pads / ▲▼). No remote bank-switch is documented.
 - **Dynamic Update**: selecting a bank on the HCard rewrites the Wavestation's
   *card name* to that bank's name. Renaming on the WS (Global › UTIL › NAME)
-  echoes the other way. The card name is therefore the only identity signal
-  the synth exposes for "which bank is active".
+  echoes the other way. The name is visible on the panel but **not readable
+  over MIDI**: the `0x51` dump carries no name (measured 2026-11-12, §7), so
+  identity comes from content, not from this name.
 - Banks 16–18 require Korg **WSC-01/02/03** PCM cards; a patch referencing a
   missing PCM wave plays the wrong sound silently.
 - The HCard has **per-bank write protection**, invisible to the synth.
@@ -39,10 +40,10 @@ by name, even though only one is physically present to the synth at a time.
 1. **Static table** `kws/cards.py` — the 40 banks, transcribed from the manual
    (number, default name, category, PCM dependencies). Mirrors `p2k/roms.py`.
 2. **Per-bank archive** `cards.json` beside the favourites DB — for each bank:
-   card name, performance names, patch names, captured-at. Mirrors the
+   local label, performance names, patch names, captured-at. Mirrors the
    livenames sidecar.
-3. **Identity resolution** at read time — map the live card (name, first
-   performance/patch names) to a bank number.
+3. **Identity resolution** at read time — map the live card (content digest,
+   first performance/patch names) to a bank number.
 
 The physical `CARD` slot stays `CARD` for writes and backups. The 40 banks
 are a **browse/archive overlay** over it, not a new wire address space.
@@ -53,11 +54,12 @@ favourites/livenames is **superseded**.
 
 ## 4. Decisions
 
-- **3-A — read the card name from the System Setup dump (`0x51`).** Send
-  `SYSTEM_SETUP_REQUEST (0x0E)`, parse the card-name field. The exact
-  offset/length is the one open wire fact; see §7. Fallbacks, in order:
-  fingerprint (`performance[0].name` + `patch[0].name`) when the name is
-  absent/ambiguous, and a manual "I'm on bank N" override as a last resort.
+- **3-A — read the card name from the System Setup dump (`0x51`).
+  Superseded 2026-11-12: there is no name in that dump.** The probe found
+  the documented 34-field `system` structure, so the read was removed
+  (§7). Identity is the content digest first, then the fingerprint
+  (`performance[0].name` + `patch[0].name`), and a manual "I'm on bank N"
+  override as a last resort.
 - **4-A1 — expand the Card entry into a sub-list.** The left pane's `Card`
   row becomes a group of 40 sub-banks, each 50 performances + 35 patches.
   Unread banks show the table's default name greyed as "not captured"; read
@@ -92,9 +94,10 @@ favourites/livenames is **superseded**.
 ```
 
 Atomic write, corrupt-file tolerance and a merge (not replace) save, exactly
-as `vinsynlib.livenames` does. Captured names are keyed by slot number; the
-card-name field is separate from the slot names. `digest` is the SHA-256 hex
-hash of the bank's decoded performance and patch records
+as `vinsynlib.livenames` does. Captured names are keyed by slot number.
+`label` is the user's local name; `name` would hold a name the card
+reported, and is empty because the card cannot report one. `digest` is the
+SHA-256 hex hash of the bank's decoded performance and patch records
 (`cards.content_digest`); `verified` says the capture was **confirmed by
 content evidence** — a digest that matched — rather than only asserted by the
 bank row it was captured under.
@@ -113,8 +116,8 @@ resolved from content, strongest evidence first.
    (`resolve_by_digest`). One match identifies the bank outright; the digest
    never needed the name we cannot read.
 2. **Exact card-name match** against the static table or a captured bank's
-   stored name — kept for when a name is ever supplied (Dynamic Update
-   echoing a bank's name into the WS, or a user label).
+   stored name — kept for a caller that supplies a name; the app passes
+   `None` because the card cannot report one.
 3. **First-slot-name fingerprint** — `performances[0]`/`patches[0]` against
    previously captured banks; also narrows a name that matched more than one
    bank.
@@ -154,13 +157,15 @@ digest.
 
 ## 7. Hardware confirmation (read-only)
 
-The card-name field in the `0x51` dump is the only unknown. A read-only probe
-(`tools/probe_card_name.py`) dumps the System Setup bytes so the offset can be
-confirmed against the real unit. Until confirmed, `read_card_name()` returns
-`None` gracefully and the constants are marked `# CONFIRM AGAINST HARDWARE`.
-Read verification is permitted this session; **no writes to any slot,
-including the card** — write-path verification is deferred to a separate
-session.
+The card name was long assumed to sit at some offset in the `0x51` dump; only
+the offset was thought unknown. A read-only probe was run on a bench SR
+(2026-11-12, global channel 5): the dump is the documented 34-field `system`
+structure — small parameter values, not ASCII — and sending a Parameter
+Change to set the card name did not change it. **There is no name in the
+`0x51` dump.** `read_card_name()` and its offset constants were removed;
+identity is the content digest. Read verification is permitted this session;
+**no writes to any slot, including the card** — write-path verification is
+deferred to a separate session.
 
 ## 8. Write path (unchanged fence, deferred verification)
 
@@ -179,5 +184,5 @@ sentinel concept.
 ## 10. Phasing
 
 - **P0** — table + archive + read-one-bank capture (the useful core).
-- **P1** — card-name read + resolution + card sweep (identity mechanism).
+- **P1** — content-digest resolution + card sweep (identity mechanism).
 - **P2** — PCM awareness, `kwscli cards` verb, send-to-card hint.

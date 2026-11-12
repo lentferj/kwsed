@@ -387,13 +387,14 @@ def test_demo_read_raw_waveseq():
 @pytest.mark.asyncio
 async def test_capture_caches_bankstore(tmp_path):
     app = KwsedApp(
-        DemoDevice(card_name='Korg WPC-13 "Performance 3"'),
+        DemoDevice(),
         catalog=cat.Catalog(),
         cards_path=str(tmp_path / "cards.json"),
         bankstore_dir=str(tmp_path / "banks"),
     )
     async with app.run_test() as pilot:
         await pilot.pause()
+        app._fill((banks.bank("CARD").number, banks.Kind.PERFORMANCE), 7)
         app.action_capture_card()
         for _ in range(30):
             await pilot.pause()
