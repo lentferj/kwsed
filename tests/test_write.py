@@ -53,6 +53,24 @@ SIZE_FOR_DUMP = {
     m.Function.ALL_WAVESEQ_DUMP: r.WAVESEQ_BANK_SIZE,
 }
 
+#: The three kinds a bank move carries, with the dump each travels as.
+BUNDLE_KINDS = (
+    ("waveseq", m.Function.ALL_WAVESEQ_DUMP),
+    ("patches", m.Function.ALL_PATCH_DUMP),
+    ("performances", m.Function.ALL_PERFORMANCE_DUMP),
+)
+
+#: Every function a parameter change can travel as: 0x41 below parameter
+#: 380, 0x42 for 380-406 and 0x43 above it. The BANK MOVE's four use 0x41
+#: for 213, 346 and 379 and 0x43 for 472.
+PARAMETER_CHANGE_FUNCTIONS = frozenset(
+    {
+        m.Function.PARAMETER_CHANGE,
+        m.Function.PARAMETER_CHANGE_EXPANDED,
+        m.Function.PARAMETER_CHANGE_SR,
+    }
+)
+
 
 class FakeIn(MidiInPort):
     def __init__(self) -> None:
@@ -95,6 +113,7 @@ class Unit:
         *,
         answer: bool = True,
         refuse: Iterable[int] = (),
+        move_clears_source: bool = False,
     ) -> None:
         self.midi_in = FakeIn()
         self.midi_out = FakeOut()
@@ -105,6 +124,13 @@ class Unit:
         self.answer = answer
         #: Dump functions refused with a Data Load Error, as the unit does.
         self.refuse = frozenset(refuse)
+        #: Whether the unit's own BANK MOVE clears the source, which the
+        #: bench unit does not -- a switch for "some other OS does".
+        self.move_clears_source = move_clears_source
+        #: The BANK MOVE page's fields, as the parameter changes arrive.
+        self.move_source: Optional[int] = None
+        self.move_type: Optional[int] = None
+        self.move_destination: Optional[int] = None
         self.bridge = WavestationBridge(self.midi_in, self.midi_out, channel=0)
         # Replacing a method on the instance is the point of this double.
         self.midi_out.send_message = self._sent  # type: ignore[method-assign]
@@ -169,6 +195,52 @@ class Unit:
             self.dumps[(packet.bank, function)] = bytes(
                 packet.data()[: SIZE_FOR_DUMP[function]]
             )
+        elif function in PARAMETER_CHANGE_FUNCTIONS:
+            self._parameter_change(raw)
+
+    def _parameter_change(self, raw: bytes) -> None:
+        """The unit's BANK MOVE page, driven by parameter changes.
+
+        Only the BANK MOVE's four parameters are acted on; other parameter
+        changes (MIDI mode, say) are ignored.
+        """
+        packet = m.parse(raw)
+        if packet is None or len(packet.payload) < 4:
+            return
+        parameter = packet.payload[0] | (packet.payload[1] << 7)
+        try:
+            value = int(bytes(packet.payload[2:-1]).decode("ascii"))
+        except ValueError:
+            return
+        if parameter == m.BANK_MOVE_SOURCE_BANK:
+            self.move_source = value
+        elif parameter == m.BANK_MOVE_TYPE:
+            self.move_type = value
+        elif parameter == m.BANK_MOVE_DEST_BANK:
+            self.move_destination = value
+        elif parameter == m.EXECUTE_BANK_MOVE:
+            self._perform_move()
+
+    def _perform_move(self) -> None:
+        """Move all three kinds, remapping the performances as the unit does."""
+        if self.move_source is None or self.move_destination is None:
+            return
+        try:
+            source = banks.by_sysex(self.move_source)
+            destination = banks.by_sysex(self.move_destination)
+        except LookupError:
+            return
+        if source.number == destination.number:
+            return
+        for kind, function in BUNDLE_KINDS:
+            data = self._stored(source.sysex, function)
+            if kind == "performances":
+                data = r.remap_performance_banks(
+                    data, source.number, destination.number
+                )
+            self.dumps[(destination.sysex, function)] = data
+            if self.move_clears_source:
+                self.dumps[(source.sysex, function)] = bytes(SIZE_FOR_DUMP[function])
 
 
 @pytest.fixture()
@@ -1091,6 +1163,168 @@ class TestBankCopy:
 
         assert result["verified"] is False
         assert result["mismatch"]
+
+
+class TestBankCopyViaDevice:
+    """``copy_bank(method="device")``: the unit's move inside kwsed's fence."""
+
+    @pytest.fixture(autouse=True)
+    def _no_settle(self, monkeypatch):
+        """The bench settle is a second per move; the fake needs none."""
+        monkeypatch.setattr("kws.bridge.DEVICE_MOVE_SETTLE", 0.0)
+
+    def _load(self, unit: Unit, *, owner: str = "RAM1") -> Tuple[bytes, bytes, bytes]:
+        return TestBankCopy._load_source(unit, owner=owner)
+
+    def test_ram1_to_card_is_the_units_move_remapped_and_verified(self, tmp_path):
+        unit = Unit()
+        patch_bank, perf_bank, waveseq = self._load(unit)
+
+        result = unit.bridge.copy_bank(
+            "RAM1", "CARD", backup_dir=str(tmp_path), method="device"
+        )
+
+        assert result["method"] == "device"
+        assert result["verified"] is True
+        assert result["mismatch"] is None
+        assert result["source_restored"] is False
+        written = result["written"]
+        assert written["patches"] == patch_bank
+        assert written["waveseq"] == waveseq
+        parts = r.performance_parts(written["performances"])
+        # the self-reference now names the Card; ROM 4 stayed ROM 4
+        assert (parts[0].bank, parts[0].patch) == (11, 4)
+        assert (parts[1].bank, parts[1].patch) == (3, 5)
+        # the destination holds the remapped copy
+        assert unit.dumps[(CARD_SYSEX, m.Function.ALL_PATCH_DUMP)] == patch_bank
+        assert unit.dumps[(CARD_SYSEX, m.Function.ALL_WAVESEQ_DUMP)] == waveseq
+        assert (
+            unit.dumps[(CARD_SYSEX, m.Function.ALL_PERFORMANCE_DUMP)]
+            == written["performances"]
+        )
+        # the source is untouched
+        assert unit.dumps[(0, m.Function.ALL_PERFORMANCE_DUMP)] == perf_bank
+        # one envelope, holding the destination's old content
+        saved = backup.load(result["backup"])
+        assert set(saved.blocks) == {"waveseq", "patches", "performances"}
+        assert saved.blocks["patches"] == m.frame_bulk(
+            m.Function.ALL_PATCH_DUMP, CARD_SYSEX, PATCH_BANK, channel=0
+        )
+        assert len(backup.list_backups(str(tmp_path))) == 1
+        # the four documented changes, with wire bank bytes, not positions
+        assert (unit.move_source, unit.move_type, unit.move_destination) == (
+            0,
+            m.BANK_MOVE_TYPES["all"],
+            CARD_SYSEX,
+        )
+
+    def test_card_to_ram1_remaps_the_other_way(self, tmp_path):
+        unit = Unit()
+        self._load(unit, owner="CARD")
+
+        result = unit.bridge.copy_bank(
+            "CARD", "RAM1", backup_dir=str(tmp_path), method="device"
+        )
+
+        assert result["verified"] is True
+        stored = unit.dumps[(0, m.Function.ALL_PERFORMANCE_DUMP)]
+        parts = r.performance_parts(stored)
+        assert (parts[0].bank, parts[0].patch) == (0, 4)
+        assert (parts[1].bank, parts[1].patch) == (3, 5)
+
+    def test_a_silent_unit_starts_no_move(self, tmp_path):
+        unit = Unit(answer=False)
+        self._load(unit)
+
+        with pytest.raises(DeviceError, match="nothing was sent"):
+            unit.bridge.copy_bank(
+                "RAM1", "CARD", backup_dir=str(tmp_path), method="device", timeout=0.1
+            )
+        assert unit.dump_frames_sent() == []
+        assert unit.sent_by_function(m.Function.PARAMETER_CHANGE_SR) == []
+        assert unit.sent_by_function(m.Function.PARAMETER_CHANGE) == []
+
+    def test_a_rom_destination_is_refused_before_traffic(self, tmp_path):
+        unit = Unit()
+
+        with pytest.raises(DeviceError, match="ROM 4 is ROM"):
+            unit.bridge.copy_bank(
+                "RAM1", "ROM4", backup_dir=str(tmp_path), method="device"
+            )
+        assert unit.midi_out.sent == []
+
+    def test_a_unit_that_clears_the_source_gets_it_restored(self, tmp_path):
+        unit = Unit(move_clears_source=True)
+        patch_bank, perf_bank, waveseq = self._load(unit)
+
+        result = unit.bridge.copy_bank(
+            "RAM1", "CARD", backup_dir=str(tmp_path), method="device"
+        )
+
+        assert result["verified"] is True
+        assert result["source_restored"] is True
+        assert unit.dumps[(0, m.Function.ALL_PERFORMANCE_DUMP)] == perf_bank
+        assert unit.dumps[(0, m.Function.ALL_PATCH_DUMP)] == patch_bank
+        assert unit.dumps[(0, m.Function.ALL_WAVESEQ_DUMP)] == waveseq
+
+    def test_a_read_back_that_does_not_match_is_reported(self, tmp_path):
+        unit = Unit()
+        self._load(unit)
+        original = unit._sent
+
+        def lying(data):
+            original(data)
+            packet = m.parse(bytes(data))
+            if (
+                packet is not None
+                and packet.function == m.Function.PARAMETER_CHANGE_SR
+                and len(packet.payload) >= 3
+                and (packet.payload[0] | (packet.payload[1] << 7))
+                == m.EXECUTE_BANK_MOVE
+            ):
+                stored = bytearray(
+                    unit.dumps[(CARD_SYSEX, m.Function.ALL_PERFORMANCE_DUMP)]
+                )
+                stored[0] ^= 0xFF
+                unit.dumps[(CARD_SYSEX, m.Function.ALL_PERFORMANCE_DUMP)] = bytes(
+                    stored
+                )
+
+        unit.midi_out.send_message = lying  # type: ignore[method-assign]
+
+        result = unit.bridge.copy_bank(
+            "RAM1", "CARD", backup_dir=str(tmp_path), method="device"
+        )
+
+        assert result["verified"] is False
+        assert "differs" in result["mismatch"]
+        # written says what is actually there, not what was asked for
+        after = unit.dumps[(CARD_SYSEX, m.Function.ALL_PERFORMANCE_DUMP)]
+        assert result["written"]["performances"] == after
+        assert after[0] == ord("S") ^ 0xFF
+
+    def test_verify_false_skips_the_read_back_but_still_sends_the_move(self, tmp_path):
+        unit = Unit()
+        self._load(unit)
+
+        result = unit.bridge.copy_bank(
+            "RAM1",
+            "CARD",
+            backup_dir=str(tmp_path),
+            method="device",
+            verify=False,
+        )
+
+        assert result["verified"] is None
+        assert result["method"] == "device"
+        assert len(unit.sent_by_function(m.Function.PARAMETER_CHANGE)) == 3
+        assert len(unit.sent_by_function(m.Function.PARAMETER_CHANGE_SR)) == 1
+
+    def test_an_unknown_method_is_refused(self, tmp_path):
+        with pytest.raises(ValueError, match="no copy method"):
+            Unit().bridge.copy_bank(
+                "RAM1", "CARD", backup_dir=str(tmp_path), method="telepathy"
+            )
 
 
 def test_a_demo_write_multi_returns_a_multi_envelope(tmp_path):

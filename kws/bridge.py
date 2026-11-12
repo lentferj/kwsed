@@ -96,6 +96,7 @@ __all__ = [
     "MIDI_MODE_POLY",
     "MIDI_MODE_MULTI",
     "MIDI_MODE_MONO",
+    "DEVICE_MOVE_SETTLE",
     "MidiUnavailable",
     "DeviceError",
     "DeviceRefused",
@@ -134,6 +135,11 @@ MIDI_MODE_OMNI = 0
 MIDI_MODE_POLY = 1
 MIDI_MODE_MULTI = 2
 MIDI_MODE_MONO = 3
+
+#: How long to wait after the unit's own BANK MOVE executes. Measured on the
+#: bench: one second was enough, and a bank move is internal -- it does not
+#: move ~30 kB over the wire the way a dump does.
+DEVICE_MOVE_SETTLE = 1.0
 
 #: Where the card-name field sits in the **decoded** System Setup dump
 #: (function ``0x51``), and how long it is.
@@ -1817,6 +1823,77 @@ class WavestationBridge:
         result["mismatch"] = mismatch
         return result
 
+    def _read_bank_kinds(
+        self,
+        entry: banks.Bank,
+        *,
+        timeout: Optional[float],
+        why: str,
+    ) -> Dict[str, bytes]:
+        """One bank's three kinds, decoded and length-checked.
+
+        Used wherever a copy reads a bank it must not damage: a failed read
+        raises :class:`DeviceError` saying nothing was sent, and ``why``
+        carries the sentence that names the consequence.
+        """
+        decoded: Dict[str, bytes] = {}
+        for kind, function in _BUNDLE_FUNCTIONS.items():
+            try:
+                raw = self.read_raw(entry.sysex, function, timeout=timeout)
+            except Exception as exc:
+                raise DeviceError(
+                    f"could not read {entry.label} {kind}, so nothing was sent "
+                    f"({exc}). {why}"
+                ) from exc
+            packet = m.parse(raw)
+            if packet is None:
+                raise DeviceError(
+                    f"{entry.label} {kind} read back is not a valid frame"
+                )
+            data = packet.data()
+            expected = _BUNDLE_SIZES[kind]
+            if len(data) != expected:
+                raise DeviceError(
+                    f"{entry.label} {kind} decoded to {len(data)} bytes; a whole "
+                    f"bank is {expected}"
+                )
+            decoded[kind] = bytes(data)
+        return decoded
+
+    def _backup_bank_bundle(
+        self,
+        entry: banks.Bank,
+        *,
+        backup_dir: str,
+        timeout: Optional[float],
+    ) -> str:
+        """One undo envelope of a bank's three kinds, read before anything moves.
+
+        Every kind is read as the frame that arrived, so the envelope is what
+        :meth:`write_bank_bundle` would have saved. If any read fails, nothing
+        has been sent and the caller is told so.
+        """
+        blocks: Dict[str, bytes] = {}
+        for kind, function in _BUNDLE_FUNCTIONS.items():
+            try:
+                raw = self.read_raw(entry.sysex, function, timeout=timeout)
+            except Exception as exc:
+                raise DeviceError(
+                    f"could not read {entry.label} {kind} before writing it, "
+                    f"so nothing was sent ({exc}). kwsed does not overwrite a "
+                    f"bank it has not backed up."
+                ) from exc
+            blocks[kind] = bytes(raw)
+        return backup.save(
+            backup_dir,
+            kind="bank-bundle",
+            slot=entry.label,
+            name=entry.label,
+            device_id=str(self.channel),
+            source="kwsed",
+            blocks=blocks,
+        )
+
     def copy_bank(
         self,
         source: int | str,
@@ -1825,23 +1902,9 @@ class WavestationBridge:
         backup_dir: str,
         verify: bool = True,
         timeout: Optional[float] = None,
+        method: str = "fence",
     ) -> Dict[str, Any]:
         """Copy one whole bank into another, kinds together and undoable.
-
-        This is the unit's MIDI/Global BANK MOVE, done here as a true copy
-        and fenced: the destination's previous contents are backed up into
-        one envelope before anything is sent, and every written kind is read
-        back and compared. The panel function offers neither.
-
-        The panel operation *is* expressible over MIDI -- four documented
-        parameter changes (213 source bank, 346 type, 379 destination bank,
-        472 ``EXECUTE_BANK_MOVE``), measured on the bench and reproduced by
-        ``tools/probe_bank_copy.py move`` -- so this method is not used
-        because a trigger is missing. It is used because the panel's move
-        gives no backup and no read-back, and because on the bench its
-        "MOVE BANK DATA?" prompt left the source bank byte-identical (it
-        behaved as a copy). kwsed's own read/remap/write does not depend on
-        that behaviour.
 
         All three kinds are copied. A partial copy (performances without the
         wave-sequence pool they name) silently changes how the destination
@@ -1855,7 +1918,32 @@ class WavestationBridge:
         Card or a third bank are left alone -- see
         :func:`kws.records.remap_performance_banks`. The panel does the same,
         measured in both the RAM-to-RAM and Card-to-RAM directions.
+
+        Two methods perform it:
+
+        ``fence`` (the default) reads the source in all three kinds, remaps
+        the performances, and writes the destination once through
+        :meth:`write_bank_bundle`: one destination backup envelope before
+        anything is sent, wave sequences first and performances last, then a
+        per-kind read-back. The source is untouched by design, because kwsed
+        only ever reads it.
+
+        ``device`` sends the unit's own MIDI/Global BANK MOVE -- four
+        documented parameter changes (213 source bank, 346 kind, 379
+        destination bank, 472 ``EXECUTE_BANK_MOVE``) measured on the bench and
+        reproduced by ``tools/probe_bank_copy.py move`` -- wrapped in the
+        same fence: the destination is backed up first, all three kinds are
+        read back and compared, and the source is restored through the fence
+        if the unit cleared it. The panel function itself offers no backup
+        and no verify.
+
+        ``fence`` remains the default. The device path depends on the unit's
+        own behaviour (its remap, its timing, and the measured but not
+        promised fact that it leaves the source in place), while the fence
+        path depends only on reads and writes kwsed controls.
         """
+        if method not in ("fence", "device"):
+            raise ValueError(f"no copy method {method!r}; have fence, device")
         src = banks.bank(source)
         dst = banks.bank(destination)
         if not src.writable:
@@ -1864,39 +1952,39 @@ class WavestationBridge:
                 f"that can are: "
                 f"{', '.join(b.label for b in banks.writable_banks())}."
             )
+        if not dst.writable:
+            raise DeviceError(
+                f"{dst.label} is ROM and cannot be copied to. The banks "
+                f"that can are: "
+                f"{', '.join(b.label for b in banks.writable_banks())}."
+            )
         if src.number == dst.number:
             raise DeviceError(f"copying {src.label} onto itself copies nothing")
 
-        decoded: Dict[str, bytes] = {}
-        for kind, function in _BUNDLE_FUNCTIONS.items():
-            try:
-                raw = self.read_raw(src.sysex, function, timeout=timeout)
-            except Exception as exc:
-                raise DeviceError(
-                    f"could not read {src.label} {kind}, so nothing was sent "
-                    f"({exc}). kwsed does not start a copy it cannot finish."
-                ) from exc
-            packet = m.parse(raw)
-            if packet is None:
-                raise DeviceError(f"{src.label} {kind} read back is not a valid frame")
-            data = packet.data()
-            expected = _BUNDLE_SIZES[kind]
-            if len(data) != expected:
-                raise DeviceError(
-                    f"{src.label} {kind} decoded to {len(data)} bytes; a whole "
-                    f"bank is {expected}"
-                )
-            decoded[kind] = bytes(data)
+        if method == "device":
+            return self._copy_bank_via_device(
+                src,
+                dst,
+                backup_dir=backup_dir,
+                verify=verify,
+                timeout=timeout,
+            )
 
-        decoded["performances"] = records.remap_performance_banks(
-            decoded["performances"], src.number, dst.number
+        source_before = self._read_bank_kinds(
+            src,
+            timeout=timeout,
+            why="kwsed does not start a copy it cannot finish.",
+        )
+        expected = dict(source_before)
+        expected["performances"] = records.remap_performance_banks(
+            source_before["performances"], src.number, dst.number
         )
 
         result = self.write_bank_bundle(
             dst.number,
-            performances=decoded["performances"],
-            patches=decoded["patches"],
-            waveseq=decoded["waveseq"],
+            performances=expected["performances"],
+            patches=expected["patches"],
+            waveseq=expected["waveseq"],
             backup_dir=backup_dir,
             verify=verify,
             timeout=timeout,
@@ -1904,7 +1992,139 @@ class WavestationBridge:
         # The exact post-copy state of the destination, per kind, decoded --
         # the caller can update its caches and archives from this without a
         # re-read. Present only on success: a failed copy raises instead.
-        result["written"] = dict(decoded)
+        result["written"] = dict(expected)
+        return result
+
+    def _copy_bank_via_device(
+        self,
+        src: banks.Bank,
+        dst: banks.Bank,
+        *,
+        backup_dir: str,
+        verify: bool,
+        timeout: Optional[float],
+    ) -> Dict[str, Any]:
+        """The unit's own BANK MOVE, with kwsed's fence around it.
+
+        The order is what makes this undoable and checkable: read the source,
+        back the destination up, send the four changes, read the destination
+        back, and finally check that the unit left the source alone -- and
+        restore it through the ordinary fence if it did not.
+        """
+        source_before = self._read_bank_kinds(
+            src,
+            timeout=timeout,
+            why="kwsed does not start a copy it cannot finish.",
+        )
+        expected = dict(source_before)
+        expected["performances"] = records.remap_performance_banks(
+            source_before["performances"], src.number, dst.number
+        )
+
+        saved = self._backup_bank_bundle(dst, backup_dir=backup_dir, timeout=timeout)
+
+        # 80 ms between the four changes is what the bench replay used; the
+        # settle after them is for the unit's internal move, not a dump.
+        self._drain()
+        for frame in m.bank_move(
+            src.sysex, dst.sysex, kind="all", channel=self.channel
+        ):
+            self._send(frame)
+            time.sleep(0.08)
+        time.sleep(DEVICE_MOVE_SETTLE)
+
+        result: Dict[str, Any] = {
+            "bank": dst.label,
+            "kind": "bank-bundle",
+            "kinds": list(_BUNDLE_FUNCTIONS),
+            "backup": saved,
+            "verified": None,
+            "mismatch": None,
+            "unchanged": [],
+            "method": "device",
+            "source_restored": False,
+            "written": expected,
+        }
+        if not verify:
+            return result
+
+        mismatch: Optional[str] = None
+        after: Dict[str, bytes] = {}
+        try:
+            for kind, function in _BUNDLE_FUNCTIONS.items():
+                raw = self.read_raw(dst.sysex, function, timeout=timeout)
+                packet = m.parse(raw)
+                if packet is None:
+                    raise ValueError(
+                        f"{dst.label} {kind} read back is not a valid frame"
+                    )
+                data = bytes(packet.data())
+                # The fence path compares raw frames; here the payloads are
+                # compared, and a wave-sequence dump may carry more than the
+                # bank the model uses.
+                if kind == "waveseq":
+                    data = data[: records.WAVESEQ_BANK_SIZE]
+                after[kind] = data
+        except Exception as exc:
+            mismatch = (
+                f"the move was sent but {dst.label} could not be read back in "
+                f"all three kinds to check it ({exc}). Whether it took is "
+                f"unknown."
+            )
+        else:
+            for kind in _BUNDLE_FUNCTIONS:
+                if after[kind] != expected[kind]:
+                    mismatch = _first_difference(expected[kind], after[kind])
+                    break
+            if mismatch is not None:
+                # What is actually there, not what was asked for.
+                result["written"] = after
+
+        # The unit leaves the source in place on the bench. That is measured,
+        # not promised, so it is checked and repaired through the fence.
+        try:
+            source_after = self._read_bank_kinds(
+                src,
+                timeout=timeout,
+                why="kwsed does not leave a copy's source unchecked.",
+            )
+        except DeviceError as exc:
+            source_after = None
+            if mismatch is None:
+                mismatch = (
+                    f"the move was sent but {src.label} could not be read back "
+                    f"to check that the unit left it alone ({exc})"
+                )
+        if source_after is not None and any(
+            source_after[kind] != source_before[kind] for kind in _BUNDLE_FUNCTIONS
+        ):
+            try:
+                restored = self.write_bank_bundle(
+                    src.number,
+                    performances=source_before["performances"],
+                    patches=source_before["patches"],
+                    waveseq=source_before["waveseq"],
+                    backup_dir=backup_dir,
+                    verify=True,
+                    timeout=timeout,
+                )
+            except Exception as exc:
+                result["source_restored"] = False
+                if mismatch is None:
+                    mismatch = (
+                        f"the unit changed the source bank and restoring it "
+                        f"failed ({exc})"
+                    )
+            else:
+                result["source_restored"] = restored.get("verified") is True
+                if not result["source_restored"] and mismatch is None:
+                    mismatch = (
+                        "the unit changed the source bank and restoring it did "
+                        "not verify"
+                    )
+
+        result["verified"] = mismatch is None
+        result["mismatch"] = mismatch
         return result
 
     def read_raw(
