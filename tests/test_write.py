@@ -1002,6 +1002,14 @@ class TestBankCopy:
         # the self-reference now names the Card; ROM 4 stayed ROM 4
         assert (parts[0].bank, parts[0].patch) == (11, 4)
         assert (parts[1].bank, parts[1].patch) == (3, 5)
+        # the result carries what was written, decoded, per kind
+        written = result["written"]
+        assert set(written) == {"waveseq", "patches", "performances"}
+        assert written["patches"] == patch_bank
+        assert written["waveseq"] == waveseq
+        written_parts = r.performance_parts(written["performances"])
+        assert (written_parts[0].bank, written_parts[0].patch) == (11, 4)
+        assert written["performances"] == stored
 
     def test_card_to_ram1_remaps_the_other_way(self, tmp_path):
         unit = Unit()

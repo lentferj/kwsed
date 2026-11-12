@@ -1883,7 +1883,7 @@ class WavestationBridge:
             decoded["performances"], src.number, dst.number
         )
 
-        return self.write_bank_bundle(
+        result = self.write_bank_bundle(
             dst.number,
             performances=decoded["performances"],
             patches=decoded["patches"],
@@ -1892,6 +1892,11 @@ class WavestationBridge:
             verify=verify,
             timeout=timeout,
         )
+        # The exact post-copy state of the destination, per kind, decoded --
+        # the caller can update its caches and archives from this without a
+        # re-read. Present only on success: a failed copy raises instead.
+        result["written"] = dict(decoded)
+        return result
 
     def read_raw(
         self, bank_number: int, function: int, *, timeout: Optional[float] = None
