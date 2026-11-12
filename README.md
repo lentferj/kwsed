@@ -74,6 +74,11 @@ unit or emulator **before** connecting irreplaceable equipment.
   patches privately, packs them with no gap, and rewrites every part to point
   at the new slots. The patch, sequence and step budgets are checked before
   anything is written.
+- **Copies whole banks, safely.** `B` in the browser, or
+  `kwscli copy-bank --yes SRC DST`, copies wave sequences, patches and
+  performances together from RAM to Card, Card to RAM or RAM to RAM. It
+  rewrites the performances' references to the source bank so the copy is
+  self-contained, backs up the destination first and verifies every kind.
 - **Shows what a sound depends on.** `d`, the `D` pane and `kwscli deps` walk
   Performance → Patch → WaveSeq, with structural deduplication.
 - **Builds favourites banks offline.** `tools/build_bank.py` writes `.syx`
@@ -240,6 +245,7 @@ kwsed --port "U6MIDI Pro:U6MIDI Pro MIDI 1 44:0" --device-channel 5
 | `d` / `D` | show the selection's dependencies / show-hide the dependency pane — silent, remembered |
 | `p` | show/hide the patch rows in the bank list — remembered (they can be inspected, not selected) |
 | `y` | open the unified copy session for this performance, prefilled and ready for the target/slot map |
+| `B` | copy the whole bank under the cursor into another writable bank — all three kinds, backed up and verified |
 | `I` | import/copy: whole bank from a file or unit bank, or select performances from files, RAM, ROM or Card into one target bank |
 | `z` / `w` | undo the last write / toggle the write gate |
 | `C` / `L` / `X` | capture the inserted card / label it / sweep HCard banks — read-only on the unit |
@@ -454,6 +460,7 @@ means the command works from the local archives/cache.
 | `deps BANK [KIND N]` | Performance → Patch → WaveSeq graph | no if cached | no |
 | `import FILE` | file/disk → local bank cache | no | no |
 | `copy-perf ...` | copy performances with dependencies | yes unless `--out` | with `--yes` |
+| `copy-bank SRC DST` | copy a whole bank, all three kinds | yes | with `--yes` |
 | `send FILE --to BANK` | write one bank dump | yes | with `--yes` |
 | `backup list` | list backup envelopes | no | no |
 | `backup save` | read banks into backup envelopes with `--yes` | yes | no |
@@ -469,6 +476,7 @@ kwscli multi --all
 kwscli select RAM1 performance 12
 kwscli deps RAM1 --source RAM1=dumps/ram1-*.syx
 kwscli copy-perf CARD/07:3 CARD/13:11 --to RAM3 --out staged
+kwscli copy-bank RAM1 CARD --yes
 kwscli send staged-perf.syx --to RAM3 --yes
 kwscli backup list
 kwscli backup save --bank RAM1 --yes
@@ -476,10 +484,11 @@ kwscli cards --kind patch --syx hcard07.syx
 ```
 
 `import` writes only the local cache; `copy-perf --out` writes only files.
-The only unit writes are `send`, `copy-perf --yes`, `backup restore --yes`
-and the browser's armed write gate. `backup save` defaults to all four
-writable banks and both kinds; `--bank` and `--kind` narrow it. `cards --kind`
-chooses the names-only `.syx` and `--label` sets its local archive label.
+The only unit writes are `send`, `copy-perf --yes`, `copy-bank --yes`,
+`backup restore --yes` and the browser's armed write gate. `backup save`
+defaults to all four writable banks and both kinds; `--bank` and `--kind`
+narrow it. `cards --kind` chooses the names-only `.syx` and `--label` sets
+its local archive label.
 
 Common options: `--port`, `--recv-port`, `--scan` (re-probe ports, not a
 bank scan), `--device-channel`, `--demo`, `--catalog`, `--live-names`.

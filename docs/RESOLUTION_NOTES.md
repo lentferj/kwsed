@@ -700,3 +700,35 @@ this. Both read the code for what it says. This was found by asking what
 the *data* does -- by counting how many sequences in a real library quote
 another, and then building a bank and reading back what the references
 actually pointed at.
+
+## 15. Bank copy: the panel function stays on the panel
+
+The Reference Guide's **MIDI/Global** menu has a **BANK COPY** page that
+copies bank data -- WAVESEQ, PATCH, PERFORMANCE or ALL -- between banks,
+including to and from the Card. It is a **front-panel function**. There is
+no documented SysEx request that triggers it: the parameter table runs
+0-484 and the only write trigger it documents is `EXECUTE_WRITE` (466),
+which commits the edit buffer and cannot name a source and a destination.
+Speculative bytes that happen to work on one unit are not a protocol.
+
+**Decision: kwsed performs the copy itself.** It reads the source bank in
+all three kinds, remaps the performances' references to the source bank to
+the destination -- both halves of the split `bankNum`/`partMode` field,
+because rewriting only one yields a bank that loads cleanly and plays from
+somewhere else -- and writes once through the existing fence: one
+destination backup envelope, waveseq → patches → performances, per-kind
+read-back verify. The device's own function overwrites the destination
+with no backup and no verification; this is the same operation with both,
+and it uses only documented requests. The panel function remains
+available on the unit.
+
+Multiset pointers (`0x62`) are deliberately not remapped. The device does
+not remap them either, and Multisets are a separate bank of state the
+multi editor owns.
+
+Two things about the panel function remain unconfirmed on hardware:
+whether its **Card → RAM** direction remaps the same way (expected:
+symmetric), and whether its "ALL" sends the three kinds in the same order.
+The second is moot for correctness -- the read-back verify decides whether
+the write landed -- but it is the one place a cosmetic difference could
+show.

@@ -777,3 +777,31 @@ patches, compacted and remapped.
   as import sources: their contained `.syx`/`.mid`/`.bnk` banks are
   imported with disk/file/bank labels. KryoFlux `.7z` flux archives are
   not decoded; the `.img` files in the same download are the decoded form.
+
+## 28. Whole-bank copy — RESOLVED
+
+**Status:** implemented; hardware confirmation of two panel questions
+remains.
+
+`remap_performance_banks` in `kws/records.py` rewrites every performance
+part that names the source bank to the destination, both halves of the
+split `bankNum`/`partMode` field, and leaves ROM, Card and third-bank
+references untouched. `WavestationBridge.copy_bank` and
+`DemoDevice.copy_bank` read the source's three kinds with length checks,
+remap, and write once through `write_bank_bundle` — one destination backup
+envelope, waveseq → patches → performances, per-kind read-back verify —
+returning the bytes written. `kwscli copy-bank SRC DST` requires `--yes`
+like every other destructive write; the browser's `B` opens
+`BankCopyScreen`, which sends nothing until `w` fires while armed.
+
+A verified Card write is adopted automatically: the active card's archive
+record keeps its identity (number, name, label, capture time) while its
+names, digest and `verified` flag describe the new content, saved to
+`cards.json` or `physical-cards.json` by mode. The destination's cache
+entry is replaced with the written bytes, and one undo record restores all
+three kinds from the single envelope, Card included.
+
+Remaining: the two hardware confirmations in `docs/RESOLUTION_NOTES.md`
+§15 — whether the panel's Card → RAM remaps the same way, and whether its
+"ALL" sends the kinds in the same order. Everything else is covered by
+automated tests.

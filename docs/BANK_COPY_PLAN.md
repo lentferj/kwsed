@@ -1,5 +1,11 @@
 # Whole-Bank Copy via the App (RAM ⇄ Card, RAM → RAM)
 
+Status: implemented on branch copy-bank, 2026-11-12. Deviations: the CLI
+requires --yes like every other destructive write; the bridge and demo
+results carry the written bytes ("written") so the app updates caches and
+the card archive without re-reading. Open: the two hardware confirmations
+in docs/RESOLUTION_NOTES.md §15.
+
 ## 1. What the device offers, and why kwsed does not use it
 
 The Wavestation SR's **MIDI/Global** menu has a **BANK COPY** page (Reference

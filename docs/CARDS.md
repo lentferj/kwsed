@@ -69,6 +69,27 @@ is separate and unchanged.
   only from the active card, because the synth can only play what is in the
   slot; the archive rows of other cards are read-only until inserted.
 
+## Whole-bank copy into a Card
+
+`B` in the browser copies the bank under the cursor — wave sequences,
+patches and performances — into another writable bank. The performances'
+references to the source bank are rewritten to the destination, so the
+copy plays its own patches rather than the source's. The destination is
+backed up first and every kind is read back and verified.
+
+A verified write into the Card is **adopted automatically**: the active
+card's archive record keeps its identity (number, name, label, capture
+time) while its names, digest and `verified` flag are recomputed from what
+was just written. `hcard` mode updates the active bank in `cards.json`;
+`cards` mode updates the active card in `physical-cards.json`. A RAM
+destination touches no archive.
+
+`z` restores the destination's previous content — all three kinds — from
+the single backup envelope the copy wrote. In `hcard` mode the active bank
+must be a user bank (25-39): HCard ROM banks (0-24) are refused as either
+source or destination. `card_mode = none` refuses when the Card is either
+end.
+
 ## Browser
 
 - `cards`: the archived cards appear as rows (one per card per kind), with
