@@ -237,6 +237,10 @@ class MidiInPort(Protocol):
         # The names are the port's own keyword API; a stub uses none of them.
         del sysex, timing, active_sense
 
+    def open_port(self, port: int) -> None:
+        """Open a MIDI port by its index."""
+        ...
+
     def close_port(self) -> None:
         """Close the underlying system port."""
         ...
@@ -259,6 +263,10 @@ class MidiOutPort(Protocol):
 
         ``data`` is a list of integers (status + data bytes).
         """
+        ...
+
+    def open_port(self, port: int) -> None:
+        """Open a MIDI port by its index."""
         ...
 
     def close_port(self) -> None:
