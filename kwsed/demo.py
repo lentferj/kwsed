@@ -644,6 +644,12 @@ class DemoDevice:
         at = number * records.PATCH_SIZE
         return payload[at : at + records.PATCH_SIZE]
 
+    def read_system_setup(self, *, timeout: Optional[float] = None) -> Optional[bytes]:
+        self._tick()
+        # A minimal, valid system setup dump: field 4 (MIDI_MODE) is 0,
+        # i.e. performance effects are heard.
+        return bytes(34)
+
     def read_performance(
         self, bank: int | str, number: int, *, timeout: Optional[float] = None
     ) -> bytes:

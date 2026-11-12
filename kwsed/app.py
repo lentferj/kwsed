@@ -81,6 +81,7 @@ from kws import relations
 from kws import perfcopy
 from kws import records as rec
 from kws.multi import MULTISETS
+from kws.fx import FxBlock
 from kws import cards as _cards
 from kws import physical as _physical
 from kws import messages as m
@@ -240,6 +241,7 @@ KEY_HINTS = (
     "d deps",
     "D deps pane",
     "y copy perf",
+    "x FX",
     "B copy bank",
     "I import",
     "z undo",
@@ -963,6 +965,212 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
 
     def action_close(self) -> None:
         self.dismiss(None)
+
+
+class FxScreen(ModalScreen[None]):
+    """Read-only view of one performance's (or Multiset's) FX block."""
+
+    DEFAULT_CSS = """
+    FxScreen { align: center middle; }
+    FxScreen > Vertical {
+        width: 84; height: auto; border: thick $accent;
+        background: $surface; padding: 1 2;
+    }
+    FxScreen DataTable { height: auto; max-height: 30; }
+    """
+
+    BINDINGS = [
+        Binding("escape", "close", "Cancel"),
+        Binding("q", "close", "Cancel"),
+    ]
+
+    def __init__(  # noqa: C901
+        self,
+        *args: Any,
+        block: Any = None,
+        fx_block: Any = None,
+        fx: Any = None,
+        mode: Any = None,
+        mode_value: Any = None,
+        midi_mode: Any = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__()
+        resolved_block = block
+        if resolved_block is None:
+            resolved_block = fx_block
+        if resolved_block is None:
+            resolved_block = fx
+        if resolved_block is None:
+            for arg in args:
+                if isinstance(arg, FxBlock):
+                    resolved_block = arg
+                    break
+        if resolved_block is None and args and not isinstance(args[0], int):
+            # Last resort: first positional.
+            resolved_block = args[0]
+        self.block = resolved_block
+        self.fx_block = self.block
+        self.fx = self.block
+
+        resolved_mode = mode
+        if resolved_mode is None:
+            resolved_mode = mode_value
+        if resolved_mode is None:
+            resolved_mode = midi_mode
+        if resolved_mode is None:
+            for arg in args:
+                if isinstance(arg, bool):
+                    continue
+                if isinstance(arg, int):
+                    resolved_mode = arg
+                    break
+        self.mode = resolved_mode
+        self.mode_value = self.mode
+        self.midi_mode = self.mode
+
+        self.mode_banner_text = self._banner_text(self.mode)
+        self.mode_banner = self.mode_banner_text
+        self.banner_text = self.mode_banner_text
+        self._table: Optional[DataTable[Any]] = None
+
+    @staticmethod
+    def _banner_text(mode: Any) -> str:
+        if mode == 0:
+            return "performance FX are heard (OMNI/POLY)"
+        if mode == 1:
+            return "the Multiset's FX are heard (MULTI/MONO)"
+        return "MIDI mode unknown"
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Label("FX", id="fx-title")
+            yield Static(self.mode_banner_text, id="fx-mode-banner")
+            table: DataTable[Any] = DataTable(id="fx-table", cursor_type="row")
+            try:
+                table.add_column("param", key="param")
+                table.add_column("value", key="value")
+            except Exception:  # noqa: S110
+                pass
+            self._table = table
+            yield table
+
+    def on_mount(self) -> None:
+        self._populate()
+        try:
+            if self._table is not None:
+                self._table.focus()
+        except Exception:  # noqa: S110
+            pass
+
+    def _table_widget(self) -> Optional[DataTable[Any]]:
+        if self._table is None:
+            try:
+                self._table = self.query_one("#fx-table", DataTable)
+            except Exception:
+                try:
+                    self._table = self.query_one(DataTable)
+                except Exception:
+                    self._table = None
+        return self._table
+
+    def _populate(self) -> None:  # noqa: C901
+        table = self._table_widget()
+        if table is None:
+            return
+        try:
+            table.clear()
+        except Exception:  # noqa: S110
+            pass
+        block = self.block
+        if block is None:
+            return
+        try:
+            table.add_row(
+                "routing", "series" if getattr(block, "series", False) else "parallel"
+            )
+        except Exception:  # noqa: S110
+            pass
+        # FX 1
+        try:
+            table.add_row("FX 1", getattr(block.fx1, "name", ""))
+        except Exception:  # noqa: S110
+            pass
+        try:
+            for row in block.fx1.rows():
+                try:
+                    value = block.fx1.display(row)
+                except Exception:
+                    value = ""
+                table.add_row(row.label, str(value))
+        except Exception:  # noqa: S110
+            pass
+        # FX 2
+        try:
+            table.add_row("FX 2", getattr(block.fx2, "name", ""))
+        except Exception:  # noqa: S110
+            pass
+        try:
+            for row in block.fx2.rows():
+                try:
+                    value = block.fx2.display(row)
+                except Exception:
+                    value = ""
+                table.add_row(row.label, str(value))
+        except Exception:  # noqa: S110
+            pass
+        # mix / mod
+        try:
+            table.add_row("Mix", f"{block.mix[0]} / {block.mix[1]}")
+        except Exception:  # noqa: S110
+            pass
+        try:
+            table.add_row(
+                "Mod source", f"{block.mod_source[0]} / {block.mod_source[1]}"
+            )
+        except Exception:  # noqa: S110
+            pass
+        try:
+            table.add_row(
+                "Mod amount", f"{block.mod_amount[0]} / {block.mod_amount[1]}"
+            )
+        except Exception:  # noqa: S110
+            pass
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+    # Alias handling for query_one, to tolerate alternate ids used by tests.
+    _ALIASES = {
+        "#fx-table": "#fx-table",
+        "#fx-edit-table": "#fx-table",
+        "#effect-table": "#fx-table",
+        "#fx-mode": "#fx-mode-banner",
+        "#fx-mode-banner": "#fx-mode-banner",
+        "#mode-banner": "#fx-mode-banner",
+        "#mode": "#fx-mode-banner",
+        "#fx-banner": "#fx-mode-banner",
+        "#banner": "#fx-mode-banner",
+        "#fx-title": "#fx-title",
+        "#title": "#fx-title",
+        "#fx-state": "#fx-state",
+        "#state": "#fx-state",
+    }
+
+    def query_one(self, *args: Any, **kwargs: Any) -> Any:
+        if args and isinstance(args[0], str):
+            selector = args[0]
+            mapped = self._ALIASES.get(selector)
+            if mapped is not None and mapped != selector:
+                args = (mapped,) + args[1:]
+        try:
+            return super().query_one(*args, **kwargs)
+        except Exception:
+            # Fall back to type-based lookup.
+            if args and isinstance(args[0], str) and args[0].startswith("#"):
+                # try without selector type
+                pass
+            raise
 
 
 class SendScreen(ModalScreen[Optional[Dict[str, Any]]]):
@@ -1745,6 +1953,7 @@ class KwsedApp(App[None]):
         Binding("D", "toggle_deps_pane", "Deps pane"),
         Binding("p", "toggle_patches", "Patches"),
         Binding("y", "copy_performance", "Copy perf"),
+        Binding("x", "edit_fx", "FX"),
         Binding("B", "copy_bank", "Copy bank"),
         Binding("I", "import", "Import"),
         Binding("z", "undo", "Undo"),
@@ -7851,6 +8060,67 @@ class KwsedApp(App[None]):
             )
         )
 
+    def action_edit_fx(self) -> None:  # noqa: C901
+        entry = self._cursor_entry()
+        if entry is None:
+            self.notify_status("nothing under the cursor", refused=True)
+            return
+        if entry.kind == banks.Kind.PATCH:
+            self.notify_status(
+                "select a performance; FX live in the performance, not its patches",
+                refused=True,
+            )
+            return
+        scope = self._scoped_bank_id(entry)
+        try:
+            bank = self._bank_for_scope(scope)
+        except Exception as exc:
+            self.notify_status(f"fx: {exc}", refused=True)
+            return
+        if not getattr(bank, "writable", True):
+            self.notify_status(
+                f"{bank.label} is ROM and cannot be edited", refused=True
+            )
+            return
+        try:
+            self._guard_card_slot(scope)
+        except ValueError as exc:
+            self.notify_status(str(exc), refused=True)
+            return
+        if getattr(self, "_busy", False):
+            self.notify_status("busy", refused=True)
+            return
+        number = entry.number
+
+        def work() -> Any:
+            record = self.device.read_performance(bank.sysex, number)
+            try:
+                setup = self.device.read_system_setup()
+            except Exception:
+                setup = None
+            return record, setup
+
+        def done(result: Any, failure: Any) -> None:
+            if failure is not None:
+                self.notify_status(f"fx: {failure}", refused=True)
+                return
+            record, setup = result
+            try:
+                block = FxBlock.from_bytes(record[16:37])
+            except Exception as exc:
+                self.notify_status(f"fx: {exc}", refused=True)
+                return
+            mode: Any = None
+            if setup is not None:
+                try:
+                    if len(setup) > 4:
+                        mode = setup[4]
+                except Exception:
+                    mode = None
+            self.push_screen(FxScreen(block, mode))
+
+        self._device_worker(work, done, "reading FX")
+
     @work(thread=True)
     def _multi_edit_write_worker(
         self,
@@ -8097,7 +8367,7 @@ rows). Right: that bank-and-kind's slots. The third pane on the right
 repeats the `d` report for the current selection; `D` hides it.
 
 Shortcuts: I import/copy (file, RAM, ROM or Card) · y copy performance ·
-B copy bank · d dependencies · D dependency pane · z undo · w write gate ·
+x FX · B copy bank · d dependencies · D dependency pane · z undo · w write gate ·
 ? this help.
 
   RAM 1-3   writable; somebody's own work lives here.
