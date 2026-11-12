@@ -701,34 +701,63 @@ the *data* does -- by counting how many sequences in a real library quote
 another, and then building a bank and reading back what the references
 actually pointed at.
 
-## 15. Bank copy: the panel function stays on the panel
+## 15. Bank move: reachable over MIDI, and still kwsed's own copy
 
-The Reference Guide's **MIDI/Global** menu has a **BANK COPY** page that
-copies bank data -- WAVESEQ, PATCH, PERFORMANCE or ALL -- between banks,
-including to and from the Card. It is a **front-panel function**. There is
-no documented SysEx request that triggers it: the parameter table runs
-0-484 and the only write trigger it documents is `EXECUTE_WRITE` (466),
-which commits the edit buffer and cannot name a source and a destination.
-Speculative bytes that happen to work on one unit are not a protocol.
+The Reference Guide's **MIDI/Global** menu has a **BANK MOVE** page that
+moves bank data -- WAVESEQ, PATCH, PERFORMANCE or ALL -- between banks,
+including to and from the Card. Its confirmation prompt reads exactly
+**"MOVE BANK DATA?"**. Earlier revisions of this note called it BANK COPY
+and said it could not be reached over MIDI. Both were wrong.
 
-**Decision: kwsed performs the copy itself.** It reads the source bank in
-all three kinds, remaps the performances' references to the source bank to
-the destination -- both halves of the split `bankNum`/`partMode` field,
-because rewriting only one yields a bank that loads cleanly and plays from
-somewhere else -- and writes once through the existing fence: one
-destination backup envelope, waveseq → patches → performances, per-kind
-read-back verify. The device's own function overwrites the destination
-with no backup and no verification; this is the same operation with both,
-and it uses only documented requests. The panel function remains
-available on the unit.
+It is four documented parameter changes: `COPY_MACRO_SOURCE_BANK` (213)
+names the source, `BANK_COPY_TYPE` (346) the kind, `GLOBAL_UTIL_DEST_BANK`
+(379) the destination, and `EXECUTE_BANK_MOVE` (472) executes on `+1`.
+Banks are given as the System Exclusive byte -- RAM 1 = 0, RAM 2 = 1,
+RAM 3 = 4, Card = 3 -- not as kwsed's positions. The type is 0
+performances, 1 patches, 2 wave sequences, 3 all three. `EXECUTE_WRITE`
+(466) is not the only write trigger in the table: 472 is a second one,
+and it does name a source and a destination.
+
+The four-change sequence was not guessed. It was captured from the unit's
+own panel action -- the MIDI OUT during the move carries only the
+parameter-change echo of the menu fields (213, 346, 379, 472) and Active
+Sensing -- and then replayed with no panel action at all. Measured on a
+bench SR (2026-11-12, global channel 5):
+
+* **RAM 2 → RAM 3, type 3.** All three kinds arrived. The performance's
+  part 0, which named the source, was rewritten to RAM 3; part 1, which
+  names ROM 4, was untouched. The source RAM 2 stayed byte-identical in
+  all three kinds.
+* **Card (HCard bank 39) → RAM 3, type 3.** The same remap, all three
+  kinds, and the source Card stayed byte-identical.
+* **Type.** Measured against a distinct baseline in the destination: 0
+  performances only, 1 patches only, 2 wave sequences only, 3 all three.
+* **No bulk dumps.** MIDI OUT carried the parameter changes and nothing
+  else, so there is no "panel kind order" to match: kwsed's waveseq →
+  patches → performances order is its own wire protocol, and the per-kind
+  read-back verify decides correctness.
+* **The source is not cleared.** On this unit the move left the source in
+  place -- tested twice, RAM → RAM and Card → RAM. That is measured
+  behaviour, not a guarantee: the OS/firmware version was not recorded,
+  and kwsed must not depend on it. The panel function offers no backup
+  and no read-back verify either.
+
+**Decision: kwsed still performs the copy itself.** Not because the panel
+function is unreachable -- it is reachable, and the measurement above
+proves it -- but because it has no backup and no verify, and because its
+observed behaviour leaves the source behind, which is not a contract any
+copy should rely on. kwsed reads the source in all three kinds, remaps the
+performances' references to the source bank to the destination -- both
+halves of the split `bankNum`/`partMode` field, because rewriting only one
+yields a bank that loads cleanly and plays from somewhere else -- and
+writes once through the existing fence: one destination backup envelope,
+waveseq → patches → performances, per-kind read-back verify. The remap is
+symmetric, measured in both directions, and matches what the device does.
 
 Multiset pointers (`0x62`) are deliberately not remapped. The device does
 not remap them either, and Multisets are a separate bank of state the
 multi editor owns.
 
-Two things about the panel function remain unconfirmed on hardware:
-whether its **Card → RAM** direction remaps the same way (expected:
-symmetric), and whether its "ALL" sends the three kinds in the same order.
-The second is moot for correctness -- the read-back verify decides whether
-the write landed -- but it is the one place a cosmetic difference could
-show.
+`tools/probe_bank_copy.py move` is the reproduction: with `--yes` it sends
+the four changes and reads both banks back. The measurements above are its
+output, committed as 4736d9b.

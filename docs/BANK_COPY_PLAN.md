@@ -3,29 +3,35 @@
 Status: implemented on branch copy-bank, 2026-11-12. Deviations: the CLI
 requires --yes like every other destructive write; the bridge and demo
 results carry the written bytes ("written") so the app updates caches and
-the card archive without re-reading. Open: the two hardware confirmations
-in docs/RESOLUTION_NOTES.md §15.
+the card archive without re-reading. The two hardware questions are
+resolved, and the panel function turned out to be remotely drivable: four
+documented parameter changes, measured (§1, §9).
 
 ## 1. What the device offers, and why kwsed does not use it
 
-The Wavestation SR's **MIDI/Global** menu has a **BANK COPY** page (Reference
-Guide) that copies bank data (WAVESEQ / PATCH / PERFORMANCE / ALL) between
-banks, including to and from the Card. It is a **front-panel function**: there
-is no documented SysEx request that triggers it. The parameter table runs
-0–484, and the only write trigger it documents is `EXECUTE_WRITE` (466),
-which commits the *edit buffer* — it cannot express "copy bank A to bank B".
+The Wavestation SR's **MIDI/Global** menu has a **BANK MOVE** page (Reference
+Guide) that moves bank data (WAVESEQ / PATCH / PERFORMANCE / ALL) between
+banks, including to and from the Card. It is not panel-only: four documented
+parameter changes drive it — `COPY_MACRO_SOURCE_BANK` (213),
+`BANK_COPY_TYPE` (346), `GLOBAL_UTIL_DEST_BANK` (379) and
+`EXECUTE_BANK_MOVE` (472), which executes on `+1`. The four were captured
+from the unit's own panel action and replayed with no panel action;
+`tools/probe_bank_copy.py move` is the reproduction, and §9 has the measured
+results.
 
-| | Trigger the panel function remotely | kwsed does the copy itself |
+| | The unit's bank move, driven remotely | kwsed does the copy itself |
 |---|---|---|
-| Protocol | Undocumented / speculative bytes | Uses only documented requests + dumps |
+| Protocol | Four documented parameter changes (213/346/379/472), measured | Uses only documented requests + dumps |
 | Backup | None — the destination is overwritten with no undo | Full envelope via `write_bank_bundle`'s fence |
 | Verify | None | Read-back compare of every kind |
+| Source | Left in place on the measured unit — behaviour, not a guarantee | Untouched: kwsed reads it |
 
 **Decision: kwsed synthesizes the operation** — read the source bank in full,
 write the destination through the existing fence. This is the same shape the
-app already uses for imports and `copy-perf`, and it is strictly safer than
-the device's own function, which overwrites the destination with no backup
-and no verification. The device function stays available from the panel.
+app already uses for imports and `copy-perf`. The device's own move is
+reachable, but it has no backup and no verify, and on the measured unit it
+left the source in place — observed twice, and not something to depend on.
+The device function stays available from the panel.
 
 ## 2. Scope
 
@@ -165,14 +171,26 @@ directions for free.
 5. Card auto-adopt + destination cache invalidation.
 6. Undo-over-Card verification.
 7. Docs: a short section in `docs/CARDS.md` (what a copy does to the
-   archive), a resolution note on why the panel function is not triggered
-   remotely, TODO.md.
+   archive), a resolution note on why kwsed does not drive the panel
+   function, TODO.md.
 
-## 9. Open points to confirm against the unit
+## 9. Hardware questions, answered (bench unit, 2026-11-12)
 
-* Whether the device's BANK COPY **Card → RAM** also remaps (expected:
-  symmetric).
-* Whether the panel's "ALL" copies all three kinds in the same order — the
-  read-back verify makes the order moot for correctness, but the send order
-  of kinds is the one place we could differ cosmetically from the panel
-  function.
+Both open questions were measured on a real Wavestation SR (global channel 5,
+reproduced by `tools/probe_bank_copy.py move`):
+
+* **Card → RAM remaps** — yes, symmetrically with RAM → RAM. Card (HCard
+  bank 39) → RAM 3, type 3 moved all three kinds and rewrote the
+  performance's part 0 from the source to the destination; part 1 (ROM 4)
+  was untouched, and the source Card stayed byte-identical.
+* **Kind order** — there is none to match. The unit's MIDI OUT during the
+  panel action carried only the parameter-change echo of 213/346/379/472
+  plus Active Sensing, no bulk dumps. kwsed's waveseq → patches →
+  performances order is its own wire protocol; the per-kind read-back
+  verify decides correctness.
+
+Also measured: `BANK_COPY_TYPE` (346) is 0 performances, 1 patches, 2 wave
+sequences, 3 all three. Banks travel as the SysEx byte, so RAM 1 is 0,
+RAM 2 is 1, RAM 3 is 4 and the Card is 3. The move did not clear the
+source, tested twice. The panel function has no backup and no read-back
+verify.

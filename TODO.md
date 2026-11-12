@@ -780,8 +780,8 @@ patches, compacted and remapped.
 
 ## 28. Whole-bank copy — RESOLVED
 
-**Status:** implemented; hardware confirmation of two panel questions
-remains.
+**Status:** implemented; the two hardware questions are resolved. The
+unit's move is remotely drivable, and kwsed still does its own copy.
 
 `remap_performance_banks` in `kws/records.py` rewrites every performance
 part that names the source bank to the destination, both halves of the
@@ -801,7 +801,24 @@ names, digest and `verified` flag describe the new content, saved to
 entry is replaced with the written bytes, and one undo record restores all
 three kinds from the single envelope, Card included.
 
-Remaining: the two hardware confirmations in `docs/RESOLUTION_NOTES.md`
-§15 — whether the panel's Card → RAM remaps the same way, and whether its
-"ALL" sends the kinds in the same order. Everything else is covered by
-automated tests.
+The panel question is settled by measurement (bench SR, 2026-11-12,
+reproduced by `tools/probe_bank_copy.py move`). The page is **BANK MOVE**,
+prompt **"MOVE BANK DATA?"**, and it is four documented parameter changes:
+`COPY_MACRO_SOURCE_BANK` (213), `BANK_COPY_TYPE` (346),
+`GLOBAL_UTIL_DEST_BANK` (379), `EXECUTE_BANK_MOVE` (472, `+1` executes).
+Captured from the unit's own panel action and replayed with no panel
+action. It remaps symmetrically — RAM 2 → RAM 3 and Card (HCard 39) →
+RAM 3, type 3 both moved all three kinds, rewrote the performance's part 0
+to the destination, left part 1 (ROM 4) alone, and left the source
+byte-identical. Types are 0 performances, 1 patches, 2 wave sequences, 3
+all three. MIDI OUT during the panel action showed only the parameter
+echoes and Active Sensing, no bulk dumps, so there is no "kind order" to
+match; kwsed's order is its own protocol. The panel function has no
+backup and no verify, and on this unit it did not clear the source —
+measured behaviour, not a guarantee.
+
+A future fast path is possible and deliberately not implemented: back up
+the destination, send the four changes, read back to verify. It would be
+faster, but it would still depend on the move not clearing the source, and
+the current read/remap/write path is the one the fence, the undo envelope
+and the Card adoption already cover.

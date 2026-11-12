@@ -716,8 +716,8 @@ but are not stored in the bank cache.
 The instrument's programs form a graph: a performance names patches, a patch
 names wave sequences, and a wave sequence is a chain of steps drawn from a
 pool the whole bank shares. Copying a favourite between banks therefore
-means rewriting references, not copying bytes -- which is why the Wavestation
-itself distinguishes COPY from MOVE, and only for whole banks.
+means rewriting references, not copying bytes -- which is why the
+Wavestation's own whole-bank function is a move, not a copy.
 
 `tools/build_bank.py` builds one. **Patch first**: you name the patches, it
 works out what they drag along, packs them against all four budgets (50
