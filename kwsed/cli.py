@@ -1960,6 +1960,103 @@ def _cmd_backup(device: Any, args: argparse.Namespace) -> int:
     raise ValueError(f"no backup command {which!r}")
 
 
+def _print_fx_block(block: Any) -> None:
+    """Plain-text rendering of one :class:`kws.fx.FxBlock`."""
+    print(f"routing: {'series' if block.series else 'parallel'}")
+    print(f"FX 1: {block.fx1.name}")
+    print(f"FX 2: {block.fx2.name}")
+    print(f"mix: {block.mix[0]} / {block.mix[1]}")
+    print(f"mod source: {block.mod_source[0]} / {block.mod_source[1]}")
+    print(f"mod amount: {block.mod_amount[0]} / {block.mod_amount[1]}")
+    for fx_label, effect in (("FX 1", block.fx1), ("FX 2", block.fx2)):
+        if effect.type == 0:
+            continue
+        for row in effect.rows():
+            try:
+                display = effect.display(row)
+            except ValueError:
+                display = "?"
+            print(f"{fx_label}  {row.label}  {display}")
+
+
+def _cmd_fx(device: Any, args: argparse.Namespace) -> int:
+    """Read one performance's or Multiset's FX block. Read-only."""
+    from kws import banks as bk
+    from kws import fx as fxmod
+    from kws import messages as msg
+    from kws import multi as multi_mod
+
+    if getattr(args, "bank", None) == "types":
+        if (
+            getattr(args, "number", None) is not None
+            or getattr(args, "multi", None) is not None
+        ):
+            print("error: `fx types` takes no other arguments", file=sys.stderr)
+            return spec.EXIT_USAGE
+        for entry in fxmod.EFFECT_TYPES:
+            print(f"{entry.number:02d}  {entry.name}  (group {entry.group})")
+        return spec.EXIT_OK
+
+    if getattr(args, "multi", None) is not None:
+        if (
+            getattr(args, "bank", None) is not None
+            or getattr(args, "number", None) is not None
+        ):
+            print("error: --multi does not take a bank or number", file=sys.stderr)
+            return spec.EXIT_USAGE
+        number = args.multi
+        if not (0 <= number <= 31):
+            print(
+                f"error: Multiset number must be 0-31, not {number}",
+                file=sys.stderr,
+            )
+            return spec.EXIT_USAGE
+        if device is None:
+            print("error: this command needs a unit", file=sys.stderr)
+            return spec.EXIT_USAGE
+        packet = msg.parse(device.read_multi())
+        if packet is None:
+            raise ValueError("the reply was not a Wavestation message")
+        sets = multi_mod.parse(packet.data())
+        if number >= len(sets):
+            raise ValueError(f"Multiset {number} not present in the dump")
+        ms = sets[number]
+        print(
+            f"control channel: {ms.control_channel + 1} "
+            f"(stored {ms.control_channel}; stored convention to be "
+            f"confirmed on hardware)"
+        )
+        _print_fx_block(ms.fx)
+        return spec.EXIT_OK
+
+    bank = getattr(args, "bank", None)
+    number = getattr(args, "number", None)
+    if bank is None or number is None:
+        print(
+            "error: usage: kwscli fx BANK NUMBER | --multi N | types",
+            file=sys.stderr,
+        )
+        return spec.EXIT_USAGE
+    try:
+        bank_entry = bk.bank(bank)
+    except LookupError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return spec.EXIT_USAGE
+    if not (0 <= number <= 49):
+        print(
+            f"error: performance number must be 0-49, not {number}",
+            file=sys.stderr,
+        )
+        return spec.EXIT_USAGE
+    if device is None:
+        print("error: this command needs a unit", file=sys.stderr)
+        return spec.EXIT_USAGE
+    record = device.read_performance(bank_entry.sysex, number)
+    block = fxmod.FxBlock.from_bytes(record[16:37])
+    _print_fx_block(block)
+    return spec.EXIT_OK
+
+
 _COMMANDS: Dict[str, Callable[[Any, argparse.Namespace], Any]] = {
     "banks": _cmd_banks,
     "list": _cmd_list,
@@ -1974,6 +2071,7 @@ _COMMANDS: Dict[str, Callable[[Any, argparse.Namespace], Any]] = {
     "backup": _cmd_backup,
     "cards": _cmd_cards,
     "deps": _cmd_deps,
+    "fx": _cmd_fx,
     "copy-perf": _cmd_copy_perf,
     "import": _cmd_import,
 }
@@ -2015,6 +2113,11 @@ def _offline(args: argparse.Namespace) -> bool:
         return _deps_offline(args)
     if args.command == "copy-perf":
         return getattr(args, "out", None) is not None
+    if args.command == "fx":
+        return (
+            getattr(args, "bank", None) == "types"
+            and getattr(args, "multi", None) is None
+        )
     return args.command in _OFFLINE
 
 
@@ -2243,6 +2346,27 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser("multi", help="the 32 Multisets (silent)")
     sp.add_argument(
         "--all", action="store_true", help="include Multisets with nothing assigned"
+    )
+    sp = sub.add_parser("fx", help="read an FX block (silent)")
+    sp.add_argument(
+        "bank",
+        nargs="?",
+        default=None,
+        help="bank (RAM1..) or 'types'",
+    )
+    sp.add_argument(
+        "number",
+        nargs="?",
+        type=int,
+        default=None,
+        help="performance number, 0-49",
+    )
+    sp.add_argument(
+        "--multi",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Multiset number, 0-31",
     )
     sp = sub.add_parser(
         "send",

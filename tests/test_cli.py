@@ -1806,3 +1806,29 @@ class TestCopyBank:
                 ["copy-bank", "RAM1", "CARD", "--method", "panel"]
             )
         assert excinfo.value.code == 2
+
+
+class TestFx:
+    def test_types_prints_all_56_names(self, capsys):
+        assert run(["fx", "types"]) == 0
+        out = capsys.readouterr().out
+        assert "Small Hall" in out
+        assert "Stereo Vocoder-Delay 2" in out
+        assert out.count("group") == 56
+
+    def test_perf_demo_prints_fx1_and_off(self, capsys):
+        assert run(["fx", "RAM1", "0"]) == 0
+        out = capsys.readouterr().out
+        assert "FX 1" in out
+        assert "Off" in out
+
+    def test_multi_demo_prints_control_channel_and_off(self, capsys):
+        assert run(["fx", "--multi", "0"]) == 0
+        out = capsys.readouterr().out
+        assert "control channel" in out
+        assert "Off" in out
+
+    def test_usage_errors(self):
+        assert run(["fx", "RAM5", "0"]) == 2
+        assert run(["fx", "RAM1", "50"]) == 2
+        assert run(["fx", "--multi", "32"]) == 2
