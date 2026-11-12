@@ -1100,8 +1100,11 @@ class BankCopyScreen(ModalScreen[Optional[Dict[str, Any]]]):
     Opening and arming send nothing, and the names come from the cache --
     no device read happens here. The write itself is one bundle through the
     bridge's fence: the destination is backed up first and every kind is
-    read back and verified.
+    read back and verified. The window also offers the unit's own MOVE as a
+    method, still backed up and verified here.
     """
+
+    METHODS = ("fence", "device")
 
     DEFAULT_CSS = """
     BankCopyScreen { align: center middle; }
@@ -1116,6 +1119,7 @@ class BankCopyScreen(ModalScreen[Optional[Dict[str, Any]]]):
     BINDINGS = [
         Binding("escape", "close", "Cancel"),
         Binding("q", "close", "Cancel"),
+        Binding("m", "method", "Method", show=False),
         Binding("a", "arm", "Arm", show=False),
         # Deliberately not Enter, and deliberately not beside "a": the fire
         # key should not be the one a finger is already resting on.
@@ -1128,13 +1132,30 @@ class BankCopyScreen(ModalScreen[Optional[Dict[str, Any]]]):
         self._source = source
         self._destination = destination
         self._armed = False
+        self._method = "fence"
 
     def compose(self) -> ComposeResult:
         with Vertical():
             yield Label("[b]Copy a whole bank[/b]")
             yield Static(self._describe(), classes="what")
             yield Static("", id="bank-copy-state")
-            yield Static("[dim]a to arm, then w to write. esc cancels.[/dim]")
+            yield Static(
+                "[dim]a to arm, m for method, then w to write. esc cancels.[/dim]"
+            )
+
+    def _method_description(self) -> str:
+        """The method line, aligned with the rest of the description."""
+        if self._method == "device":
+            return "the unit's MOVE: backed up and verified here"
+        return "kwsed: read, remap, write, verify"
+
+    def _method_short(self) -> str:
+        return "the unit's MOVE" if self._method == "device" else "kwsed's fence"
+
+    def _method_sentence(self) -> str:
+        if self._method == "device":
+            return "device MOVE — the unit copies, kwsed backs up and verifies"
+        return "kwsed fence — reads, remaps and writes"
 
     def _describe(self) -> str:
         lines = [
@@ -1142,6 +1163,7 @@ class BankCopyScreen(ModalScreen[Optional[Dict[str, Any]]]):
             f"destination {self._destination.label}  "
             f"({'writable' if self._destination.writable else 'ROM'})",
             "kind        all three: wave sequences, patches, performances",
+            f"method      {self._method_description()}",
             "backup      the destination's current content is saved first "
             "(one envelope)",
         ]
@@ -1172,11 +1194,27 @@ class BankCopyScreen(ModalScreen[Optional[Dict[str, Any]]]):
             lines.append("replacing   (destination is empty)")
         return "\n".join(lines)
 
+    def action_method(self) -> None:
+        """Switch between kwsed's own copy and the unit's own MOVE."""
+        self._method = "device" if self._method == "fence" else "fence"
+        state = self.query_one("#bank-copy-state", Static)
+        if self._armed:
+            # The armed state is a promise about what `w` will do, and the
+            # method just changed what that is.
+            self._armed = False
+            state.update(
+                f"[b]disarmed[/b] - the method changed to {self._method_short()}. "
+                "Press a to arm again."
+            )
+            return
+        state.update(f"method: {self._method_sentence()}")
+
     def action_arm(self) -> None:
         self._armed = True
         self.query_one("#bank-copy-state", Static).update(
             f"[b]ARMED[/b] - w replaces {self._destination.label} with "
-            f"{self._source.label}. Nothing has been sent yet."
+            f"{self._source.label} via {self._method_short()}. "
+            "Nothing has been sent yet."
         )
 
     def action_fire(self) -> None:
@@ -1190,7 +1228,7 @@ class BankCopyScreen(ModalScreen[Optional[Dict[str, Any]]]):
         # A failed write must not dismiss: the screen is the only feedback
         # the user gets, and the bridge already reported the backup's
         # read-back mismatch. The worker's done callback leaves it open.
-        self._app._copy_bank_write(self._source, self._destination, self)
+        self._app._copy_bank_write(self._source, self._destination, self, self._method)
 
     def _write_failed(self, message: str) -> None:
         self.query_one("#bank-copy-state", Static).update(
@@ -2867,7 +2905,9 @@ class KwsedApp(App[None]):
             }
         )
 
-    def _copy_bank_write(self, source: Any, destination: Any, screen: Any) -> None:
+    def _copy_bank_write(
+        self, source: Any, destination: Any, screen: Any, method: str = "fence"
+    ) -> None:
         """One whole-bank copy off the UI thread, through the fence."""
 
         def work() -> Any:
@@ -2875,7 +2915,10 @@ class KwsedApp(App[None]):
 
             where = self._backup_dir or _backup.default_dir()
             return self.device.copy_bank(
-                source.number, destination.number, backup_dir=where
+                source.number,
+                destination.number,
+                backup_dir=where,
+                method=method,
             )
 
         def done(result: Any, failure: Any) -> None:
@@ -2935,7 +2978,17 @@ class KwsedApp(App[None]):
             pass
         # Notify before dismissing, as copy-perf does: the status line is
         # the browser's confirmation once the screen is gone.
-        self.notify_status(f"copied {source.label} into {destination.label}, verified")
+        method = result.get("method", "fence")
+        if method == "device":
+            note = (
+                f"copied {source.label} into {destination.label} "
+                "via the unit's move, verified"
+            )
+            if result.get("source_restored"):
+                note += " (source restored)"
+        else:
+            note = f"copied {source.label} into {destination.label}, verified"
+        self.notify_status(note)
         screen._write_done(
             {
                 "ok": True,
@@ -8116,7 +8169,9 @@ switch the HCard.
   y   copy a Performance (with its patches) into a writable bank; opens the
       unified copy screen with that performance prefilled
   B   copy the whole bank under the cursor into another writable bank --
-      wave sequences, patches and performances together, backed up first
+      wave sequences, patches and performances together, backed up first.
+      The copy window's m chooses between kwsed's read/remap/write and the
+      unit's own MOVE, which is still backed up and verified here.
   I   import a file, disk image, ZIP, RAM bank, ROM bank or the active Card:
       whole bank, or single/multiple performances into one writable target
       bank, with a target-slot map and one batch write.

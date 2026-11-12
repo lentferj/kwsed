@@ -577,13 +577,23 @@ class DemoDevice:
         backup_dir: str,
         verify: bool = True,
         timeout: Optional[float] = None,
+        method: str = "fence",
     ) -> Dict[str, Any]:
         """The same operation the bridge's :meth:`copy_bank` performs.
 
         Reads the source's three kinds, remaps the performances the same
         way, and writes through :meth:`write_bank_bundle`, so `--demo` and
         the tests exercise the CLI's copy path with no ports open.
+
+        The demo has no panel, so ``method="device"`` simulates the unit's
+        MOVE with the same internal read/remap/write; the result says which
+        method ran, and that the source was not restored (it was never
+        touched).
         """
+        if method not in {"fence", "device"}:
+            raise ValueError(
+                f"unknown copy method {method!r}; choose 'fence' or 'device'"
+            )
         self._tick()
         src = banks.bank(source)
         dst = banks.bank(destination)
@@ -624,6 +634,9 @@ class DemoDevice:
         # The exact post-copy state of the destination, per kind, decoded --
         # same key the bridge reports, so callers need no re-read.
         result["written"] = dict(decoded)
+        result["method"] = method
+        if method == "device":
+            result["source_restored"] = False
         return result
 
     def read_patch(
