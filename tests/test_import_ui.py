@@ -87,7 +87,10 @@ def _make_bank(scope: str = "RAM1", active_slots: Optional[list[int]] = None) ->
 
 def _make_app(tmp_path: Any, bankstore_dir: Optional[str] = None) -> KwsedApp:
     bs = None if bankstore_dir is None else bankstore_dir
-    return KwsedApp(DemoDevice(), bankstore_dir=bs)
+    app = KwsedApp(DemoDevice(), bankstore_dir=bs)
+    # Writes must not drop backup envelopes into the user's real archive.
+    app._backup_dir = str(tmp_path / "backups")
+    return app
 
 
 @pytest.mark.asyncio
@@ -1244,6 +1247,7 @@ class TestBankCopyUi:
         app = KwsedApp(
             DemoDevice(), cards_path=path, bankstore_dir=str(tmp_path / "store")
         )
+        app._backup_dir = str(tmp_path / "backups")
         old = _cards.capture(
             31,
             "Old Name",
@@ -1281,6 +1285,8 @@ class TestBankCopyUi:
 
     @pytest.mark.asyncio
     async def test_undo_restores_the_card(self, tmp_path: Any) -> None:
+        # `_make_app` points the app's backup dir at tmp_path, so the undo
+        # envelope lands there too.
         app = _make_app(tmp_path)
         device = app.device
         source = banks.bank("RAM1")

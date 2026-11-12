@@ -1756,6 +1756,10 @@ class KwsedApp(App[None]):
         self._physical_path = physical_path
         self._physical = _physical.load(physical_path) if physical_path else {}
         self._bankstore_dir = bankstore_dir
+        #: Where write envelopes are saved. ``None`` means the platform's
+        #: backup directory; tests and embedders point it at a temporary one
+        #: so a run never drops envelopes into the user's real archive.
+        self._backup_dir: Optional[str] = None
         self._import_folder = ""
         self._import_cursor = 0
         self._sources: Dict[str, deps.Source] = {}
@@ -2060,12 +2064,13 @@ class KwsedApp(App[None]):
             return next(iter(blocks.values()))
         return None
 
-    @staticmethod
-    def _write_kwargs(*methods: Any) -> Dict[str, Any]:
+    def _write_kwargs(self, *methods: Any) -> Dict[str, Any]:
         """The keyword arguments every given write signature accepts.
 
         A test double may take fewer than the bridge does; inspecting the
-        signature is what keeps one undo record working against both.
+        signature is what keeps one undo record working against both. The
+        backup directory is the app's, so an undo writes its envelope
+        beside every other write's instead of into the default archive.
         """
         import inspect
 
@@ -2080,7 +2085,7 @@ class KwsedApp(App[None]):
             if "backup_dir" in parameters:
                 from kws import backup as _backup
 
-                kwargs["backup_dir"] = _backup.default_dir()
+                kwargs["backup_dir"] = self._backup_dir or _backup.default_dir()
             if "verify" in parameters:
                 kwargs["verify"] = True
         return kwargs
@@ -2627,7 +2632,7 @@ class KwsedApp(App[None]):
                         )
                     from kws import backup as _backup
 
-                    where = getattr(self, "_backup_dir", None) or _backup.default_dir()
+                    where = self._backup_dir or _backup.default_dir()
                     before = self._before_blocks(
                         local_sources.get(dest_scope), destination
                     )
@@ -2861,7 +2866,7 @@ class KwsedApp(App[None]):
         def work() -> Any:
             from kws import backup as _backup
 
-            where = getattr(self, "_backup_dir", None) or _backup.default_dir()
+            where = self._backup_dir or _backup.default_dir()
             return self.device.copy_bank(
                 source.number, destination.number, backup_dir=where
             )
