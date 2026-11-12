@@ -5,7 +5,9 @@ requires --yes like every other destructive write; the bridge and demo
 results carry the written bytes ("written") so the app updates caches and
 the card archive without re-reading. The two hardware questions are
 resolved, and the panel function turned out to be remotely drivable: four
-documented parameter changes, measured (§1, §9).
+documented parameter changes, measured (§1, §9). The copy window and CLI
+offer the device move as an option (`m` / `--method device`), backed up and
+verified by kwsed.
 
 ## 1. What the device offers, and why kwsed does not use it
 

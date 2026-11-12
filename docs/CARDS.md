@@ -75,7 +75,10 @@ is separate and unchanged.
 patches and performances — into another writable bank. The performances'
 references to the source bank are rewritten to the destination, so the
 copy plays its own patches rather than the source's. The destination is
-backed up first and every kind is read back and verified.
+backed up first and every kind is read back and verified. The copy
+window's `m` can use the unit's own MOVE as the transfer instead, with
+kwsed's backup and read-back verify around it (the destination is still
+auto-adopted the same way).
 
 A verified write into the Card is **adopted automatically**: the active
 card's archive record keeps its identity (number, name, label, capture
