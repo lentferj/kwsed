@@ -1142,13 +1142,27 @@ class BankCopyScreen(ModalScreen[Optional[Dict[str, Any]]]):
         if source is None:
             lines.append("replacing   (names not read)")
             return "\n".join(lines)
-        names = [
-            m.decode_name(record)
-            for record in list(source.performances) + list(source.patches)
-        ]
-        shown = ", ".join(f"{n:03d} {name}" for n, name in enumerate(names[:5]))
-        more = " ..." if len(names) > 5 else ""
-        lines.append(f"replacing   {shown}{more}")
+        # Occupied slots only: an empty record decodes to blanks and would
+        # bury the names that actually matter. Performances and patches are
+        # numbered in their own banks, so they get their own lines rather
+        # than one run-on list where patch 0 would read as performance 50.
+        perfs = [record for record in source.performances if any(record)]
+        patches = [record for record in source.patches if any(record)]
+        if perfs:
+            shown = ", ".join(
+                f"{n:03d} {m.decode_name(record)}" for n, record in enumerate(perfs[:5])
+            )
+            lines.append(f"replacing   perf  {shown}{' ...' if len(perfs) > 5 else ''}")
+        if patches:
+            shown = ", ".join(
+                f"{n:03d} {m.decode_name(record)}"
+                for n, record in enumerate(patches[:3])
+            )
+            lines.append(
+                f"            patch {shown}{' ...' if len(patches) > 3 else ''}"
+            )
+        if not perfs and not patches:
+            lines.append("replacing   (destination is empty)")
         return "\n".join(lines)
 
     def action_arm(self) -> None:
@@ -2882,21 +2896,27 @@ class KwsedApp(App[None]):
             screen._write_failed(str(message))
             self.notify_status(f"copy bank: {message}", refused=True)
             return
-        written = result["written"]
-        self._remember_bank(
-            destination.id,
-            performances=written["performances"],
-            patches=written["patches"],
-            waveseq=written["waveseq"],
-        )
-        built = SimpleNamespace(
-            performances=written["performances"],
-            patches=written["patches"],
-            waveseq=written["waveseq"],
-        )
-        self._refresh_written_bank(destination.id, built)
-        if destination.id == "CARD":
-            self._adopt_copied_card(written)
+        # The bridge and the demo both report what they wrote; a foreign
+        # device double may not. The write itself succeeded either way, so
+        # a missing payload only skips the cache and archive updates.
+        written = result.get("written")
+        if isinstance(written, dict) and {"performances", "patches", "waveseq"} <= set(
+            written
+        ):
+            self._remember_bank(
+                destination.id,
+                performances=written["performances"],
+                patches=written["patches"],
+                waveseq=written["waveseq"],
+            )
+            built = SimpleNamespace(
+                performances=written["performances"],
+                patches=written["patches"],
+                waveseq=written["waveseq"],
+            )
+            self._refresh_written_bank(destination.id, built)
+            if destination.id == "CARD":
+                self._adopt_copied_card(written)
         try:
             self._record_write(result)
         except Exception:  # noqa: S110
@@ -2936,7 +2956,13 @@ class KwsedApp(App[None]):
     def _adopt_copied_hcard(
         self, digest: str, perf_names: Dict[int, str], patch_names: Dict[int, str]
     ) -> None:
-        number = self._current_card
+        # The write went to whatever bank the physical HCard is showing,
+        # which is the *active* bank -- not necessarily the sub-bank the
+        # browser happens to be looking at. Fall back to the viewed bank
+        # when no active one has been confirmed yet.
+        number = (
+            self._active_card if self._active_card is not None else self._current_card
+        )
         if number is None:
             return
         captured = self._archive.get(number)

@@ -25,6 +25,9 @@ from kws import (
     perfcopy,
     relations,
 )
+from kws import (
+    cards as _cards,
+)
 from kws import messages as m
 from kws import records as r
 from kwsed.app import (
@@ -1226,6 +1229,55 @@ class TestBankCopyUi:
             for i in range(len(payload) // r.PERFORMANCE_SIZE)
         ]
         assert cached.performances == records
+
+    @pytest.mark.asyncio
+    async def test_a_verified_copy_auto_adopts_the_active_card(
+        self, tmp_path: Any
+    ) -> None:
+        """A Card write re-digests the active bank's archive record.
+
+        The copy is automatic: no prompt, and the bank's identity (name,
+        label, capture time) survives while its content record and digest
+        describe what is now on the card.
+        """
+        path = str(tmp_path / "cards.json")
+        app = KwsedApp(
+            DemoDevice(), cards_path=path, bankstore_dir=str(tmp_path / "store")
+        )
+        old = _cards.capture(
+            31,
+            "Old Name",
+            {0: "Old Perf"},
+            {0: "Old Patch"},
+            label="WPC-13",
+            digest="old-digest",
+        )
+        app._archive[31] = old
+        app._active_card = 31
+        device = app.device
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._write_gate = EditGate(armed=True)
+            await self._fire(app, pilot, banks.bank("RAM1"), banks.bank("CARD"))
+        perf_payload = _decoded_bank(device, "CARD", m.Function.ALL_PERFORMANCE_DUMP)
+        patch_payload = _decoded_bank(device, "CARD", m.Function.ALL_PATCH_DUMP)
+        perf_records = [
+            perf_payload[i * r.PERFORMANCE_SIZE : (i + 1) * r.PERFORMANCE_SIZE]
+            for i in range(len(perf_payload) // r.PERFORMANCE_SIZE)
+        ]
+        patch_records = [
+            patch_payload[i * r.PATCH_SIZE : (i + 1) * r.PATCH_SIZE]
+            for i in range(len(patch_payload) // r.PATCH_SIZE)
+        ]
+        adopted = app._archive[31]
+        assert adopted.verified is True
+        assert adopted.digest == _cards.content_digest(perf_records, patch_records)
+        assert adopted.name == "Old Name"
+        assert adopted.label == "WPC-13"
+        assert adopted.captured_at == old.captured_at
+        assert adopted.performances[0] == m.decode_name(perf_records[0])
+        assert adopted.patches[0] == m.decode_name(patch_records[0])
+        assert _cards.load(path)[31].digest == adopted.digest
 
     @pytest.mark.asyncio
     async def test_undo_restores_the_card(self, tmp_path: Any) -> None:
