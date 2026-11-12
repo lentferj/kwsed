@@ -581,7 +581,8 @@ def _cmd_copy_bank(device: Any, args: argparse.Namespace) -> int:
         print(str(exc))
         return spec.EXIT_USAGE
 
-    print(f"copying: {source.label} -> {destination.label}, all three kinds")
+    via = "the unit's move" if args.method == "device" else "kwsed"
+    print(f"copying: {source.label} -> {destination.label}, all three kinds, via {via}")
     if not _confirmed(
         args,
         "copy-bank",
@@ -590,7 +591,12 @@ def _cmd_copy_bank(device: Any, args: argparse.Namespace) -> int:
         return spec.EXIT_USAGE
     where = args.backup_dir or backup.default_dir()
     try:
-        result = device.copy_bank(source.number, destination.number, backup_dir=where)
+        result = device.copy_bank(
+            source.number,
+            destination.number,
+            backup_dir=where,
+            method=args.method,
+        )
     except Exception as exc:
         print(f"copy refused: {exc}")
         return spec.EXIT_ERROR
@@ -2269,13 +2275,24 @@ def build_parser() -> argparse.ArgumentParser:
             "verify, and the performances' parts that name the source bank "
             "itself are remapped to the destination -- what the unit's own "
             "MIDI/Global BANK MOVE does from the panel, done here so the copy "
-            "has a backup and a verify."
+            "has a backup and a verify. --method device sends that MOVE "
+            "instead, still backed up and read back here; the default fence "
+            "reads, remaps and writes."
         ),
     )
     sp.add_argument("source", help="source bank: RAM1, RAM2, RAM3 or CARD")
     sp.add_argument(
         "destination",
         help="destination bank: RAM1, RAM2, RAM3 or CARD (not the source)",
+    )
+    sp.add_argument(
+        "--method",
+        choices=("fence", "device"),
+        default="fence",
+        help=(
+            "fence (default) reads, remaps and writes from kwsed; device "
+            "uses the unit's own MOVE, backed up and read back here"
+        ),
     )
     sp.add_argument(
         "--yes", action="store_true", help="actually write; without it nothing is sent"
