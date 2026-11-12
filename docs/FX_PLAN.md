@@ -1,4 +1,4 @@
-# FX Editing (Performance Effects)
+# FX Editing (Performance and Multiset Effects)
 
 Status: design draft, 2026-11-12. Nothing here is implemented yet; step 0
 confirms the byte layout before any of it is built.
@@ -32,14 +32,49 @@ changes (`0x41`/`0x42`/`0x43`) can also address FX parameters live, but
 whether the SR commits those to the stored performance without a
 performance write is unmeasured.
 
+### In a Multiset
+
+A **Multiset has its own FX block, and it is the same 21 bytes.** Korg's
+Multi Mode Setup structure is documented as:
+
+```
+byte 0        FX control channel
+bytes 1-21    the effects block (21 bytes)
+bytes 22-85   16 channels x 4 bytes
+```
+
+which is exactly the arithmetic `kws/multi.py` already uses
+(`PART_BASE = 22`, `MULTISET_SIZE = 86`, names at 2752). kwsed currently
+keeps those 22 bytes opaque (`Multiset.settings`): the data survives a
+round trip, but it cannot be read or edited.
+
+**Which pair is heard depends on the MIDI mode.** In OMNI/POLY the
+performance's effects are heard; in MULTI/MONO the Multiset's own effects
+are heard and **override** the performances' (Player's Guide §7.1), and
+the panel only lets you edit the set currently in use. The **FX control
+channel** (byte 0) selects which channel's performance supplies the
+modulation/control for the Multiset's effects (§5.9), and the panel's
+**Copy FX from Performance** (§5.8) copies a performance's 21 bytes into
+a Multiset.
+
+So FX editing has **two targets sharing one codec**: a performance
+(bytes 16-36) and a Multiset (bytes 1-21, plus the control channel at 0).
+The unit's MIDI mode is readable (`MIDI_MODE_PARAMETER` 4), so the editor
+can say which set is heard and which one it is editing.
+
 ## 2. Scope
 
-**In scope**, for one performance in a writable bank (RAM 1–3 or the Card):
+**In scope**, for a performance in a writable bank (RAM 1–3 or the Card),
+and for a Multiset:
 
 - FX 1 and FX 2: type (56 names), per-type parameters, and the
   series/parallel routing and mix between them.
-- Reading the performance, editing it in memory, one fenced write,
-  read-back verify, and one undo.
+- The **same block in a Multiset**, plus its FX control channel, written
+  through `write_multi`.
+- Reading the record, editing it in memory, one fenced write, read-back
+  verify, and one undo.
+- Copying a performance's FX block into a Multiset (the panel's
+  "Copy FX from Performance"), through the same fence.
 - A CLI reader/writer for scripts, and a TUI screen for editing.
 
 **Out of scope, deliberately:**
@@ -48,12 +83,11 @@ performance write is unmeasured.
   no FX on this instrument; a patch's "effect" is whatever the performance
   running it applies.
 - Wave sequencing and the step pool (a separate editing job).
-- Multisets: they select performances and carry no FX of their own.
 - Live automation of FX parameters while a note sounds.
 - ROM performances: refused, as every write is.
 
 **The layout is a hypothesis until step 0 confirms it.** The working
-assumption is:
+assumption for the 21-byte block is:
 
 ```
 offset 16  routing / chain     1 byte   (series vs parallel, mix)
@@ -66,6 +100,8 @@ offset 28  FX 2 parameters     9 bytes
 That is 21 bytes and it matches Edisyn's storage-block indices (0–8 per
 processor) plus a type byte per processor. The routing byte is the one
 piece without a citation; the plan treats it as the first thing to prove.
+A Multiset carries the same block at bytes 1–21; its byte 0 is the FX
+control channel, not part of the block.
 
 ## 3. What to take from the templates
 
@@ -109,17 +145,29 @@ class Effect:            # one processor
     def display(self, row) -> int | str
     def with_value(self, row, value) -> "Effect"
 
-class PerformanceFx:
+class FxBlock:           # one 21-byte block, performance or Multiset
     series: bool
     fx1: Effect
     fx2: Effect
     @classmethod
-    def from_record(cls, record: bytes) -> "PerformanceFx"
-    def to_record(self, record: bytes) -> bytes
+    def from_bytes(cls, block: bytes) -> "FxBlock"
+    def to_bytes(self) -> bytes
+
+class MultisetFx:        # a Multiset's block plus its control channel
+    control_channel: int
+    block: FxBlock
+    @classmethod
+    def from_record(cls, record: bytes) -> "MultisetFx"
+    def to_record(cls, record: bytes) -> bytes
 ```
 
-- `FX_BASE = 16`, `FX_SIZE = 21` next to the existing record offsets in
-  `records.py`, and `from_record`/`to_record` rewrite only those bytes.
+- Offsets next to the existing ones: `PERFORMANCE_FX_BASE = 16` in
+  `records.py`, `MULTISET_FX_BASE = 1` in `multi.py`; `FX_SIZE = 21`.
+  `FxBlock.from_bytes`/`to_bytes` work on the slice, so the two records
+  share one codec and one table set.
+- `kws/multi.py` replaces the opaque `Multiset.settings` with the modelled
+  `control_channel` and `fx` fields. Its 22 bytes are now fully decoded;
+  the round trip must still be byte-identical when nothing is edited.
 - Every range, mask, shift and display name lives in the tables; the
   screen and the CLI must not carry a second copy.
 - Enumerated values display by name; signed values show their sign;
@@ -143,10 +191,15 @@ structurally, then check it field by field against Edisyn and the unit.
    series vs parallel; confirm the 0/1 (or two-value) encoding.
 4. Confirm the parameter block is 9 bytes per processor and that the
    bit fields in `FX_PCL_LIST` land inside it.
-5. Write **one** performance with a known FX change through the existing
+5. Do the same for a Multiset: extract bytes 1–21 of its 86-byte record,
+   confirm the block has the same meaning as a performance's, and
+   identify the FX control channel in byte 0 (edit it, read the Multiset
+   back).
+6. Write **one** performance with a known FX change through the existing
    `write_performance`, read it back, and confirm the changed byte and
-   the unchanged neighbours.
-6. Record the result in `docs/RESOLUTION_NOTES.md` with the wrong turns,
+   the unchanged neighbours. Repeat for a Multiset through `write_multi`
+   on a spare set.
+7. Record the result in `docs/RESOLUTION_NOTES.md` with the wrong turns,
    as the other layouts are recorded.
 
 If the split is wrong, the model changes and the rest of the plan is
@@ -160,6 +213,11 @@ No new stored-write path is needed:
 - `write_performance(bank, number, record, backup_dir=..., verify=True)`
   already backs the slot up, dumps it, commits with `EXECUTE_WRITE`, and
   reads it back. One call is one undo record.
+- `read_multi()` and `write_multi(data, backup_dir=..., verify=True)` do
+  the same for the whole Multi Mode Setup. A Multiset FX edit rewrites
+  the 21-byte block in the parsed 32-record dump and writes the setup
+  once: one backup, one verify, one undo — slower than a performance
+  write because the whole setup travels, but the same fence.
 
 If a **live** path is added later, it is a separate method:
 
@@ -176,9 +234,20 @@ one; the live path is opt-in and gated like the staging writes.
 ## 7. UI
 
 **Browser key `x`** (free; `X` is already card sweep) on a **performance**
-row opens `FxScreen`. Refused on a patch row ("patches carry no effects;
-a performance's FX apply to it"), on ROM, and under the same card-mode /
-HCard read-only gates as the copy actions.
+row opens `FxScreen`; the same key inside the Multiset editor (`e`) opens
+it for the selected Multiset. Refused on a patch row ("patches carry no
+effects; a performance's FX apply to it"), on ROM, and under the same
+card-mode / HCard read-only gates as the copy actions.
+
+The screen starts with a **mode banner**, because which block is heard
+depends on the unit's MIDI mode (readable at parameter 4):
+
+- OMNI/POLY: "performance FX are heard; the Multiset's are not".
+- MULTI/MONO: "the Multiset's FX are heard and override the
+  performances'".
+
+Editing a block that is not currently heard is allowed — it is stored,
+and the banner says so rather than letting the user think it is live.
 
 `FxScreen` is a `MultiEditScreen`-shaped modal:
 
@@ -192,7 +261,7 @@ FX 2       Off
   ...
 ```
 
-- Rows come from `PerformanceFx.rows()`; a type change rebuilds the
+- Rows come from `FxBlock`'s rows; a type change rebuilds the
   parameter rows and asks for confirmation first (the number and the
   bytes belong together; the unit reinterprets the old bytes).
 - `enter` / a digit / `+`/`-` edit a value, as on the other screens.
@@ -203,42 +272,62 @@ FX 2       Off
   record.
 - The screen owns no device: `on_read` and `on_write` callbacks, the app's
   workers do the MIDI, and the status line says whether the write landed.
-- Opening the screen sends nothing; it reads the performance (or uses the
+- Opening the screen sends nothing; it reads the record (or uses the
   cached source) before showing values. The footer says what was read and
   whether it is cached.
+- For a Multiset, one extra row above FX 1: **FX control channel**
+  (1–16). It is part of the Multiset's record, not of the block.
+- A **Copy FX from Performance** action takes a performance's 21-byte
+  block into the Multiset (the panel's §5.8 command), through the same
+  fence; the reverse direction is the same codec and is offered too.
+- The write is one `write_performance` for a performance, one
+  `write_multi` for a Multiset; the footer says which, because the
+  second is a whole-setup write and takes longer.
 
 ## 8. CLI
 
 ```
 kwscli fx RAM1 12                 # print routing, both types and parameters
+kwscli fx --multi 7               # the Multiset's block and control channel
 kwscli fx types                   # the 56 names and their groups
 kwscli fx RAM1 12 --set fx1.type="Small Hall" \
                   --set fx1.decay=24 --yes
+kwscli fx --multi 7 --copy-from RAM1:12 --yes
+kwscli fx --multi 7 --control-channel 3 --yes
 ```
 
 - `--set` names a row by its table key; unknown keys and out-of-range
   values are usage errors before any traffic.
-- Writing requires `--yes`, like every other destructive command; the
-  write goes through `write_performance`, so it is backed up and verified.
-- `fx` with no `--set` is read-only and needs no gate.
+- Writing requires `--yes`, like every other destructive command; a
+  performance write goes through `write_performance`, a Multiset through
+  `write_multi`, so both are backed up and verified.
+- `--copy-from BANK:NUMBER` copies a performance's 21 bytes into the
+  target (performance or Multiset); `--control-channel` is Multiset-only.
+- `fx` with no `--set`/`--copy-from`/`--control-channel` is read-only and
+  needs no gate.
 
 ## 9. Tests
 
 - **Pure** (`tests/test_fx.py`): 56 types map to 31 groups; every group's
-  rows fit 9 bytes with non-overlapping masks; `from_record`/`to_record`
-  round-trip and touch only bytes 16–36; display/encode round-trips for
-  every row, including signed and enumerated values; hypothesis over raw
-  bytes for the codec.
-- **Bridge**: `write_performance` is already fenced and tested; add one
-  FX-specific test that a changed FX byte arrives and its neighbours do
-  not.
+  rows fit 9 bytes with non-overlapping masks; `FxBlock` round-trips and
+  touches only its slice; `MultisetFx.from_record`/`to_record` round-trip
+  the whole 86-byte record and preserve the control channel; display/
+  encode round-trips for every row, including signed and enumerated
+  values; hypothesis over raw bytes for the codec.
+- **Bridge**: `write_performance` and `write_multi` are already fenced
+  and tested; add one FX-specific test each that a changed FX byte
+  arrives and its neighbours do not, and that a Multiset write preserves
+  the other 31 records.
 - **App** (`tests/test_app_ui.py` or a new `test_fx_ui.py`): opening the
-  screen sends nothing; a type change asks first; an edit plus fire sends
-  exactly one performance write; the locked gate refuses; `z` restores
-  the previous performance; a patch row refuses.
-- **CLI** (`tests/test_cli.py`): `fx` prints the blocks; `--set` without
-  `--yes` sends nothing; an unknown row is a usage error; a demo write
-  verifies.
+  screen sends nothing; the mode banner matches OMNI/POLY vs MULTI/MONO;
+  a type change asks first; an edit plus fire sends exactly one
+  performance write (or one `write_multi` for a Multiset); the locked
+  gate refuses; `z` restores the previous record; a patch row refuses;
+  Copy FX from Performance lands the same 21 bytes.
+- **CLI** (`tests/test_cli.py`): `fx` prints the blocks; `--multi` prints
+  a Multiset's block and control channel; `--set` without `--yes` sends
+  nothing; an unknown row is a usage error; `--copy-from` and
+  `--control-channel` round-trip; a demo write verifies.
 - **Hardware** (`tests/test_hardware.py`, opt-in): read one performance,
   change one FX value, write, read back; assert the byte and the
   unchanged neighbours. This is the same shape as the existing spare-slot
@@ -246,14 +335,18 @@ kwscli fx RAM1 12 --set fx1.type="Small Hall" \
 
 ## 10. Order of work
 
-1. **Step 0**: derive and confirm the 21-byte layout on the bench; record
-   it. No code.
-2. `kws/fx.py`: tables, codec, `PerformanceFx`, tests. Pure bytes.
-3. `kwscli fx` read-only (`fx`, `fx types`) and tests.
-4. `FxScreen` + read worker + type chooser + confirmation; app tests for
-   "opens sending nothing".
-5. Write path through `write_performance`, arm/fire, gate, undo; app and
-   CLI `--set` tests.
+1. **Step 0**: derive and confirm the 21-byte block in both records
+   (performance bytes 16–36, Multiset bytes 1–21 plus the control
+   channel) on the bench; record it. No code.
+2. `kws/fx.py`: tables, codec, `FxBlock`, `MultisetFx`, tests; model the
+   Multiset's 22 bytes in `kws/multi.py`. Pure bytes.
+3. `kwscli fx` read-only (`fx`, `fx --multi`, `fx types`) and tests.
+4. `FxScreen` + read worker + type chooser + confirmation + mode banner,
+   reachable from a performance row and from the Multiset editor; app
+   tests for "opens sending nothing".
+5. Write paths: `write_performance` and `write_multi`, arm/fire, gate,
+   undo; Copy FX from Performance; app and CLI `--set`/`--copy-from`/
+   `--control-channel` tests.
 6. Card/HCard gates, cache refresh after the write, README keys and help.
 7. Docs: `README.md`, `TODO.md` item 2, `docs/RESOLUTION_NOTES.md` (the
    layout derivation), and a short "what a write reaches" note.
@@ -279,3 +372,16 @@ Each step is a commit that passes `make check` and the full suite.
   ones, not new ones.
 - **Effects on patches**: none. If a future measurement says otherwise,
   it changes scope, not the codec.
+- **The FX control channel's exact meaning** (modulation/control source
+  only, or also which performance's FX is used) is from the manual, not
+  measured; step 0 changes it and reads the Multiset back, but the
+  listening test in MULTI mode is the real proof.
+- **A Multiset write is a whole-setup write.** `write_multi` sends all 32
+  records; that is slower than a performance write and one undo restores
+  the whole setup, not just the edited Multiset. The screen says so.
+- **Which block is heard depends on the MIDI mode**, so a stored edit can
+  be inaudible until the mode changes. The banner is the only honest way
+  to present that; do not imply "written = heard".
+- **The panel's Copy FX direction** is documented as performance →
+  Multiset; the reverse is offered by kwsed because it is the same 21
+  bytes, but the panel's behaviour is the one to match if they differ.
