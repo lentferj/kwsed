@@ -344,7 +344,23 @@ def install_clean_exit(on_exit: Optional[Callable[[], None]] = None) -> None:
 
 
 class WavestationBridge:
-    """One open conversation with one Wavestation."""
+    """One open conversation with one Wavestation.
+
+    **WARNING:** Every write method in this class is fenced by default: the
+    destination is read and backed up before anything is sent, and (when
+    ``verify=True``) the write is read back and compared. Disabling the
+    fence (``save_backup=False`` or ``verify=False``) means:
+
+    * **Failed writes will not be detected.** If the cable is disconnected,
+      the unit is busy, or memory protection is on, the write will fail
+      silently and the synth will stay as it was (or in a partial state).
+    * **Writes cannot be undone.** Without the pre-write read, no backup
+      envelope is created.
+
+    These options exist for audition workflows where a human hears the
+    result, and for bulk operations where the caller provides its own
+    verification. Normal callers should leave them at their defaults.
+    """
 
     def __init__(
         self,
@@ -927,6 +943,7 @@ class WavestationBridge:
         ``verify=False`` skips the read-back comparison, so a failed write
         (cable disconnect, unit busy, memory protect, etc.) will not be
         detected. Without both, a failed write cannot be detected or undone.
+        A write that is not verified is a guess dressed as a confirmation.
         These options exist for the audition staging workflow where a human
         hears the result before committing; normal callers should leave both
         at their defaults.
@@ -1124,7 +1141,8 @@ class WavestationBridge:
         **WARNING:** ``verify=False`` skips the read-back comparison, so a
         failed write (cable disconnect, unit busy, memory protect, etc.) will
         not be detected. Without verification, a failed write cannot be
-        detected or undone. This option exists for workflows where the
+        detected or undone. A write that is not verified is a guess dressed
+        as a confirmation. This option exists for workflows where the
         caller provides its own confirmation; normal callers should leave it
         at its default.
         """
@@ -1262,7 +1280,8 @@ class WavestationBridge:
         **WARNING:** ``verify=False`` skips the read-back comparison, so a
         failed write (cable disconnect, unit busy, memory protect, etc.) will
         not be detected. Without verification, a failed write cannot be
-        detected or undone. This option exists for workflows where the
+        detected or undone. A write that is not verified is a guess dressed
+        as a confirmation. This option exists for workflows where the
         caller provides its own confirmation; normal callers should leave it
         at its default.
         """
@@ -1552,7 +1571,8 @@ class WavestationBridge:
         **WARNING:** ``verify=False`` skips the read-back comparison, so a
         failed write (cable disconnect, unit busy, memory protect, etc.) will
         not be detected. Without verification, a failed write cannot be
-        detected or undone. This option exists for workflows where the
+        detected or undone. A write that is not verified is a guess dressed
+        as a confirmation. This option exists for workflows where the
         caller provides its own confirmation; normal callers should leave it
         at its default.
         """
@@ -1663,7 +1683,8 @@ class WavestationBridge:
         **WARNING:** ``verify=False`` skips the read-back comparison for all
         kinds in the bundle, so a failed write (cable disconnect, unit busy,
         memory protect, etc.) will not be detected for any of them. Without
-        verification, a failed write cannot be detected or undone. This
+        verification, a failed write cannot be detected or undone. A write
+        that is not verified is a guess dressed as a confirmation. This
         option exists for workflows where the caller provides its own
         before-blocks and confirmation; normal callers should leave it at
         its default.

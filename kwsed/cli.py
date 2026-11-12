@@ -2131,9 +2131,10 @@ def build_parser() -> argparse.ArgumentParser:
             "Copy performances with their private patches into one bank. "
             "Every kind being written is read and backed up into one envelope, "
             "then all dumps are sent (wave sequences first, performances last), "
-            "then every kind is read back and compared. A failed write cannot "
+            "then every kind is read back and compared. **WARNING:** A failed "
+            "write (cable disconnect, unit busy, memory protect, etc.) cannot "
             "be detected or undone if verification is bypassed; this command "
-            "always verifies."
+            "always verifies and produces a backup."
         ),
     )
     sp.add_argument(
@@ -2249,8 +2250,9 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "WRITE a bank dump INTO the unit. The destination is read and "
             "backed up first, then the dump is sent and read back to verify. "
-            "A failed write cannot be detected or undone if verification is "
-            "bypassed; this command always verifies."
+            "**WARNING:** A failed write (cable disconnect, unit busy, memory "
+            "protect, etc.) cannot be detected or undone if verification is "
+            "bypassed; this command always verifies and produces a backup."
         ),
     )
     sp.add_argument("file", help="a .syx holding one bank dump")
