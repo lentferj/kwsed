@@ -968,7 +968,7 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
 
 
 class FxScreen(ModalScreen[None]):
-    """Read-only view of one performance's (or Multiset's) FX block."""
+    """Read-only view of one performance's or Multiset's FX block."""
 
     DEFAULT_CSS = """
     FxScreen { align: center middle; }
@@ -984,193 +984,50 @@ class FxScreen(ModalScreen[None]):
         Binding("q", "close", "Cancel"),
     ]
 
-    def __init__(  # noqa: C901
-        self,
-        *args: Any,
-        block: Any = None,
-        fx_block: Any = None,
-        fx: Any = None,
-        mode: Any = None,
-        mode_value: Any = None,
-        midi_mode: Any = None,
-        **kwargs: Any,
-    ) -> None:
+    def __init__(self, block: FxBlock, mode: Optional[int] = None) -> None:
         super().__init__()
-        resolved_block = block
-        if resolved_block is None:
-            resolved_block = fx_block
-        if resolved_block is None:
-            resolved_block = fx
-        if resolved_block is None:
-            for arg in args:
-                if isinstance(arg, FxBlock):
-                    resolved_block = arg
-                    break
-        if resolved_block is None and args and not isinstance(args[0], int):
-            # Last resort: first positional.
-            resolved_block = args[0]
-        self.block = resolved_block
-        self.fx_block = self.block
-        self.fx = self.block
+        self._block = block
+        self._mode = mode
 
-        resolved_mode = mode
-        if resolved_mode is None:
-            resolved_mode = mode_value
-        if resolved_mode is None:
-            resolved_mode = midi_mode
-        if resolved_mode is None:
-            for arg in args:
-                if isinstance(arg, bool):
-                    continue
-                if isinstance(arg, int):
-                    resolved_mode = arg
-                    break
-        self.mode = resolved_mode
-        self.mode_value = self.mode
-        self.midi_mode = self.mode
+    def mode_banner(self) -> str:
+        """Which block the unit is currently playing.
 
-        self.mode_banner_text = self._banner_text(self.mode)
-        self.mode_banner = self.mode_banner_text
-        self.banner_text = self.mode_banner_text
-        self._table: Optional[DataTable[Any]] = None
-
-    @staticmethod
-    def _banner_text(mode: Any) -> str:
-        if mode == 0:
+        The system setup's field 4 is Edisyn's MIDI mode parameter:
+        0 = performance effects heard, 1 = Multiset effects heard. The
+        offset comes from the documented system structure and is to
+        confirm on hardware (docs/FX_PLAN.md, step 0).
+        """
+        if self._mode == 0:
             return "performance FX are heard (OMNI/POLY)"
-        if mode == 1:
+        if self._mode == 1:
             return "the Multiset's FX are heard (MULTI/MONO)"
         return "MIDI mode unknown"
 
     def compose(self) -> ComposeResult:
         with Vertical():
             yield Label("FX", id="fx-title")
-            yield Static(self.mode_banner_text, id="fx-mode-banner")
-            table: DataTable[Any] = DataTable(id="fx-table", cursor_type="row")
-            try:
-                table.add_column("param", key="param")
-                table.add_column("value", key="value")
-            except Exception:  # noqa: S110
-                pass
-            self._table = table
-            yield table
+            yield Static(self.mode_banner(), id="fx-mode-banner")
+            yield DataTable(id="fx-table", cursor_type="row")
 
     def on_mount(self) -> None:
-        self._populate()
-        try:
-            if self._table is not None:
-                self._table.focus()
-        except Exception:  # noqa: S110
-            pass
-
-    def _table_widget(self) -> Optional[DataTable[Any]]:
-        if self._table is None:
-            try:
-                self._table = self.query_one("#fx-table", DataTable)
-            except Exception:
-                try:
-                    self._table = self.query_one(DataTable)
-                except Exception:
-                    self._table = None
-        return self._table
-
-    def _populate(self) -> None:  # noqa: C901
-        table = self._table_widget()
-        if table is None:
-            return
-        try:
-            table.clear()
-        except Exception:  # noqa: S110
-            pass
-        block = self.block
-        if block is None:
-            return
-        try:
-            table.add_row(
-                "routing", "series" if getattr(block, "series", False) else "parallel"
-            )
-        except Exception:  # noqa: S110
-            pass
-        # FX 1
-        try:
-            table.add_row("FX 1", getattr(block.fx1, "name", ""))
-        except Exception:  # noqa: S110
-            pass
-        try:
-            for row in block.fx1.rows():
-                try:
-                    value = block.fx1.display(row)
-                except Exception:
-                    value = ""
-                table.add_row(row.label, str(value))
-        except Exception:  # noqa: S110
-            pass
-        # FX 2
-        try:
-            table.add_row("FX 2", getattr(block.fx2, "name", ""))
-        except Exception:  # noqa: S110
-            pass
-        try:
-            for row in block.fx2.rows():
-                try:
-                    value = block.fx2.display(row)
-                except Exception:
-                    value = ""
-                table.add_row(row.label, str(value))
-        except Exception:  # noqa: S110
-            pass
-        # mix / mod
-        try:
-            table.add_row("Mix", f"{block.mix[0]} / {block.mix[1]}")
-        except Exception:  # noqa: S110
-            pass
-        try:
-            table.add_row(
-                "Mod source", f"{block.mod_source[0]} / {block.mod_source[1]}"
-            )
-        except Exception:  # noqa: S110
-            pass
-        try:
-            table.add_row(
-                "Mod amount", f"{block.mod_amount[0]} / {block.mod_amount[1]}"
-            )
-        except Exception:  # noqa: S110
-            pass
+        table = self.query_one("#fx-table", DataTable)
+        table.add_column("param", key="param")
+        table.add_column("value", key="value")
+        block = self._block
+        table.add_row("routing", "series" if block.series else "parallel")
+        table.add_row("FX 1", block.fx1.name)
+        for row in block.fx1.rows():
+            table.add_row(row.label, str(block.fx1.display(row)))
+        table.add_row("FX 2", block.fx2.name)
+        for row in block.fx2.rows():
+            table.add_row(row.label, str(block.fx2.display(row)))
+        table.add_row("Mix", f"{block.mix[0]} / {block.mix[1]}")
+        table.add_row("Mod source", f"{block.mod_source[0]} / {block.mod_source[1]}")
+        table.add_row("Mod amount", f"{block.mod_amount[0]} / {block.mod_amount[1]}")
+        table.focus()
 
     def action_close(self) -> None:
         self.dismiss(None)
-
-    # Alias handling for query_one, to tolerate alternate ids used by tests.
-    _ALIASES = {
-        "#fx-table": "#fx-table",
-        "#fx-edit-table": "#fx-table",
-        "#effect-table": "#fx-table",
-        "#fx-mode": "#fx-mode-banner",
-        "#fx-mode-banner": "#fx-mode-banner",
-        "#mode-banner": "#fx-mode-banner",
-        "#mode": "#fx-mode-banner",
-        "#fx-banner": "#fx-mode-banner",
-        "#banner": "#fx-mode-banner",
-        "#fx-title": "#fx-title",
-        "#title": "#fx-title",
-        "#fx-state": "#fx-state",
-        "#state": "#fx-state",
-    }
-
-    def query_one(self, *args: Any, **kwargs: Any) -> Any:
-        if args and isinstance(args[0], str):
-            selector = args[0]
-            mapped = self._ALIASES.get(selector)
-            if mapped is not None and mapped != selector:
-                args = (mapped,) + args[1:]
-        try:
-            return super().query_one(*args, **kwargs)
-        except Exception:
-            # Fall back to type-based lookup.
-            if args and isinstance(args[0], str) and args[0].startswith("#"):
-                # try without selector type
-                pass
-            raise
 
 
 class SendScreen(ModalScreen[Optional[Dict[str, Any]]]):

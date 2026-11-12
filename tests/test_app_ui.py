@@ -39,6 +39,7 @@ from kwsed.app import (
     VIEW_ALL,
     VIEW_ALL_FAVOURITES,
     VIEW_BANK_FAVOURITES,
+    FxScreen,
     KwsedApp,
     ViewSlot,
     favorite_bank_id,
@@ -2631,3 +2632,69 @@ class TestCopyPerformance:
             assert "refused" in text
             assert not isinstance(app.screen, SingleImportScreen)
             assert app.device.bundle_write_count == 0
+
+
+class TestFxScreen:
+    """The read-only FX view: what it shows, and that it sends no write."""
+
+    @staticmethod
+    def _block() -> Any:
+        from kws.fx import Effect, FxBlock
+
+        return FxBlock(
+            series=False,
+            fx1=Effect(type=1, raw=bytes(8)),  # Small Hall
+            fx2=Effect(type=0, raw=bytes(8)),  # Off
+            mix=(0, 0),
+            mod_source=(0, 0),
+            mod_amount=(0, 0),
+        )
+
+    def test_the_banner_says_which_block_is_heard(self) -> None:
+        block = self._block()
+        assert "performance" in FxScreen(block, 0).mode_banner()
+        assert "Multiset" in FxScreen(block, 1).mode_banner()
+        assert "unknown" in FxScreen(block, None).mode_banner()
+
+    async def test_it_shows_types_and_parameters(self, app: Any) -> None:
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.push_screen(FxScreen(self._block(), 0))
+            await settle(pilot, 4)
+            table = app.screen.query_one("#fx-table", DataTable)
+            rows = [
+                [str(cell) for cell in table.get_row_at(index)]
+                for index in range(table.row_count)
+            ]
+            text = " ".join(" ".join(row) for row in rows)
+            assert "Small Hall" in text
+            assert "Off" in text
+            assert any("Dry/Wet" in row[0] for row in rows)
+            banner = app.screen.query_one("#fx-mode-banner", Static)
+            assert "performance FX" in str(banner.content)
+
+    async def test_a_patch_row_is_refused(self, app: Any) -> None:
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._cursor_entry = lambda: banks.Slot(
+                banks.bank("RAM1"), banks.Kind.PATCH, 0
+            )
+            statuses: list[str] = []
+            app.notify_status = lambda msg, *a, **k: statuses.append(str(msg))
+            app.action_edit_fx()
+            await pilot.pause()
+            assert any("performance" in message for message in statuses)
+            assert not isinstance(app.screen, FxScreen)
+
+    async def test_a_performance_row_opens_without_writing(self, app: Any) -> None:
+        writes: list[Any] = []
+        app.device.write_performance = lambda *a, **k: writes.append(1)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._cursor_entry = lambda: banks.Slot(
+                banks.bank("RAM1"), banks.Kind.PERFORMANCE, 0
+            )
+            app.action_edit_fx()
+            await settle(pilot, 30)
+            assert isinstance(app.screen, FxScreen)
+            assert writes == []
