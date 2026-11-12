@@ -176,3 +176,44 @@ def test_invalid_type_byte_raises():
 
 def test_fx_size():
     assert FX_SIZE == 21
+
+
+class TestPclFieldAssembly:
+    """One logical parameter can span several storage fields.
+
+    Edisyn's PCL list has a high-bit entry and a sign entry per parameter;
+    a model that made one row per entry would show "Pre Delay" twice and
+    setting one row would not set the other's bits.
+    """
+
+    @staticmethod
+    def _rows() -> Any:
+        return Effect(type=1, raw=bytes(8)).rows()  # group 1, REVERB EQ
+
+    def test_one_row_per_logical_parameter(self) -> None:
+        rows = self._rows()
+        keys = [row.key for row in rows]
+        assert len(keys) == len(set(keys))
+        delays = [row for row in rows if row.label == "Pre Delay"]
+        assert len(delays) == 1
+        assert len(delays[0].fields) == 2, "low 8 bits and the high bit"
+
+    def test_a_high_bit_field_round_trips(self) -> None:
+        row = next(row for row in self._rows() if row.label == "Pre Delay")
+        effect = Effect(type=1, raw=bytes(8)).with_value(row, 300)
+        assert effect.display(row) == 300, "a 9-bit value, not 8"
+
+    def test_a_sign_field_round_trips(self) -> None:
+        row = next(row for row in self._rows() if row.label == "Mix Mod Amount")
+        effect = Effect(type=1, raw=bytes(8)).with_value(row, -7)
+        assert effect.display(row) == -7
+        assert effect.with_value(row, 7).display(row) == 7
+
+    def test_setting_one_row_leaves_the_others(self) -> None:
+        base = Effect(type=1, raw=bytes(8))
+        rows = base.rows()
+        target = next(row for row in rows if row.label == "Pre Delay")
+        changed = base.with_value(target, 300)
+        for row in rows:
+            if row.key != target.key:
+                assert changed.display(row) == base.display(row)
