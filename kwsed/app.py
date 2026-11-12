@@ -6534,8 +6534,8 @@ class KwsedApp(App[None]):
         if age < 3600:
             return f"   [dim]cached {age / 60:.0f}m ago[/dim]"
         if age < 86400:
-            return f"   [dim]cached {age / 3600:.1f}h ago[/dim]"
-        return f"   [dim]cached {age / 86400:.1f}d ago[/dim]"
+            return f"   [dim]cached {age / 3600:.0f}h ago[/dim]"
+        return f"   [dim]cached {age / 86400:.0f}d ago[/dim]"
 
     def _detail_card(self, item: SlotLike) -> None:
         """The detail line for one HCard sub-bank."""
