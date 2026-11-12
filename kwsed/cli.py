@@ -2396,6 +2396,7 @@ def _build_device(args: argparse.Namespace) -> Any:
         channel=(args.device_channel - 1) if args.device_channel else 0,
         scan=args.scan,
         on_try=lambda name: print(f"  probing {name}...", file=sys.stderr),
+        single_object_timeout=single_object_timeout,
     )
 
 

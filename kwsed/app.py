@@ -8262,6 +8262,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         # The channel on the command line wins; otherwise the one used last
         # time, so it does not have to be given again every run.
         remembered = cfg.load_channel(config_path)
+        single_object_timeout = cfg.load_single_object_timeout(config_path)
         try:
             if args.port:
                 device = b.WavestationBridge.open(
@@ -8276,7 +8277,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                         if args.device_channel
                         else (remembered if remembered is not None else 0)
                     ),
-                    single_object_timeout=cfg.load_single_object_timeout(config_path),
+                    single_object_timeout=single_object_timeout,
                 )
             else:
                 # One Identity Request to the remembered port; the sweep
@@ -8295,6 +8296,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                     ),
                     scan=args.scan,
                     on_try=lambda n: print(f"  probing {n}...", file=sys.stderr),
+                    single_object_timeout=single_object_timeout,
                 )
         except Exception as exc:
             sys.exit(f"error: {exc}")

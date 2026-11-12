@@ -594,6 +594,7 @@ class WavestationBridge:
         scan: bool = False,
         channel: int = 0,
         on_try: Optional[Callable[[str], None]] = None,
+        single_object_timeout: Optional[float] = None,
     ) -> "WavestationBridge":
         """Open the unit, sweeping every port only when that is necessary.
 
@@ -634,7 +635,8 @@ class WavestationBridge:
             remembered if remembered is not None else cfg.load_port_pair(config_path)
         )
 
-        single_object_timeout = cfg.load_single_object_timeout(config_path)
+        if single_object_timeout is None:
+            single_object_timeout = cfg.load_single_object_timeout(config_path)
 
         def probe(send: str, recv: str) -> "WavestationBridge":
             """One round trip to the named port. Raises if nothing answers."""

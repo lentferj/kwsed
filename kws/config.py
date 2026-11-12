@@ -399,6 +399,11 @@ def load_preaudit_target(path: str | None = None) -> tuple[Any, int] | None:
 
 DEFAULT_SINGLE_OBJECT_TIMEOUT = 15.0
 
+#: Default configuration values for keys that are not yet in the file.
+DEFAULT_CONFIG = {
+    "single_object_timeout": DEFAULT_SINGLE_OBJECT_TIMEOUT,
+}
+
 
 def load_single_object_timeout(path: str | None = None) -> float:
     """The timeout for single object (patch/performance) reads, in seconds."""
