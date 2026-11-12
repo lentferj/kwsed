@@ -26,7 +26,14 @@ from kws import (
     relations,
 )
 from kws import messages as m
-from kwsed.app import _HELP, KEY_HINTS, CopyPerformanceScreen, KwsedApp
+from kws import records as r
+from kwsed.app import (
+    _HELP,
+    KEY_HINTS,
+    BankCopyScreen,
+    CopyPerformanceScreen,
+    KwsedApp,
+)
 from kwsed.demo import DemoDevice
 from kwsed.file_picker import FilePickerScreen
 from kwsed.gate import EditGate
@@ -1074,3 +1081,185 @@ async def test_empty_assignments_no_write(tmp_path: Any) -> None:
     choice = SingleImportChoice(target_bank="RAM3", assignments={})
     app._import_single_chosen(choice, target, bank, sources)
     assert writes == []
+
+
+def _decoded_bank(device: DemoDevice, bank: str, function: int) -> bytes:
+    """One bank's decoded read-back payload, straight off the fake."""
+    raw = device.read_raw(banks.bank(bank).sysex, function)
+    packet = m.parse(raw)
+    assert packet is not None
+    return bytes(packet.data())
+
+
+class TestBankCopyUi:
+    @staticmethod
+    async def _fire(
+        app: KwsedApp, pilot: Any, source: Any, destination: Any
+    ) -> list[Any]:
+        """Open the picker, arm the screen, fire, and wait for the dismissal."""
+        writable = [b for b in banks.writable_banks() if b.number != source.number]
+        results: list[Any] = []
+        push = app.push_screen
+
+        def _push(screen: Any, callback: Any = None, *args: Any, **kwargs: Any) -> Any:
+            if isinstance(screen, BankCopyScreen):
+                return push(screen, results.append, *args, **kwargs)
+            return push(screen, callback, *args, **kwargs)
+
+        app.push_screen = _push  # type: ignore[method-assign]
+        app._copy_bank_target_chosen(source, writable, writable.index(destination))
+        await pilot.pause()
+        assert isinstance(app.screen, BankCopyScreen)
+        await pilot.press("a")
+        await pilot.pause()
+        await pilot.press("w")
+        for _ in range(50):
+            await pilot.pause()
+            if not isinstance(app.screen, BankCopyScreen):
+                break
+        assert not isinstance(app.screen, BankCopyScreen)
+        return results
+
+    @pytest.mark.asyncio
+    async def test_screen_open_and_arm_send_nothing(self, tmp_path: Any) -> None:
+        app = _make_app(tmp_path)
+        calls: list[Any] = []
+
+        def _never(*args: Any, **kwargs: Any) -> Any:
+            calls.append((args, kwargs))
+            raise AssertionError("opening or arming must not touch the device")
+
+        app.device.copy_bank = _never
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.push_screen(BankCopyScreen(app, banks.bank("RAM1"), banks.bank("CARD")))
+            await pilot.pause()
+            assert isinstance(app.screen, BankCopyScreen)
+            await pilot.press("a")
+            await pilot.pause()
+            assert app.screen._armed is True
+        assert calls == []
+        assert app.device.bundle_write_count == 0
+
+    @pytest.mark.asyncio
+    async def test_fire_writes_and_dismisses(self, tmp_path: Any) -> None:
+        app = _make_app(tmp_path)
+        device = app.device
+        source = banks.bank("RAM1")
+        destination = banks.bank("CARD")
+        ram_perfs = _decoded_bank(device, "RAM1", m.Function.ALL_PERFORMANCE_DUMP)
+        ram_patches = _decoded_bank(device, "RAM1", m.Function.ALL_PATCH_DUMP)
+        ram_waveseq = _decoded_bank(device, "RAM1", m.Function.ALL_WAVESEQ_DUMP)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._write_gate = EditGate(armed=True)
+            results = await self._fire(app, pilot, source, destination)
+        assert results and results[0]["ok"] is True
+        assert results[0]["destination"] == "Card"
+        assert results[0]["verified"] is True
+        got_perfs = _decoded_bank(device, "CARD", m.Function.ALL_PERFORMANCE_DUMP)
+        got_patches = _decoded_bank(device, "CARD", m.Function.ALL_PATCH_DUMP)
+        got_waveseq = _decoded_bank(device, "CARD", m.Function.ALL_WAVESEQ_DUMP)
+        assert got_perfs == r.remap_performance_banks(
+            ram_perfs, source.number, destination.number
+        )
+        assert got_patches == ram_patches
+        assert got_waveseq == ram_waveseq
+
+    @pytest.mark.asyncio
+    async def test_gate_locked_refuses(self, tmp_path: Any) -> None:
+        app = _make_app(tmp_path)
+        app._write_gate = EditGate(armed=False)
+        statuses: list[str] = []
+        app.notify_status = lambda msg, *a, **k: statuses.append(str(msg))  # type: ignore[method-assign]
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            before = len(app.screen_stack)
+            app.action_copy_bank()
+            await pilot.pause()
+            assert len(app.screen_stack) == before
+            assert not isinstance(app.screen, BankCopyScreen)
+        assert any("write gate is locked" in s for s in statuses)
+
+    @pytest.mark.asyncio
+    async def test_card_mode_none_refuses_card_end(self, tmp_path: Any) -> None:
+        app = KwsedApp(
+            DemoDevice(),
+            card_mode="none",
+            bankstore_dir=str(tmp_path / "store"),
+        )
+        statuses: list[str] = []
+        app.notify_status = lambda msg, *a, **k: statuses.append(str(msg))  # type: ignore[method-assign]
+        source = banks.bank("RAM1")
+        writable = [b for b in banks.writable_banks() if b.number != source.number]
+        assert banks.bank("CARD") in writable
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._write_gate = EditGate(armed=True)
+            before = len(app.screen_stack)
+            app._copy_bank_target_chosen(
+                source, writable, writable.index(banks.bank("CARD"))
+            )
+            await pilot.pause()
+            assert len(app.screen_stack) == before
+            assert not isinstance(app.screen, BankCopyScreen)
+            # The action refuses before the picker when the Card is a candidate.
+            app.action_copy_bank()
+            await pilot.pause()
+            assert len(app.screen_stack) == before
+        assert statuses.count("card support is off (card_mode = none)") >= 2
+
+    @pytest.mark.asyncio
+    async def test_destination_cache_updated_after_copy(self, tmp_path: Any) -> None:
+        app = _make_app(tmp_path)
+        device = app.device
+        source = banks.bank("RAM1")
+        destination = banks.bank("CARD")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._write_gate = EditGate(armed=True)
+            await self._fire(app, pilot, source, destination)
+        cached = app._sources["CARD"]
+        payload = _decoded_bank(device, "CARD", m.Function.ALL_PERFORMANCE_DUMP)
+        records = [
+            payload[i * r.PERFORMANCE_SIZE : (i + 1) * r.PERFORMANCE_SIZE]
+            for i in range(len(payload) // r.PERFORMANCE_SIZE)
+        ]
+        assert cached.performances == records
+
+    @pytest.mark.asyncio
+    async def test_undo_restores_the_card(self, tmp_path: Any) -> None:
+        app = _make_app(tmp_path)
+        device = app.device
+        source = banks.bank("RAM1")
+        destination = banks.bank("CARD")
+        before = {
+            "performances": _decoded_bank(
+                device, "CARD", m.Function.ALL_PERFORMANCE_DUMP
+            ),
+            "patches": _decoded_bank(device, "CARD", m.Function.ALL_PATCH_DUMP),
+            "waveseq": _decoded_bank(device, "CARD", m.Function.ALL_WAVESEQ_DUMP),
+        }
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._write_gate = EditGate(armed=True)
+            await self._fire(app, pilot, source, destination)
+            assert len(app._undo_log) == 1, "one bundle is one undo record"
+            app.action_undo()
+            for _ in range(50):
+                await pilot.pause()
+                if len(app._undo_log) == 0:
+                    break
+            assert len(app._undo_log) == 0, "one `z` must consume the record"
+        assert (
+            _decoded_bank(device, "CARD", m.Function.ALL_PERFORMANCE_DUMP)
+            == before["performances"]
+        )
+        assert (
+            _decoded_bank(device, "CARD", m.Function.ALL_PATCH_DUMP)
+            == before["patches"]
+        )
+        assert (
+            _decoded_bank(device, "CARD", m.Function.ALL_WAVESEQ_DUMP)
+            == before["waveseq"]
+        )
