@@ -11,9 +11,9 @@ from kws import banks, deps
 from kwsed import import_source as isrc
 
 
-def _source(bank_id: str = "RAM1", bank_number: int | None = None) -> deps.Source:
+def _source(scope_id: str = "RAM1", bank_number: int | None = None) -> deps.Source:
     return deps.Source(
-        bank_id=bank_id,
+        scope_id=scope_id,
         performances=[b"\x00"],
         patches=[b"\x01"],
         waveseq=b"\x02",
@@ -28,7 +28,7 @@ def test_make_source_entry_same_scope_alias() -> None:
         label="RAM 1", scope="RAM1", source=src, existing=existing
     )
     assert entry.scope == "RAM1#2"
-    assert entry.source.bank_id == "RAM1#2"
+    assert entry.source.scope_id == "RAM1#2"
     assert entry.source.bank_number == 0
     assert entry.label == "RAM 1 (alias)"
 
@@ -39,7 +39,7 @@ def test_make_source_entry_no_collision_keeps_scope() -> None:
         label="RAM 1", scope="RAM1", source=src, origin="/home/me/x.syx"
     )
     assert entry.scope == "RAM1"
-    assert entry.source.bank_id == "RAM1"
+    assert entry.source.scope_id == "RAM1"
     assert entry.label == "RAM 1"
     assert entry.origin == "/home/me/x.syx"
     assert entry.source_path == "/home/me/x.syx"
@@ -86,7 +86,7 @@ def test_compact_origin_examples() -> None:
 def test_input_source_not_mutated() -> None:
     src = _source(bank_number=5)
     before = (
-        src.bank_id,
+        src.scope_id,
         list(src.performances),
         list(src.patches),
         src.waveseq,
@@ -96,7 +96,7 @@ def test_input_source_not_mutated() -> None:
         label="x", scope="RAM1", source=src, existing={"RAM1": object()}
     )
     after = (
-        src.bank_id,
+        src.scope_id,
         list(src.performances),
         list(src.patches),
         src.waveseq,
@@ -114,14 +114,14 @@ def test_source_bank_number() -> None:
 
 def test_merge_complementary_fragments() -> None:
     perfs = deps.Source(
-        bank_id="RAM1",
+        scope_id="RAM1",
         performances=[b"p"],
         patches=[],
         waveseq=None,
         bank_number=0,
     )
     patches = deps.Source(
-        bank_id="RAM1",
+        scope_id="RAM1",
         performances=[],
         patches=[b"q"],
         waveseq=None,
@@ -134,7 +134,7 @@ def test_merge_complementary_fragments() -> None:
     assert merged.bank_number == 0
 
     ws = deps.Source(
-        bank_id="RAM1", performances=[], patches=[], waveseq=b"w", bank_number=0
+        scope_id="RAM1", performances=[], patches=[], waveseq=b"w", bank_number=0
     )
     merged2 = isrc.merge_source_components(merged, ws)
     assert merged2 is not None
@@ -146,7 +146,9 @@ def test_merge_refuses_conflicting_components() -> None:
     right = _source()
     assert isrc.merge_source_components(left, right) is None
     assert isrc.same_source_bank(left, right)
-    assert not isrc.same_source_bank(left, deps.Source("ROM7", [], [], None))
+    assert not isrc.same_source_bank(
+        left, deps.Source(scope_id="ROM7", performances=[], patches=[], waveseq=None)
+    )
 
 
 def test_source_entry_existing_mapping_source_or_entry() -> None:

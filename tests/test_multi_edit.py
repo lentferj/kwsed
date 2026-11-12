@@ -225,7 +225,7 @@ def _make_source(scope: str, perf_name: str, patch_name: str) -> deps.Source:
     patches = [make_patch(patch_name)] + [bytes(rec.PATCH_SIZE) for _ in range(34)]
     perfs = [perf] + [bytes(rec.PERFORMANCE_SIZE) for _ in range(49)]
     return deps.Source(
-        bank_id=scope,
+        scope_id=scope,
         performances=perfs,
         patches=patches,
         waveseq=bytes(rec.WAVESEQ_BANK_SIZE),

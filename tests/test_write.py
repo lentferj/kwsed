@@ -20,10 +20,11 @@ backed up must not happen. It is tested by making the read fail.
 """
 
 import os
-from typing import Any, Dict, Iterable, List, Tuple
+from typing import Optional, Any, Dict, Iterable, List, Tuple
 
 import pytest
 
+from kws.bridge import MidiInPort, MidiOutPort
 from kws import backup, banks, records as r
 from kws import messages as m
 
@@ -53,23 +54,35 @@ SIZE_FOR_DUMP = {
 }
 
 
-class FakeIn:
+class FakeIn(MidiInPort):
     def __init__(self) -> None:
         self.queue: List[Tuple[List[int], float]] = []
 
-    def ignore_types(self, **_kw: Any) -> None:
+    def ignore_types(self, sysex: bool, timing: bool, active_sense: bool) -> None:
         pass
 
-    def get_message(self) -> Any:
+    def get_message(self) -> Optional[Tuple[List[int], float]]:
         return self.queue.pop(0) if self.queue else None
 
+    def close_port(self) -> None:
+        pass
 
-class FakeOut:
+    def delete(self) -> None:
+        pass
+
+
+class FakeOut(MidiOutPort):
     def __init__(self) -> None:
         self.sent: List[bytes] = []
 
-    def send_message(self, data: Iterable[int]) -> None:
+    def send_message(self, data: List[int]) -> None:
         self.sent.append(bytes(data))
+
+    def close_port(self) -> None:
+        pass
+
+    def delete(self) -> None:
+        pass
 
 
 class Unit:
@@ -124,7 +137,7 @@ class Unit:
             if len(data) > 4 and data[4] in SIZE_FOR_DUMP
         ]
 
-    def _sent(self, data: Iterable[int]) -> None:
+    def _sent(self, data: List[int]) -> None:
         raw = bytes(data)
         self.midi_out.sent.append(raw)
         if len(raw) < 5:
@@ -449,23 +462,37 @@ class TestReadsMatchTheBankTheyAskedFor:
         payload = bytes(bk.PATCHES_PER_BANK * r.PATCH_SIZE)
         reply = m.frame_bulk(m.Function.ALL_PATCH_DUMP, reply_bank, payload, channel=0)
 
-        class In:
+        class In(MidiInPort):
             def __init__(self):
-                self.queue = []
+                self.queue: List[Tuple[List[int], float]] = []
 
-            def ignore_types(self, **_kwargs):
+            def ignore_types(
+                self, sysex: bool, timing: bool, active_sense: bool
+            ) -> None:
                 pass
 
-            def get_message(self):
+            def get_message(self) -> Optional[Tuple[List[int], float]]:
                 return self.queue.pop(0) if self.queue else None
+
+            def close_port(self) -> None:
+                pass
+
+            def delete(self) -> None:
+                pass
 
         midi_in = In()
 
-        class Out:
-            def send_message(self, data):
+        class Out(MidiOutPort):
+            def send_message(self, data: List[int]) -> None:
                 # answer after the request, so _drain cannot eat it first
                 if len(data) > 4 and data[4] in (0x1C, 0x1D):
                     midi_in.queue.append((list(reply), 0.0))
+
+            def close_port(self) -> None:
+                pass
+
+            def delete(self) -> None:
+                pass
 
         return WavestationBridge(midi_in, Out(), channel=0)
 
@@ -501,7 +528,7 @@ class TestALargeSendIsRefusedWithoutTheAlsaPath:
     def _bridge(self, description, available):
         from kws import alsa, bridge as b
 
-        class Out:
+        class Out(MidiOutPort):
             def __init__(self):
                 self.sent = []
 
@@ -511,12 +538,26 @@ class TestALargeSendIsRefusedWithoutTheAlsaPath:
             def send_message(self, data):
                 self.sent.append(bytes(data))
 
-        class In:
-            def ignore_types(self, **_kwargs):
+            def close_port(self):
                 pass
 
-            def get_message(self):
+            def delete(self):
+                pass
+
+        class In(MidiInPort):
+            def ignore_types(
+                self, sysex: bool, timing: bool, active_sense: bool
+            ) -> None:
+                pass
+
+            def get_message(self) -> Optional[Tuple[List[int], float]]:
                 return None
+
+            def close_port(self) -> None:
+                pass
+
+            def delete(self) -> None:
+                pass
 
         out = Out()
         bridge = WavestationBridge(In(), out, channel=0)
@@ -689,7 +730,7 @@ class TestWritingABundle:
         unit = Unit()
         original = unit._sent
 
-        def lying(data: Iterable[int]) -> None:
+        def lying(data: List[int]) -> None:
             original(data)
             raw = bytes(data)
             if len(raw) > 5 and raw[4] == m.Function.ALL_PERFORMANCE_DUMP:

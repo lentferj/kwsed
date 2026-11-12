@@ -44,6 +44,23 @@ that.** The dump carries its own bank byte, and reading it from the reply
 rather than assuming it matches what was asked is what stops a late answer
 being filed under the wrong bank. The same mistake in a name catalog is
 silent and permanent.
+
+**Write fence.** Every write method in this module (``write_patch``,
+``write_performance``, ``write_bank``, ``write_bank_bundle``,
+``write_multi``) is fenced: the destination is read in full and backed up
+*before* anything is sent, and (when ``verify=True``) the write is read
+back and compared. The options ``save_backup=False`` (``write_patch`` only)
+and ``verify=False`` (all writers) **remove parts of that fence**.
+
+* ``save_backup=False`` skips the pre-write read entirely -- no backup
+  envelope is written and the write cannot be undone.
+* ``verify=False`` skips the read-back comparison -- the bytes are sent
+  but whether they arrived and were stored is unknown.
+
+Without these, a failed write cannot be detected or undone. They exist for
+staging (the audition workflow) where a human hears the result before
+committing, and for bulk operations where the caller provides its own
+before-blocks. Normal callers should leave both at their defaults.
 """
 
 from __future__ import annotations
@@ -54,7 +71,7 @@ import signal
 import sys
 import threading
 import time
-from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Tuple, Protocol
 
 import rtmidi
 
@@ -71,6 +88,7 @@ __all__ = [
     "SEND_GAP",
     "DEFAULT_TIMEOUT",
     "DUMP_TIMEOUT",
+    "DEFAULT_SINGLE_OBJECT_TIMEOUT",
     "CARD_NAME_OFFSET",
     "CARD_NAME_LEN",
     "MIDI_MODE_PARAMETER",
@@ -102,7 +120,7 @@ DEFAULT_TIMEOUT = 2.0
 #: taken for its answer -- which is how a read of Card 12 came back holding
 #: the patch from Card 3, and why the behaviour looked erratic rather than
 #: simply slow.
-SINGLE_OBJECT_TIMEOUT = 15.0
+DEFAULT_SINGLE_OBJECT_TIMEOUT = 15.0
 
 #: How long to wait for a bank dump. A patch bank is nearly 30 kB, which is
 #: about eight seconds of 31250-baud MIDI before the unit's own delay.
@@ -192,6 +210,59 @@ _BUNDLE_SIZES = {
 _HINTS = ("wavestation", "ws sr", "wssr", "korg")
 
 
+class MidiInPort(Protocol):
+    """Structural type for a MIDI input port.
+
+    Only the methods actually used by :class:`WavestationBridge` are
+    included. The real :class:`rtmidi.MidiIn` and test doubles implement
+    this interface.
+    """
+
+    def get_message(self) -> Optional[Tuple[List[int], float]]:
+        """Return the next pending message or ``None``.
+
+        The message is a list of MIDI status/data bytes; the float is the
+        timestamp (delta-time in seconds since the previous message).
+        """
+        ...
+
+    def ignore_types(self, sysex: bool, timing: bool, active_sense: bool) -> None:
+        """Configure which message types the port reports."""
+        ...
+
+    def close_port(self) -> None:
+        """Close the underlying system port."""
+        ...
+
+    def delete(self) -> None:
+        """Release the port object and any backend resources."""
+        ...
+
+
+class MidiOutPort(Protocol):
+    """Structural type for a MIDI output port.
+
+    Only the methods actually used by :class:`WavestationBridge` are
+    included. The real :class:`rtmidi.MidiOut` and test doubles implement
+    this interface.
+    """
+
+    def send_message(self, data: List[int]) -> None:
+        """Send a MIDI message.
+
+        ``data`` is a list of integers (status + data bytes).
+        """
+        ...
+
+    def close_port(self) -> None:
+        """Close the underlying system port."""
+        ...
+
+    def delete(self) -> None:
+        """Release the port object and any backend resources."""
+        ...
+
+
 class MidiUnavailable(RuntimeError):
     """No MIDI backend on this host at all."""
 
@@ -270,18 +341,20 @@ class WavestationBridge:
 
     def __init__(
         self,
-        midi_in: Any,
-        midi_out: Any,
+        midi_in: MidiInPort,
+        midi_out: MidiOutPort,
         *,
         channel: int = 0,
         description: str = "",
         timeout: float = DEFAULT_TIMEOUT,
+        single_object_timeout: float = DEFAULT_SINGLE_OBJECT_TIMEOUT,
     ) -> None:
-        self._in = midi_in
-        self._out = midi_out
+        self._in: MidiInPort = midi_in
+        self._out: MidiOutPort = midi_out
         self.channel = channel
         self.description = description
         self.timeout = timeout
+        self.single_object_timeout = single_object_timeout
         #: Which ports this conversation is on, by name. `description` said
         #: so only to a human reading it, and the connection policy has to
         #: be able to put the answer somewhere -- which it cannot do with a
@@ -354,6 +427,7 @@ class WavestationBridge:
         recv_port: Optional[str] = None,
         channel: int = 0,
         timeout: float = DEFAULT_TIMEOUT,
+        single_object_timeout: float = DEFAULT_SINGLE_OBJECT_TIMEOUT,
     ) -> "WavestationBridge":
         ins, outs = list_ports()
         listen = recv_port or port
@@ -383,6 +457,7 @@ class WavestationBridge:
             channel=channel,
             description=f"{port} -> {listen}",
             timeout=timeout,
+            single_object_timeout=single_object_timeout,
         )
         bridge.port = port
         bridge.recv_port = listen
@@ -552,6 +627,8 @@ class WavestationBridge:
             remembered if remembered is not None else cfg.load_port_pair(config_path)
         )
 
+        single_object_timeout = cfg.load_single_object_timeout(config_path)
+
         def probe(send: str, recv: str) -> "WavestationBridge":
             """One round trip to the named port. Raises if nothing answers."""
             try:
@@ -563,6 +640,7 @@ class WavestationBridge:
                     # as a literal there; the two probes must cost the
                     # # same or the fast path is not the fast path.
                     timeout=0.5,
+                    single_object_timeout=single_object_timeout,
                 )
             except Exception as exc:
                 raise DeviceError(str(exc)) from exc
@@ -594,7 +672,11 @@ class WavestationBridge:
 
         return midi.open_remembered_or_swept(
             probe=probe,
-            sweep=lambda try_hook: cls.autodetect(timeout=0.5, on_try=try_hook),
+            sweep=lambda try_hook: cls.autodetect(
+                timeout=0.5,
+                single_object_timeout=single_object_timeout,
+                on_try=try_hook,
+            ),
             remembered=remembered,
             scan=scan,
             remember=remember,
@@ -603,7 +685,11 @@ class WavestationBridge:
 
     @classmethod
     def autodetect(
-        cls, *, timeout: float = 0.5, on_try: Optional[Callable[[str], None]] = None
+        cls,
+        *,
+        timeout: float = 0.5,
+        single_object_timeout: float = DEFAULT_SINGLE_OBJECT_TIMEOUT,
+        on_try: Optional[Callable[[str], None]] = None,
     ) -> "WavestationBridge":
         """Find a Wavestation and adopt the channel it reports."""
         hinted = likely_korg_ports()
@@ -614,7 +700,9 @@ class WavestationBridge:
             if on_try is not None:
                 on_try(port)
             try:
-                bridge = cls.open(port, timeout=timeout)
+                bridge = cls.open(
+                    port, timeout=timeout, single_object_timeout=single_object_timeout
+                )
             except Exception:
                 continue
             try:
@@ -754,7 +842,7 @@ class WavestationBridge:
             self._drain()
             self._send(m.single_patch_request(entry.sysex, number, self.channel))
             deadline = time.time() + (
-                SINGLE_OBJECT_TIMEOUT if timeout is None else timeout
+                self.single_object_timeout if timeout is None else timeout
             )
             while time.time() < deadline:
                 message = self._in.get_message()
@@ -824,6 +912,15 @@ class WavestationBridge:
         skips the wait: the read-back is the proof, and a unit that does
         not answer a parameter change would otherwise cost its timeout for
         every staged patch.
+
+        **WARNING:** ``save_backup=False`` skips the pre-write read entirely,
+        so no backup envelope is created and the write cannot be undone.
+        ``verify=False`` skips the read-back comparison, so a failed write
+        (cable disconnect, unit busy, memory protect, etc.) will not be
+        detected. Without both, a failed write cannot be detected or undone.
+        These options exist for the audition staging workflow where a human
+        hears the result before committing; normal callers should leave both
+        at their defaults.
         """
         entry = banks.bank(bank)
         if not entry.writable:
@@ -937,7 +1034,9 @@ class WavestationBridge:
         entry = banks.bank(bank)
         self._drain()
         self._send(m.single_performance_request(entry.sysex, number, self.channel))
-        deadline = time.time() + (SINGLE_OBJECT_TIMEOUT if timeout is None else timeout)
+        deadline = time.time() + (
+            self.single_object_timeout if timeout is None else timeout
+        )
         while time.time() < deadline:
             message = self._in.get_message()
             if message is None:
@@ -1012,6 +1111,13 @@ class WavestationBridge:
         Two messages, because one is not enough: a single performance dump
         lands in the edit buffer, and a separate write command commits it to
         the slot. The backup covers the slot it overwrites.
+
+        **WARNING:** ``verify=False`` skips the read-back comparison, so a
+        failed write (cable disconnect, unit busy, memory protect, etc.) will
+        not be detected. Without verification, a failed write cannot be
+        detected or undone. This option exists for workflows where the
+        caller provides its own confirmation; normal callers should leave it
+        at its default.
         """
         entry = banks.bank(bank)
         if not entry.writable:
@@ -1143,6 +1249,13 @@ class WavestationBridge:
         and backed up first, the dump is sent, and (when ``verify``) it is
         read back and compared. There is no ROM check because the Multisets
         are not a bank.
+
+        **WARNING:** ``verify=False`` skips the read-back comparison, so a
+        failed write (cable disconnect, unit busy, memory protect, etc.) will
+        not be detected. Without verification, a failed write cannot be
+        detected or undone. This option exists for workflows where the
+        caller provides its own confirmation; normal callers should leave it
+        at its default.
         """
         raw = bytes(data)
         looks_like_frame = (
@@ -1426,6 +1539,13 @@ class WavestationBridge:
         Arming and confirming belong to the caller -- the TUI's modal and
         the command line's ``--yes`` -- because a fence that lives in the
         transport can be bypassed by the next caller who forgets it exists.
+
+        **WARNING:** ``verify=False`` skips the read-back comparison, so a
+        failed write (cable disconnect, unit busy, memory protect, etc.) will
+        not be detected. Without verification, a failed write cannot be
+        detected or undone. This option exists for workflows where the
+        caller provides its own confirmation; normal callers should leave it
+        at its default.
         """
         entry = banks.bank(bank)
         if not entry.writable:
@@ -1530,6 +1650,14 @@ class WavestationBridge:
 
         The order of the result's ``kinds`` is the send order, not the
         caller's argument order.
+
+        **WARNING:** ``verify=False`` skips the read-back comparison for all
+        kinds in the bundle, so a failed write (cable disconnect, unit busy,
+        memory protect, etc.) will not be detected for any of them. Without
+        verification, a failed write cannot be detected or undone. This
+        option exists for workflows where the caller provides its own
+        before-blocks and confirmation; normal callers should leave it at
+        its default.
         """
         entry = banks.bank(bank)
         if not entry.writable:

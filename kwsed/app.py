@@ -1762,7 +1762,7 @@ class KwsedApp(App[None]):
         if waveseq is not None:
             ws = waveseq
         self._sources[scope_id] = deps.Source(
-            bank_id=scope_id,
+            scope_id=scope_id,
             performances=perfs_list,
             patches=patches_list,
             waveseq=ws,
@@ -2348,7 +2348,7 @@ class KwsedApp(App[None]):
             for i in range(len(qb) // rec.PATCH_SIZE)
         ]
         return deps.Source(
-            bank_id=scope, performances=perfs_list, patches=patches_list, waveseq=wb
+            scope_id=scope, performances=perfs_list, patches=patches_list, waveseq=wb
         )
 
     def _before_blocks(self, source: Any, bank: Any) -> Dict[str, bytes]:
@@ -2574,7 +2574,7 @@ class KwsedApp(App[None]):
             for i in range(len(built.patches) // rec.PATCH_SIZE)
         ]
         return deps.Source(
-            bank_id=scope,
+            scope_id=scope,
             performances=perfs,
             patches=patches,
             waveseq=built.waveseq,
@@ -3824,7 +3824,7 @@ class KwsedApp(App[None]):
             for i in range(len(relocated.patches) // rec.PATCH_SIZE)
         ]
         new_source = deps.Source(
-            bank_id=target.id,
+            scope_id=target.id,
             performances=perfs,
             patches=patches,
             waveseq=relocated.waveseq,
@@ -3951,7 +3951,7 @@ class KwsedApp(App[None]):
         if number is None:
             number = self._source_bank_number_for_scope(base)
         aliased = deps.Source(
-            bank_id=alias,
+            scope_id=alias,
             performances=list(original.performances),
             patches=list(original.patches),
             waveseq=original.waveseq,
@@ -5327,7 +5327,7 @@ class KwsedApp(App[None]):
                 for i in range(len(patch_bytes) // rec.PATCH_SIZE)
             ]
             source = deps.Source(
-                bank_id=scope,
+                scope_id=scope,
                 performances=perfs_list,
                 patches=patches_list,
                 waveseq=ws_bytes,
@@ -5923,11 +5923,12 @@ class KwsedApp(App[None]):
         active_marker = " • active" if self._active_physical == card_id else ""
         verified = "verified" if card.verified else "unverified"
         digest_prefix = card.digest[:12]
+        cache_age = self._cache_age_text(_physical.scope_id(card_id))
         with contextlib.suppress(NoMatches):
             self.query_one("#detail", Static).update(
                 f"[b]{card.label or card.id}[/b]{active_marker}\n"
                 f"[dim]{verified} · {digest_prefix} · "
-                f"C captures the inserted card; L labels this one[/dim]"
+                f"C captures the inserted card; L labels this one[/dim]{cache_age}"
             )
         self._refresh_deps_pane()
 
@@ -5938,6 +5939,7 @@ class KwsedApp(App[None]):
             stored = ""
         name = stored or self._scope_slot_name(scope, item.kind, item.number)
         shown = f"[b]{name}[/b]" if name else "[dim](unnamed)[/dim]"
+        cache_age = self._cache_age_text(scope)
         if scope.startswith("CARD/"):
             key = scope[5:]
             if key.isdigit():
@@ -5967,7 +5969,7 @@ class KwsedApp(App[None]):
             title = f"{entry.label} {item.kind} {item.number:02d}{note}"
         with contextlib.suppress(NoMatches):
             self.query_one("#detail", Static).update(
-                f"[b]{title}[/b]  {shown}\n{extra}"
+                f"[b]{title}[/b]  {shown}\n{extra}{cache_age}"
             )
 
     def _detail(self, row: int) -> None:  # noqa: C901
@@ -5995,10 +5997,14 @@ class KwsedApp(App[None]):
                 return
             card = self._physical[self._current_physical]
             if row is None or row >= len(self._current):
+                cache_age = self._cache_age_text(
+                    _physical.scope_id(self._current_physical)
+                )
                 with contextlib.suppress(NoMatches):
                     self.query_one("#detail", Static).update(
                         f"[b]{card.label or card.id}[/b]\n"
                         f"[dim]C captures the inserted card; L labels this one[/dim]"
+                        f"{cache_age}"
                     )
                 return
             item = self._current[row]
@@ -6009,11 +6015,13 @@ class KwsedApp(App[None]):
             )
             name = names.get(item.number, "")
             shown = f"[b]{name}[/b]" if name else "[dim](unnamed)[/dim]"
+            cache_age = self._cache_age_text(_physical.scope_id(self._current_physical))
             with contextlib.suppress(NoMatches):
                 self.query_one("#detail", Static).update(
                     f"[b]{card.label or card.id} {item.kind} {item.number:02d}[/b]  "
                     f"{shown}\n"
                     f"[dim]C captures the inserted card; L labels this one[/dim]"
+                    f"{cache_age}"
                 )
             return
         if self._current_multi is not None:
@@ -6069,6 +6077,7 @@ class KwsedApp(App[None]):
         # A RowHighlighted event can still be queued when the app is torn
         # down, after the default screen has gone. Updating a widget that
         # is no longer there is not a reason to fail the session.
+        cache_age = self._cache_age_text(item.bank.id)
         with contextlib.suppress(NoMatches):
             self.query_one("#detail", Static).update(
                 f"[b]{item.bank.label} {item.kind} {item.number:02d}[/b]  "
@@ -6076,7 +6085,26 @@ class KwsedApp(App[None]):
                 f"[dim]Bank Select LSB[/dim] [b]{item.bank.midi_bank}[/b]   "
                 f"[dim]Program Change[/dim] "
                 f"[b]{item.bank.program_base + item.number}[/b]"
+                f"{cache_age}"
             )
+
+    def _cache_age_text(self, scope_id: str) -> str:
+        """Return a cache age suffix for the detail pane, or empty string."""
+        if self._bankstore_dir is None:
+            return ""
+        try:
+            age = bankstore.get_cache_age(scope_id, directory=self._bankstore_dir)
+        except Exception:
+            return ""
+        if age is None:
+            return ""
+        if age < 60:
+            return f"   [dim]cached {age:.0f}s ago[/dim]"
+        if age < 3600:
+            return f"   [dim]cached {age / 60:.0f}m ago[/dim]"
+        if age < 86400:
+            return f"   [dim]cached {age / 3600:.1f}h ago[/dim]"
+        return f"   [dim]cached {age / 86400:.1f}d ago[/dim]"
 
     def _detail_card(self, item: SlotLike) -> None:
         """The detail line for one HCard sub-bank."""
@@ -6103,11 +6131,12 @@ class KwsedApp(App[None]):
                 # otherwise stay "(unnamed)" with no way to fix it.
                 status += " · L to label"
             shown = name or "[dim](unnamed)[/dim]"
+        cache_age = self._cache_age_text(_cards.scope_id(number))
         with contextlib.suppress(NoMatches):
             self.query_one("#detail", Static).update(
                 f"[b]Card {number:02d} {item.kind} {item.number:02d}[/b]  "
                 f"{shown}\n"
-                f"{_cards.bank_title(captured, entry)}   [dim]{status}[/dim]"
+                f"{_cards.bank_title(captured, entry)}   [dim]{status}[/dim]{cache_age}"
             )
 
     def notify_status(
@@ -7811,6 +7840,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                         if args.device_channel
                         else (remembered if remembered is not None else 0)
                     ),
+                    single_object_timeout=cfg.load_single_object_timeout(config_path),
                 )
             else:
                 # One Identity Request to the remembered port; the sweep

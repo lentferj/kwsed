@@ -90,7 +90,7 @@ DEFAULT_PATH = os.path.join(
 
 class Catalog(_Catalog):
     def disagreement(
-        self, bank_id: str, number: int, writable: bool, kind: str = ""
+        self, scope_id: str, number: int, writable: bool, kind: str = ""
     ) -> str | None:
         """Why the unit and the catalog differ here, in words.
 
@@ -100,6 +100,6 @@ class Catalog(_Catalog):
         carries the two meanings, and the writable flag the caller passes
         picks between them.
         """
-        if not self.differs(bank_id, number, kind):
+        if not self.differs(scope_id, number, kind):
             return None
         return disagreement_words(writable)

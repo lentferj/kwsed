@@ -104,25 +104,25 @@ def plan(
     saying plainly where the budget ran out leaves it with you.
     """
     out = Plan()
-    #: Every step already spoken for, as (source bank, wave bank, step):
+    #: Every step already spoken for, as (source scope, wave bank, step):
     #: pools are per wave bank, and chains within one can share steps, so
     #: summing chain lengths double-counts the overlap and rejects plans
     #: that fit. It has to match the key the builder relocates by, or the
     #: budget counts steps the build does not actually share.
     used: Set[Tuple[str, int, int]] = set()
 
-    for bank_id, number in chosen:
-        source = sources.get(bank_id)
+    for scope_id, number in chosen:
+        source = sources.get(scope_id)
         if source is None or number >= len(source.patches):
             out.rejected.append(
-                f"{bank_id}:{number:03d} - patch not loaded from any source"
+                f"{scope_id}:{number:03d} - patch not loaded from any source"
             )
             continue
-        if (bank_id, number) in out.patch_map:
+        if (scope_id, number) in out.patch_map:
             continue
         if len(out.patch_map) >= budget.patches:
             out.rejected.append(
-                f"{bank_id}:{number:03d} - no patch slot left ({budget.patches} used)"
+                f"{scope_id}:{number:03d} - no patch slot left ({budget.patches} used)"
             )
             continue
 
@@ -131,12 +131,12 @@ def plan(
         # counted here for the same reason they are copied later: a quoted
         # sequence left behind does not degrade the sound, it removes it.
         order, chains, unresolved = deps.quoted_closure(
-            sources, deps.patch_dependencies(source.patch(number), bank_id)
+            sources, deps.patch_dependencies(source.patch(number), scope_id)
         )
         if unresolved:
             src_id, _, seq = unresolved[0]
             out.rejected.append(
-                f"{bank_id}:{number:03d} - needs wave sequence "
+                f"{scope_id}:{number:03d} - needs wave sequence "
                 f"{seq}, and {src_id}'s wave sequence bank is not loaded"
             )
             continue
@@ -154,19 +154,19 @@ def plan(
                     fresh += 1
         if len(out.sequence_map) + len(need) > budget.sequences:
             out.rejected.append(
-                f"{bank_id}:{number:03d} - needs {len(need)} more wave "
+                f"{scope_id}:{number:03d} - needs {len(need)} more wave "
                 f"sequence(s); only {budget.sequences} fit in a bank"
             )
             continue
         if len(used) + fresh > budget.steps:
             out.rejected.append(
-                f"{bank_id}:{number:03d} - needs {fresh} more step(s); the "
+                f"{scope_id}:{number:03d} - needs {fresh} more step(s); the "
                 f"bank's pool of {budget.steps} has "
                 f"{budget.steps - len(used)} left"
             )
             continue
 
-        out.patch_map[(bank_id, number)] = len(out.patch_map)
+        out.patch_map[(scope_id, number)] = len(out.patch_map)
         for key in need:
             out.sequence_map[key] = len(out.sequence_map)
         for key, chain in chains.items():
@@ -176,23 +176,23 @@ def plan(
     out.steps_used = len(used)
 
     if include_performances:
-        for bank_id, source in sources.items():
+        for scope_id, source in sources.items():
             for index, record in enumerate(source.performances):
                 parts = deps.performance_dependencies(record)
                 if not parts:
                     continue
                 if all(
-                    (_bank_key(sources, b, bank_id), p) in out.patch_map
+                    (_bank_key(sources, b, scope_id), p) in out.patch_map
                     for b, p in parts
                 ):
                     if len(out.performances) >= budget.performances:
                         out.notes.append(
-                            f"{bank_id}:{index:03d} is complete but the bank "
+                            f"{scope_id}:{index:03d} is complete but the bank "
                             f"already holds {budget.performances} "
                             f"performances"
                         )
                         continue
-                    out.performances.append((bank_id, index))
+                    out.performances.append((scope_id, index))
     return out
 
 
@@ -213,130 +213,144 @@ def _bank_key(sources: Dict[str, deps.Source], bank_number: int, same_bank: str)
     return same_bank
 
 
-def build(
-    sources: Dict[str, deps.Source],
-    made: Plan,
-    *,
+def _prepare_build_templates(
     template_patches: bytes,
     template_performances: bytes,
-    template_waveseq: Optional[bytes] = None,
-    destination_bank: int = 11,
-) -> Built:
-    """Assemble the banks, rewriting every reference as things move."""
+    template_waveseq: Optional[bytes],
+) -> Tuple[bytearray, bytearray, Optional[bytearray]]:
+    """Prepare mutable bytearray templates from the immutable input bytes."""
     patches = bytearray(template_patches)
     performances = bytearray(template_performances)
     waveseq = bytearray(template_waveseq) if template_waveseq else None
+    return patches, performances, waveseq
 
-    # --- wave sequences, and the steps they occupy --------------------------
-    if waveseq is not None and made.sequence_map:
-        next_step = 1  # step 0 is the pool's null link
-        # One map for the whole build, keyed by the *pool* a step came from
-        # and its number in it, so a step two sequences share is copied once
-        # and both chains point at the same slot. Copying it twice is what
-        # plan() stopped counting twice: with a per-sequence map the plan
-        # accepted a set the build then overflowed, and past step 500 the
-        # writes land on the sequence-name table.
-        #
-        # The pool is (source bank, wave bank), not the source bank alone.
-        # Two banks number their own pools independently -- step 7 of one is
-        # not step 7 of the other -- and so do two wave banks reached
-        # through the same source. Sharing across those was wrong in a way
-        # that only shows once steps quote: one physical step cannot hold
-        # two different quote targets, and the second sequence to be written
-        # silently took the first one's.
-        moved: Dict[Tuple[str, int, int], int] = {}
-        for (src_id, wave_bank, seq), slot in sorted(
-            made.sequence_map.items(), key=lambda kv: kv[1]
-        ):
-            holder = sources[src_id]
-            # plan() rejects any patch whose wave sequence bank is missing, so
-            # a Plan reaching build() cannot name a sequence it has no bytes
-            # for. Raising rather than asserting: an assert disappears under
-            # -O, and this is the same "should have been caught while
-            # planning" condition the pool-full check below already raises.
-            if holder.waveseq is None:
-                raise ValueError(
-                    f"{src_id} has no wave sequence bank, but the plan carries "
-                    f"sequence {seq} from it. This should have been caught "
-                    f"while planning."
-                )
-            chain = deps.walk_sequence(holder.waveseq, seq, bank_id=src_id)
-            pool = (src_id, wave_bank)
-            for old in chain.steps:
-                if pool + (old,) in moved:
-                    continue
-                if next_step >= rec.STEPS_PER_BANK:
-                    raise ValueError(
-                        f"the destination's pool of {rec.STEPS_PER_BANK} "
-                        f"steps is full; {src_id} sequence {seq} does not "
-                        f"fit. This should have been caught while planning."
-                    )
-                moved[pool + (old,)] = next_step
-                at_new = rec.STEP_BASE + next_step * rec.STEP_SIZE
-                at_old = rec.STEP_BASE + old * rec.STEP_SIZE
-                waveseq[at_new : at_new + rec.STEP_SIZE] = holder.waveseq[
-                    at_old : at_old + rec.STEP_SIZE
-                ]
-                next_step += 1
-            for old in chain.steps:
-                info = rec.step(holder.waveseq, old)
-                rec.set_step_links(
-                    waveseq,
-                    moved[pool + (old,)],
-                    forward=moved.get(pool + (info["forward"],), 0),
-                    back=moved.get(pool + (info["back"],), 0),
-                    loop=moved.get(pool + (info["loop"],), 0),
-                )
-                # A step's wave number below ROM_WAVE_BASE is not a wave at
-                # all: it plays another wave sequence of this same bank, and
-                # so has to be renumbered exactly as a patch's oscillator
-                # reference is. Copying it unchanged is what made a built
-                # bank point at whatever the destination happens to hold at
-                # that number -- usually a slot the build zeroed, so the
-                # step played nothing and the file looked perfect.
-                if info["wave"] < rec.ROM_WAVE_BASE:
-                    quoted = (src_id, wave_bank, info["wave"])
-                    if quoted not in made.sequence_map:
-                        raise ValueError(
-                            f"{src_id} sequence {seq} quotes sequence "
-                            f"{info['wave']}, which the plan does not carry. "
-                            f"This should have been caught while planning."
-                        )
-                    rec.set_step_wave(
-                        waveseq, moved[pool + (old,)], made.sequence_map[quoted]
-                    )
-            head = rec.SEQ_BASE + slot * rec.SEQ_SIZE
-            old_head = rec.SEQ_BASE + seq * rec.SEQ_SIZE
-            waveseq[head : head + rec.SEQ_SIZE] = holder.waveseq[
-                old_head : old_head + rec.SEQ_SIZE
-            ]
-            first = rec.sequence_header(holder.waveseq, seq)["link"]
-            waveseq[head] = (moved.get(pool + (first,), 0) >> 8) & 0xFF
-            waveseq[head + 1] = moved.get(pool + (first,), 0) & 0xFF
-            name_at = rec.SEQNAME_BASE + slot * rec.SEQNAME_SIZE
-            old_name = rec.SEQNAME_BASE + seq * rec.SEQNAME_SIZE
-            waveseq[name_at : name_at + rec.SEQNAME_SIZE] = holder.waveseq[
-                old_name : old_name + rec.SEQNAME_SIZE
-            ]
-        # Slots the plan did not fill would otherwise keep the template's
-        # headers pointing at step indices this relocation overwrote: real
-        # headers, real names, wrong steps. Park them on the null link.
-        taken = set(made.sequence_map.values())
-        for slot in range(rec.SEQUENCES_PER_BANK):
-            if slot in taken:
+
+def _build_bank_wave_sequences(
+    waveseq: Optional[bytearray],
+    sources: Dict[str, deps.Source],
+    made: Plan,
+) -> None:
+    """Build wave sequences into the template, relocating steps and remapping links."""
+    if waveseq is None or not made.sequence_map:
+        return
+
+    next_step = 1  # step 0 is the pool's null link
+    # One map for the whole build, keyed by the *pool* a step came from
+    # and its number in it, so a step two sequences share is copied once
+    # and both chains point at the same slot. Copying it twice is what
+    # plan() stopped counting twice: with a per-sequence map the plan
+    # accepted a set the build then overflowed, and past step 500 the
+    # writes land on the sequence-name table.
+    #
+    # The pool is (source scope, wave bank), not the source scope alone.
+    # Two banks number their own pools independently -- step 7 of one is
+    # not step 7 of the other -- and so do two wave banks reached
+    # through the same source. Sharing across those was wrong in a way
+    # that only shows once steps quote: one physical step cannot hold
+    # two different quote targets, and the second sequence to be written
+    # silently took the first one's.
+    moved: Dict[Tuple[str, int, int], int] = {}
+    for (src_id, wave_bank, seq), slot in sorted(
+        made.sequence_map.items(), key=lambda kv: kv[1]
+    ):
+        holder = sources[src_id]
+        # plan() rejects any patch whose wave sequence bank is missing, so
+        # a Plan reaching build() cannot name a sequence it has no bytes
+        # for. Raising rather than asserting: an assert disappears under
+        # -O, and this is the same "should have been caught while
+        # planning" condition the pool-full check below already raises.
+        if holder.waveseq is None:
+            raise ValueError(
+                f"{src_id} has no wave sequence bank, but the plan carries "
+                f"sequence {seq} from it. This should have been caught "
+                f"while planning."
+            )
+        chain = deps.walk_sequence(holder.waveseq, seq, scope_id=src_id)
+        pool = (src_id, wave_bank)
+        for old in chain.steps:
+            if pool + (old,) in moved:
                 continue
-            head = rec.SEQ_BASE + slot * rec.SEQ_SIZE
-            waveseq[head : head + rec.SEQ_SIZE] = bytes(rec.SEQ_SIZE)
-            name_at = rec.SEQNAME_BASE + slot * rec.SEQNAME_SIZE
-            waveseq[name_at : name_at + rec.SEQNAME_SIZE] = bytes(rec.SEQNAME_SIZE)
+            if next_step >= rec.STEPS_PER_BANK:
+                raise ValueError(
+                    f"the destination's pool of {rec.STEPS_PER_BANK} "
+                    f"steps is full; {src_id} sequence {seq} does not "
+                    f"fit. This should have been caught while planning."
+                )
+            moved[pool + (old,)] = next_step
+            at_new = rec.STEP_BASE + next_step * rec.STEP_SIZE
+            at_old = rec.STEP_BASE + old * rec.STEP_SIZE
+            waveseq[at_new : at_new + rec.STEP_SIZE] = holder.waveseq[
+                at_old : at_old + rec.STEP_SIZE
+            ]
+            next_step += 1
+        for old in chain.steps:
+            info = rec.step(holder.waveseq, old)
+            rec.set_step_links(
+                waveseq,
+                moved[pool + (old,)],
+                forward=moved.get(pool + (info["forward"],), 0),
+                back=moved.get(pool + (info["back"],), 0),
+                loop=moved.get(pool + (info["loop"],), 0),
+            )
+            # A step's wave number below ROM_WAVE_BASE is not a wave at
+            # all: it plays another wave sequence of this same bank, and
+            # so has to be renumbered exactly as a patch's oscillator
+            # reference is. Copying it unchanged is what made a built
+            # bank point at whatever the destination happens to hold at
+            # that number -- usually a slot the build zeroed, so the
+            # step played nothing and the file looked perfect.
+            if info["wave"] < rec.ROM_WAVE_BASE:
+                quoted = (src_id, wave_bank, info["wave"])
+                if quoted not in made.sequence_map:
+                    raise ValueError(
+                        f"{src_id} sequence {seq} quotes sequence "
+                        f"{info['wave']}, which the plan does not carry. "
+                        f"This should have been caught while planning."
+                    )
+                rec.set_step_wave(
+                    waveseq, moved[pool + (old,)], made.sequence_map[quoted]
+                )
+        head = rec.SEQ_BASE + slot * rec.SEQ_SIZE
+        old_head = rec.SEQ_BASE + seq * rec.SEQ_SIZE
+        waveseq[head : head + rec.SEQ_SIZE] = holder.waveseq[
+            old_head : old_head + rec.SEQ_SIZE
+        ]
+        first = rec.sequence_header(holder.waveseq, seq)["link"]
+        waveseq[head] = (moved.get(pool + (first,), 0) >> 8) & 0xFF
+        waveseq[head + 1] = moved.get(pool + (first,), 0) & 0xFF
+        name_at = rec.SEQNAME_BASE + slot * rec.SEQNAME_SIZE
+        old_name = rec.SEQNAME_BASE + seq * rec.SEQNAME_SIZE
+        waveseq[name_at : name_at + rec.SEQNAME_SIZE] = holder.waveseq[
+            old_name : old_name + rec.SEQNAME_SIZE
+        ]
+    # Slots the plan did not fill would otherwise keep the template's
+    # headers pointing at step indices this relocation overwrote: real
+    # headers, real names, wrong steps. Park them on the null link.
+    taken = set(made.sequence_map.values())
+    for slot in range(rec.SEQUENCES_PER_BANK):
+        if slot in taken:
+            continue
+        head = rec.SEQ_BASE + slot * rec.SEQ_SIZE
+        waveseq[head : head + rec.SEQ_SIZE] = bytes(rec.SEQ_SIZE)
+        name_at = rec.SEQNAME_BASE + slot * rec.SEQNAME_SIZE
+        waveseq[name_at : name_at + rec.SEQNAME_SIZE] = bytes(rec.SEQNAME_SIZE)
 
-    # --- patches -------------------------------------------------------------
-    for (bank_id, number), slot in sorted(made.patch_map.items(), key=lambda kv: kv[1]):
-        record = bytearray(sources[bank_id].patch(number))
+
+def _build_bank_patches(
+    patches: bytearray,
+    sources: Dict[str, deps.Source],
+    made: Plan,
+    destination_bank: int,
+) -> None:
+    """Build patches into the template, remapping wave sequence references."""
+    for (scope_id, number), slot in sorted(
+        made.patch_map.items(), key=lambda kv: kv[1]
+    ):
+        record = bytearray(sources[scope_id].patch(number))
         for wave in rec.patch_waves(record):
             if not wave.is_sequence:
                 continue
-            key = (bank_id, wave.bank, wave.wave)
+            key = (scope_id, wave.bank, wave.wave)
             if key in made.sequence_map:
                 rec.set_patch_wave(
                     record,
@@ -347,13 +361,20 @@ def build(
         at = slot * rec.PATCH_SIZE
         patches[at : at + rec.PATCH_SIZE] = record
 
-    # --- performances --------------------------------------------------------
-    for slot, (bank_id, index) in enumerate(made.performances):
-        record = bytearray(sources[bank_id].performances[index])
+
+def _build_bank_performances(
+    performances: bytearray,
+    sources: Dict[str, deps.Source],
+    made: Plan,
+    destination_bank: int,
+) -> None:
+    """Build performances into the template, remapping patch references."""
+    for slot, (scope_id, index) in enumerate(made.performances):
+        record = bytearray(sources[scope_id].performances[index])
         for part in rec.performance_parts(record):
             if not part.used:
                 continue
-            patch_key = (_bank_key(sources, part.bank, bank_id), part.patch)
+            patch_key = (_bank_key(sources, part.bank, scope_id), part.patch)
             if patch_key in made.patch_map:
                 rec.set_performance_part(
                     record,
@@ -363,6 +384,25 @@ def build(
                 )
         at = slot * rec.PERFORMANCE_SIZE
         performances[at : at + rec.PERFORMANCE_SIZE] = record
+
+
+def build(
+    sources: Dict[str, deps.Source],
+    made: Plan,
+    *,
+    template_patches: bytes,
+    template_performances: bytes,
+    template_waveseq: Optional[bytes] = None,
+    destination_bank: int = 11,
+) -> Built:
+    """Assemble the banks, rewriting every reference as things move."""
+    patches, performances, waveseq = _prepare_build_templates(
+        template_patches, template_performances, template_waveseq
+    )
+
+    _build_bank_wave_sequences(waveseq, sources, made)
+    _build_bank_patches(patches, sources, made, destination_bank)
+    _build_bank_performances(performances, sources, made, destination_bank)
 
     return Built(
         patches=bytes(patches),

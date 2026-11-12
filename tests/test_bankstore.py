@@ -18,6 +18,7 @@
 import base64
 import json
 import os
+import time
 
 import pytest
 
@@ -58,7 +59,7 @@ class TestRoundTrip:
             assert filename in os.listdir(d)
             src = bankstore.load(scope, directory=d)
             assert src is not None
-            assert src.bank_id == scope
+            assert src.scope_id == scope
             assert len(src.performances) == banks.PERFORMANCES_PER_BANK
             assert len(src.patches) == banks.PATCHES_PER_BANK
             assert src.waveseq == wave
@@ -232,3 +233,64 @@ class TestDefaultDir:
     def test_default_dir(self, tmp_path, monkeypatch):
         monkeypatch.setattr(favorites, "data_dir", lambda: str(tmp_path))
         assert bankstore.default_dir() == os.path.join(str(tmp_path), "banks")
+
+
+class TestCacheAge:
+    def test_get_cache_age_returns_seconds(self, tmp_path):
+        d = str(tmp_path)
+        scope = "RAM1"
+        bankstore.save(scope, performances=_perf_blob(), directory=d)
+        age = bankstore.get_cache_age(scope, directory=d)
+        assert age is not None
+        assert 0 <= age < 1  # should be nearly immediate
+
+    def test_get_cache_age_none_for_missing(self, tmp_path):
+        d = str(tmp_path)
+        assert bankstore.get_cache_age("NOPE", directory=d) is None
+
+    def test_get_cache_age_none_for_corrupt(self, tmp_path, capsys):
+        d = str(tmp_path)
+        path = os.path.join(d, "RAM1.json")
+        os.makedirs(d, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("{not json")
+        assert bankstore.get_cache_age("RAM1", directory=d) is None
+
+    def test_get_cache_age_none_for_old_format_no_timestamp(self, tmp_path):
+        d = str(tmp_path)
+        path = os.path.join(d, "OLD.json")
+        os.makedirs(d, exist_ok=True)
+        env = {"version": 1, "scope": "OLD", "performances": "AAAA"}
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(env, f)
+        assert bankstore.get_cache_age("OLD", directory=d) is None
+
+    def test_cached_at_written_to_json(self, tmp_path):
+        d = str(tmp_path)
+        scope = "RAM1"
+        bankstore.save(scope, performances=_perf_blob(), directory=d)
+        path = os.path.join(d, "RAM1.json")
+        with open(path, encoding="utf-8") as f:
+            raw = json.load(f)
+        assert "cached_at" in raw
+        assert isinstance(raw["cached_at"], (int, float))
+        # The timestamp should be very close to now
+        assert abs(raw["cached_at"] - time.time()) < 2
+
+    def test_cached_at_preserved_on_partial_merge(self, tmp_path):
+        d = str(tmp_path)
+        scope = "RAM1"
+        bankstore.save(scope, performances=_perf_blob(), directory=d)
+        # Small delay to ensure different timestamps if it were rewritten
+        time.sleep(0.01)
+        first_mtime = os.path.getmtime(os.path.join(d, "RAM1.json"))
+        bankstore.save(scope, patches=_patch_blob(), directory=d)
+        second_mtime = os.path.getmtime(os.path.join(d, "RAM1.json"))
+        # File should be rewritten
+        assert second_mtime >= first_mtime
+        # cached_at should be updated to the new save time
+        with open(os.path.join(d, "RAM1.json"), encoding="utf-8") as f:
+            raw = json.load(f)
+        assert "cached_at" in raw
+        assert isinstance(raw["cached_at"], (int, float))
+        assert abs(raw["cached_at"] - time.time()) < 2

@@ -27,8 +27,7 @@ from typing import Callable, Dict, List, Tuple
 __all__ = ["Fat12Error", "is_fat12", "read_files"]
 
 
-class Fat12Error(ValueError):
-    """Raised for malformed or truncated FAT12 images."""
+from kws.exceptions import Fat12Error
 
 
 def _is_power_of_two(value: int) -> bool:

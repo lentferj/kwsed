@@ -32,6 +32,7 @@ import base64
 import json
 import os
 import sys
+import time
 from typing import Dict, List, Optional
 
 from kws import banks, deps, favorites
@@ -43,6 +44,7 @@ __all__ = [
     "load",
     "load_all",
     "has_complete_bank",
+    "get_cache_age",
 ]
 
 
@@ -167,7 +169,7 @@ def _build_source(
     if decoded is None:
         return None
     return deps.Source(
-        bank_id=scope,
+        scope_id=scope,
         performances=_split(
             decoded.get("performances"),
             banks.PERFORMANCES_PER_BANK,
@@ -247,7 +249,11 @@ def save(
     os.makedirs(os.path.dirname(os.path.abspath(where)), exist_ok=True)
 
     existing = _read_existing(where)
-    envelope: Dict[str, object] = {"version": 1, "scope": scope_id}
+    envelope: Dict[str, object] = {
+        "version": 1,
+        "scope": scope_id,
+        "cached_at": time.time(),
+    }
     # Carry over kinds not being overwritten, so a partial capture merges
     # rather than erasing the rest of the bank.
     for kind in ("performances", "patches", "waveseq"):
@@ -276,7 +282,7 @@ def load_all(directory: Optional[str] = None) -> Dict[str, deps.Source]:
         src = _build_source(path, fallback, raw)
         if src is None:
             continue
-        out[src.bank_id] = src
+        out[src.scope_id] = src
     return out
 
 
@@ -299,3 +305,24 @@ def has_complete_bank(scope_id: str, directory: Optional[str] = None) -> bool:
     if len(perf) != _EXPECTED["performances"]:
         return False
     return len(pat) == _EXPECTED["patches"]
+
+
+def get_cache_age(scope_id: str, directory: Optional[str] = None) -> Optional[float]:
+    """Return the age of the cached bank in seconds, or None if not cached.
+
+    The age is computed as the current time minus the ``cached_at`` timestamp
+    stored when the bank was saved. If the cache file does not exist, is
+    corrupt, or lacks a ``cached_at`` field, ``None`` is returned.
+    """
+    where = _path(scope_id, directory)
+    try:
+        with open(where, encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(raw, dict):
+        return None
+    cached_at = raw.get("cached_at")
+    if not isinstance(cached_at, (int, float)):
+        return None
+    return time.time() - cached_at

@@ -90,7 +90,7 @@ def make_source_entry(
     else:
         number = source_bank_number(scope)
     aliased = deps.Source(
-        bank_id=alias,
+        scope_id=alias,
         performances=list(source.performances),
         patches=list(source.patches),
         waveseq=source.waveseq,
@@ -135,7 +135,7 @@ def source_bank_number_for(source: deps.Source) -> Optional[int]:
     """The real bank number for a Source, falling back to its scope."""
     if source.bank_number is not None:
         return int(source.bank_number)
-    return source_bank_number(source.bank_id)
+    return source_bank_number(source.scope_id)
 
 
 def same_source_bank(left: deps.Source, right: deps.Source) -> bool:
@@ -173,7 +173,7 @@ def merge_source_components(
     ):
         return None
     return deps.Source(
-        bank_id=existing.bank_id,
+        scope_id=existing.scope_id,
         performances=perfs,
         patches=patches,
         waveseq=waveseq,

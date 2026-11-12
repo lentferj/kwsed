@@ -31,13 +31,7 @@ from kws import messages as m
 __all__ = ["SoundQuestError", "UnsupportedBody", "read_sqs"]
 
 
-class SoundQuestError(ValueError):
-    """Base class for SoundQuest container errors."""
-
-
-class UnsupportedBody(SoundQuestError):
-    """A body this reader cannot decode."""
-
+from kws.exceptions import SoundQuestError, UnsupportedBody
 
 _KORG_HEADER = b"\x42\x30\x28"
 

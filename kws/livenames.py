@@ -58,12 +58,12 @@ def apply_to(catalog: Any, path: str | None = None) -> int:
 def names_from_snapshot(snapshot: dict[str, dict[int, str]]) -> dict[str, str]:
     """Convert a live snapshot to the flat key: name format.
 
-    The input is ``{bank_id: {program_change: name}}``. Kind is not
+    The input is ``{scope_id: {program_change: name}}``. Kind is not
     carried by that shape, so the default (empty) kind is used, matching
     :func:`vinsynlib.livenames.key`'s default.
     """
     flat: dict[str, str] = {}
-    for bank_id, names in snapshot.items():
+    for scope_id, names in snapshot.items():
         for program_change, name in names.items():
-            flat[key(bank_id, program_change)] = name
+            flat[key(scope_id, program_change)] = name
     return flat

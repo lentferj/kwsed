@@ -123,7 +123,7 @@ def find_companions(path: str, source: deps.Source) -> List[Companion]:
                 or len(audit.missing_waveseqs) < current_missing[1]
             ):
                 continue
-            key = (candidate, bank.source.bank_id)
+            key = (candidate, bank.source.scope_id)
             if key in seen:
                 continue
             seen.add(key)

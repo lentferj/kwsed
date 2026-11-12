@@ -10,10 +10,10 @@ from tests.test_bankbuild import make_patch, make_performance, make_waveseq
 
 
 def _source(
-    bank_id="RAM1", bank_number=None, performances=None, patches=None, waveseq=None
+    scope_id="RAM1", bank_number=None, performances=None, patches=None, waveseq=None
 ):
     return deps.Source(
-        bank_id=bank_id,
+        scope_id=scope_id,
         bank_number=bank_number,
         performances=list(performances or []),
         patches=list(patches or []),
@@ -79,7 +79,7 @@ def test_bank_number_alias():
     perf = make_performance("P", parts=((0, 0),))
     patch = make_patch("P", waves=((0, 0), (0, 40), (0, 40), (0, 40)))
     src = _source(
-        bank_id="RAM1#2",
+        scope_id="RAM1#2",
         bank_number=0,
         performances=[perf],
         patches=[patch],

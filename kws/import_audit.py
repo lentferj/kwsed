@@ -58,14 +58,16 @@ def source_bank_number(source: deps.Source) -> Optional[int]:
     """The real bank number for ``source``, or ``None`` when unknown."""
     if source.bank_number is not None:
         return int(source.bank_number)
-    bank_id = source.bank_id
-    if bank_id == "CARD" or (isinstance(bank_id, str) and bank_id.startswith("CARD/")):
+    scope_id = source.scope_id
+    if scope_id == "CARD" or (
+        isinstance(scope_id, str) and scope_id.startswith("CARD/")
+    ):
         try:
             return banks.bank("CARD").number
         except LookupError:
             return None
     try:
-        return banks.bank(bank_id).number
+        return banks.bank(scope_id).number
     except LookupError:
         return None
 

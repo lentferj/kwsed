@@ -106,18 +106,22 @@ class _Rig:
             channel=0,
             **rest,
         ):
-            # `rest` is `timeout=...`, a discovery timeout, deliberately
-            # dropped: the test that cares asserts on bridge.timeout after
+            # `rest` is `timeout=...`, `single_object_timeout=...`, a discovery timeout,
+            # deliberately dropped: the test that cares asserts on bridge.timeout after
             # the call rather than on what went in. Asserting the shape of it
             # is how a stub stops quietly accepting a call that changed.
-            assert set(rest) <= {"timeout"}, f"unexpected kwargs: {rest}"
+            assert set(rest) <= {"timeout", "single_object_timeout"}, (
+                f"unexpected kwargs: {rest}"
+            )
             rig.opened.append(port)
             made = _FakeBridge(port, recv_port or port, answers=rig.answering.get(port))
             made.channel = channel
             rig.made.append(made)
             return made
 
-        def fake_autodetect(cls, *, timeout=0.5, on_try=None):
+        def fake_autodetect(
+            cls, *, timeout=0.5, single_object_timeout=None, on_try=None
+        ):
             # Mirrors the real one's shape -- hinted ports first -- so the
             # ordering is exercised rather than stubbed away.
             rig.swept += 1

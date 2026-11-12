@@ -55,12 +55,12 @@ def make_waveseq(chains):
 
 class TestSourceLookup:
     def test_a_patch_past_the_end_says_how_many_there_are(self):
-        source = deps.Source(bank_id="A", patches=[make_patch()])
+        source = deps.Source(scope_id="A", patches=[make_patch()])
         with pytest.raises(LookupError, match="has 1 patches"):
             source.patch(3)
 
     def test_any_of_the_three_may_be_absent(self):
-        source = deps.Source(bank_id="A")
+        source = deps.Source(scope_id="A")
         assert source.performances == []
         assert source.patches == []
         assert source.waveseq is None
@@ -70,7 +70,7 @@ class TestClosure:
     def _sources(self):
         return {
             "A": deps.Source(
-                bank_id="A",
+                scope_id="A",
                 patches=[make_patch(waves=((0, 0), (0, 1), (0, 40), (0, 40)))],
                 waveseq=make_waveseq({0: [40, 41], 1: [42, 43, 44]}),
             )
@@ -112,7 +112,7 @@ class TestClosure:
         one = ((0, 0), (0, 40), (0, 40), (0, 40))
         sources = {
             "A": deps.Source(
-                bank_id="A",
+                scope_id="A",
                 patches=[make_patch(waves=one), make_patch(waves=one)],
                 waveseq=make_waveseq({0: [40, 41]}),
             )
@@ -128,7 +128,7 @@ class TestClosure:
         rom = ((0, 40), (0, 41), (0, 40), (0, 41))
         sources = {
             "A": deps.Source(
-                bank_id="A", patches=[make_patch(waves=rom)], waveseq=make_waveseq({})
+                scope_id="A", patches=[make_patch(waves=rom)], waveseq=make_waveseq({})
             )
         }
         found = deps.closure(sources, [("A", 0)])
@@ -141,13 +141,13 @@ class TestQuotedClosureBounds:
     def test_a_sequence_number_past_the_bank_is_unresolved(self):
         """Cannot happen on real data; here so a truncated bank cannot walk
         the builder off the end."""
-        sources = {"A": deps.Source(bank_id="A", waveseq=make_waveseq({0: [40]}))}
+        sources = {"A": deps.Source(scope_id="A", waveseq=make_waveseq({0: [40]}))}
         order, _, unresolved = deps.quoted_closure(sources, [("A", 0, 200)])
         assert order == []
         assert unresolved == [("A", 0, 200)]
 
     def test_a_seed_whose_source_has_no_waveseq_bank_is_unresolved(self):
-        sources = {"A": deps.Source(bank_id="A")}
+        sources = {"A": deps.Source(scope_id="A")}
         order, _, unresolved = deps.quoted_closure(sources, [("A", 0, 0)])
         assert order == []
         assert unresolved == [("A", 0, 0)]

@@ -60,7 +60,7 @@ def _make_bank(scope: str = "RAM1", active_slots: Optional[list[int]] = None) ->
     patches = [bytes(PATCH_RECORD_SIZE) for _ in range(35)]
     # make patches "active" by nonzero? Tests only count joined bytes; leave as is.
     source = deps.Source(
-        bank_id=scope,
+        scope_id=scope,
         performances=perfs,
         patches=patches,
         waveseq=None,
@@ -194,7 +194,7 @@ async def test_add_patch_file_merges_into_performance_source(tmp_path: Any) -> N
     app.notify_status = lambda *a, **k: None  # type: ignore[method-assign]
     host = _SourceHost()
     existing_source = deps.Source(
-        bank_id="RAM1",
+        scope_id="RAM1",
         performances=[_perf_record("Perf")] + [bytes(PERF_RECORD_SIZE)] * 49,
         patches=[],
         waveseq=None,
@@ -212,7 +212,7 @@ async def test_add_patch_file_merges_into_performance_source(tmp_path: Any) -> N
         label="Patches file",
         scope="RAM1",
         source=deps.Source(
-            bank_id="RAM1",
+            scope_id="RAM1",
             performances=[],
             patches=[bytes(PATCH_RECORD_SIZE)] * 35,
             waveseq=None,
@@ -230,7 +230,7 @@ def _partial_bank() -> importers.ImportedBank:
     from tests.test_bankbuild import make_performance
 
     source = deps.Source(
-        bank_id="RAM1",
+        scope_id="RAM1",
         performances=[make_performance("Needs Patch", ((0, 0),))]
         + [bytes(PERF_RECORD_SIZE)] * 49,
         patches=[],
@@ -246,7 +246,7 @@ def _complete_bank() -> Any:
     from tests.test_bankbuild import make_patch, make_performance
 
     source = deps.Source(
-        bank_id="RAM1",
+        scope_id="RAM1",
         performances=[make_performance("Needs Patch", ((0, 0),))]
         + [bytes(PERF_RECORD_SIZE)] * 49,
         patches=[make_patch("Complete")] + [bytes(PATCH_RECORD_SIZE)] * 34,
@@ -716,7 +716,7 @@ async def test_before_blocks_frames(tmp_path: Any) -> None:
 
     ws = make_waveseq({0: [40]})[0]
     source = deps.Source(
-        bank_id="RAM1",
+        scope_id="RAM1",
         performances=[make_performance("P", ((0, 0),)) for _ in range(50)],
         patches=[make_patch("Q") for _ in range(35)],
         waveseq=ws,
@@ -740,7 +740,7 @@ async def test_before_blocks_frames(tmp_path: Any) -> None:
 
     # without waveseq
     source2 = deps.Source(
-        bank_id="RAM1",
+        scope_id="RAM1",
         performances=source.performances,
         patches=source.patches,
         waveseq=None,
@@ -952,14 +952,14 @@ async def test_single_chosen_uses_session_alias_sources(tmp_path: Any) -> None:
 
     target = next(w for w in _banks.writable_banks() if w.id == "RAM3")
     target_source = deps.Source(
-        bank_id="RAM3",
+        scope_id="RAM3",
         performances=[bytes(PERF_RECORD_SIZE)] * 50,
         patches=[bytes(PATCH_RECORD_SIZE)] * 35,
         waveseq=None,
     )
     alias = "RAM1#2"
     aliased = deps.Source(
-        bank_id=alias,
+        scope_id=alias,
         performances=[make_performance("Alias", ((0, 0),))]
         + [bytes(PERF_RECORD_SIZE)] * 49,
         patches=[make_patch("AliasPatch")] + [bytes(PATCH_RECORD_SIZE)] * 34,

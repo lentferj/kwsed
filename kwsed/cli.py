@@ -630,7 +630,7 @@ def _read_scope(
         # graph reports the cost of that rather than refusing to show anything.
         waveseq = None
     return deps_mod.Source(
-        bank_id=scope,
+        scope_id=scope,
         performances=performances,
         patches=patches,
         waveseq=waveseq,
@@ -2080,6 +2080,14 @@ def build_parser() -> argparse.ArgumentParser:
     sp = sub.add_parser(
         "copy-perf",
         help="copy performances with their private patches into one bank",
+        description=(
+            "Copy performances with their private patches into one bank. "
+            "Every kind being written is read and backed up into one envelope, "
+            "then all dumps are sent (wave sequences first, performances last), "
+            "then every kind is read back and compared. A failed write cannot "
+            "be detected or undone if verification is bypassed; this command "
+            "always verifies."
+        ),
     )
     sp.add_argument(
         "spec",
@@ -2188,7 +2196,16 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument(
         "--all", action="store_true", help="include Multisets with nothing assigned"
     )
-    sp = sub.add_parser("send", help="WRITE a bank dump INTO the unit")
+    sp = sub.add_parser(
+        "send",
+        help="WRITE a bank dump INTO the unit",
+        description=(
+            "WRITE a bank dump INTO the unit. The destination is read and "
+            "backed up first, then the dump is sent and read back to verify. "
+            "A failed write cannot be detected or undone if verification is "
+            "bypassed; this command always verifies."
+        ),
+    )
     sp.add_argument("file", help="a .syx holding one bank dump")
     sp.add_argument(
         "--to", required=True, help="destination bank: RAM1, RAM2, RAM3 or CARD"
@@ -2235,7 +2252,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="where to write the envelopes (default: the per-platform data dir)",
     )
     sp_restore = backup_sub.add_parser(
-        "restore", help="WRITE a saved bank back into the unit"
+        "restore",
+        help="WRITE a saved bank back into the unit",
+        description=(
+            "WRITE a saved bank back into the unit. The destination is read and "
+            "backed up first, then the dump(s) are sent and read back to verify. "
+            "A failed write cannot be detected or undone if verification is "
+            "bypassed; this command always verifies."
+        ),
     )
     sp_restore.add_argument("file", help="an envelope written by `backup save`")
     sp_restore.add_argument(
@@ -2258,6 +2282,8 @@ def _build_device(args: argparse.Namespace) -> Any:
     from kws import config as cfg
 
     b.install_clean_exit()
+    config_path = cfg.DEFAULT_PATH
+    single_object_timeout = cfg.load_single_object_timeout(config_path)
     if args.port:
         return b.WavestationBridge.open(
             args.port,
@@ -2265,13 +2291,14 @@ def _build_device(args: argparse.Namespace) -> Any:
             # --midi-channel is now --device-channel; the old spelling still
             # parses. One-based on every command line, zero-based on the wire.
             channel=(args.device_channel - 1) if args.device_channel else 0,
+            single_object_timeout=single_object_timeout,
         )
     # No --config flag on this parser, so the settings file is the browser's
     # default per-tool path. Migrate a legacy working-directory file first.
     cfg.migrate_legacy_config("kwsed")
     # Heal a settings file an older build wrote UI state into: the unquoted
     # dotted key is a table, and the settings writer refuses such a file.
-    cfg.migrate_ui_state(cfg.DEFAULT_PATH)
+    cfg.migrate_ui_state(config_path)
     import os
 
     os.makedirs(cfg.config_dir("kwsed"), exist_ok=True)
@@ -2279,7 +2306,7 @@ def _build_device(args: argparse.Namespace) -> Any:
     # is nothing remembered, when the remembered port no longer answers, or
     # on --scan.
     return b.WavestationBridge.connect(
-        config_path=cfg.DEFAULT_PATH,
+        config_path=config_path,
         # --midi-channel is now --device-channel; the old spelling still
         # parses. One-based on every command line, zero-based on the wire.
         channel=(args.device_channel - 1) if args.device_channel else 0,

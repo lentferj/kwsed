@@ -52,7 +52,7 @@ def _source_bank(scope: str, active_slots: list[int]) -> importers.ImportedBank:
 
     patches[0] = make_patch()
     source = deps.Source(
-        bank_id=scope,
+        scope_id=scope,
         performances=perfs,
         patches=patches,
         waveseq=make_waveseq({0: [40]})[0],
@@ -93,7 +93,7 @@ def _screen(
         target_perfs[5 + i] = make_performance(f"Used{i}", ((1, i),))
     target_patches = [bytes(rec.PATCH_SIZE) for _ in range(35)]
     target_source = deps.Source(
-        bank_id=target_bank.id,
+        scope_id=target_bank.id,
         performances=target_perfs,
         patches=target_patches,
         waveseq=None,
@@ -459,7 +459,7 @@ async def test_add_source_bank_keeps_assignments_and_carries_sources() -> None:
         extra = replace(
             extra,
             source=deps.Source(
-                bank_id="RAM1#2",
+                scope_id="RAM1#2",
                 performances=extra.source.performances,
                 patches=extra.source.patches,
                 waveseq=extra.source.waveseq,
@@ -723,7 +723,7 @@ async def test_fresh_patch_mode_changes_planned_patch_slot() -> None:
     target_patches = [bytes(rec.PATCH_SIZE) for _ in range(35)]
     target_patches[2] = shared_patch
     target_source = deps.Source(
-        bank_id=target_bank.id,
+        scope_id=target_bank.id,
         performances=target_perfs,
         patches=target_patches,
         waveseq=None,

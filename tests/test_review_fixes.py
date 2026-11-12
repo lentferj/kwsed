@@ -65,7 +65,7 @@ class TestSharedStepsAreCountedAndCopiedOnce:
 
     def _sources(self):
         source = deps.Source(
-            bank_id="A",
+            scope_id="A",
             performances=[],
             patches=[_patch("One", 0), _patch("Two", 1)],
             waveseq=_waveseq({0: [1, 2, 3], 1: [2, 3]}),
@@ -110,13 +110,13 @@ class TestSharedStepsAreCountedAndCopiedOnce:
         """Step 7 of one bank is not step 7 of another."""
         sources = {
             "A": deps.Source(
-                bank_id="A",
+                scope_id="A",
                 performances=[],
                 patches=[_patch("One", 0)],
                 waveseq=_waveseq({0: [1, 2]}),
             ),
             "B": deps.Source(
-                bank_id="B",
+                scope_id="B",
                 performances=[],
                 patches=[_patch("Two", 0)],
                 waveseq=_waveseq({0: [1, 2]}),

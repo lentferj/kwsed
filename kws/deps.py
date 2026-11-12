@@ -45,10 +45,10 @@ __all__ = [
     "closure",
 ]
 
-#: A patch, as (bank id, number).
+#: A patch, as (scope id, number).
 PatchId = Tuple[str, int]
 
-#: A wave sequence, as (bank id, number).
+#: A wave sequence, as (scope id, number).
 SequenceId = Tuple[str, int]
 
 
@@ -61,12 +61,12 @@ class Source:
     can then say *which* piece it is short of instead of failing to load.
     """
 
-    bank_id: str
+    scope_id: str
     performances: List[bytes] = field(default_factory=list)
     patches: List[bytes] = field(default_factory=list)
     waveseq: Optional[bytes] = None
     #: The Wavestation bank *number* this source came from. It is usually
-    #: derivable from ``bank_id`` (RAM1, CARD/07, ...), but an imported bank
+    #: derivable from ``scope_id`` (RAM1, CARD/07, ...), but an imported bank
     #: can be held under a unique session alias so several RAM1 files can be
     #: assembled into one destination bank. In that case the alias cannot be
     #: resolved by :mod:`kws.relations`; this field carries the real number.
@@ -77,7 +77,7 @@ class Source:
             return self.patches[number]
         except IndexError:
             raise LookupError(
-                f"{self.bank_id} has {len(self.patches)} patches, so "
+                f"{self.scope_id} has {len(self.patches)} patches, so "
                 f"{number} is not one of them"
             ) from None
 
@@ -86,7 +86,7 @@ class Source:
 class SequenceChain:
     """One wave sequence, resolved into the steps it actually occupies."""
 
-    bank_id: str
+    scope_id: str
     number: int
     steps: Tuple[int, ...]
     #: Sequences quoted by this one's steps, which must travel with it.
@@ -101,7 +101,7 @@ def walk_sequence(
     bank: Sequence[int],
     number: int,
     *,
-    bank_id: str = "",
+    scope_id: str = "",
     limit: int = rec.STEPS_PER_BANK,
 ) -> SequenceChain:
     """Follow one wave sequence through the shared step pool.
@@ -119,7 +119,7 @@ def walk_sequence(
     bank builder with it. Whatever wrote them, the instrument evidently
     stops there, so this does too.
 
-    ``bank_id`` names the bank being walked, and is worth passing: the
+    ``scope_id`` names the bank being walked, and is worth passing: the
     quotes this collects are useless without it, since a quote is only
     actionable as "sequence N *of this bank*", and the caller is the only
     one that knows which bank the bytes came from. It defaults to the empty
@@ -136,19 +136,19 @@ def walk_sequence(
         steps.append(at)
         info = rec.step(bank, at)
         if info["wave"] < rec.ROM_WAVE_BASE:
-            quotes.append((bank_id, info["wave"]))
+            quotes.append((scope_id, info["wave"]))
         at = info["forward"]
     return SequenceChain(
-        bank_id=bank_id, number=number, steps=tuple(steps), quotes=tuple(quotes)
+        scope_id=scope_id, number=number, steps=tuple(steps), quotes=tuple(quotes)
     )
 
 
 def patch_dependencies(
-    record: Sequence[int], bank_id: str
+    record: Sequence[int], scope_id: str
 ) -> List[Tuple[str, int, int]]:
     """The wave sequences one patch needs, in oscillator order.
 
-    Each is ``(source bank, wave bank, sequence)``. A patch's oscillator
+    Each is ``(source scope, wave bank, sequence)``. A patch's oscillator
     carries its own wave *bank*, which need not be the bank the patch
     itself lives in. That is exactly the cross-bank reference that makes
     copying a patch between banks change how it sounds, so the bank is
@@ -157,7 +157,7 @@ def patch_dependencies(
     out: List[Tuple[str, int, int]] = []
     for wave in rec.patch_waves(record):
         if wave.is_sequence:
-            out.append((bank_id, wave.bank, wave.wave))
+            out.append((scope_id, wave.bank, wave.wave))
     # collapse duplicates while keeping order
     seen = set()
     unique = []
@@ -173,7 +173,7 @@ def performance_dependencies(record: Sequence[int]) -> List[Tuple[int, int]]:
     return [(p.bank, p.patch) for p in rec.performance_parts(record) if p.used]
 
 
-#: A wave sequence as the plan and the builder key it: the source bank it
+#: A wave sequence as the plan and the builder key it: the source scope it
 #: was loaded from, the wave bank its oscillator named, and its number.
 #: The middle field does not choose the bytes -- a Source has one wave
 #: sequence bank -- it keeps two references that differ only in wave bank
@@ -227,7 +227,7 @@ def quoted_closure(
             # or misaligned bank cannot walk the builder off the end.
             unresolved.append(key)
             continue
-        chain = walk_sequence(holder.waveseq, number, bank_id=src_id)
+        chain = walk_sequence(holder.waveseq, number, scope_id=src_id)
         order.append(key)
         chains[key] = chain
         for _, quoted in chain.quotes:
@@ -253,18 +253,18 @@ def closure(
     used: Set[Tuple[str, int, int]] = set()
     seen_seq: Set[Tuple[str, int, int]] = set()
 
-    for bank_id, number in patches:
-        source = sources.get(bank_id)
+    for scope_id, number in patches:
+        source = sources.get(scope_id)
         if source is None or number >= len(source.patches):
-            missing.append(f"{bank_id}:{number:03d} (patch not loaded)")
+            missing.append(f"{scope_id}:{number:03d} (patch not loaded)")
             continue
-        want_patches.append((bank_id, number))
+        want_patches.append((scope_id, number))
         order, chains, unresolved = quoted_closure(
-            sources, patch_dependencies(source.patch(number), bank_id)
+            sources, patch_dependencies(source.patch(number), scope_id)
         )
         for src_id, wave_bank, seq_num in unresolved:
             missing.append(
-                f"{bank_id}:{number:03d} needs wave sequence "
+                f"{scope_id}:{number:03d} needs wave sequence "
                 f"{seq_num} from bank {wave_bank}, whose wave sequence "
                 f"bank is not loaded"
             )
@@ -284,7 +284,7 @@ def closure(
     }
 
 
-def load_syx(paths: Iterable[str], bank_id: str) -> Source:
+def load_syx(paths: Iterable[str], scope_id: str) -> Source:
     """Gather one bank's material from ``.syx`` files.
 
     A bank arrives as up to three separate dumps -- performances, patches and
@@ -295,7 +295,7 @@ def load_syx(paths: Iterable[str], bank_id: str) -> Source:
     from kws import dumps
     from kws import messages as m
 
-    source = Source(bank_id=bank_id)
+    source = Source(scope_id=scope_id)
     for path in paths:
         for packet in dumps.read_syx_file(path):
             if packet.function == m.Function.ALL_PERFORMANCE_DUMP:

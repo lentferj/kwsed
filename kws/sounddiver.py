@@ -38,11 +38,12 @@ is unused.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple, cast
 
 from kws import messages as m
 from kws import records as rec
+from kws.exceptions import SoundDiverError
+from kws.types import LibBank, LibEntry
 
 __all__ = [
     "LibBank",
@@ -158,32 +159,6 @@ _OSC_SLOTS: Dict[int, Tuple[int, ...]] = {
 _PERFORMANCE_PARTS: Dict[int, int] = {37 + 16 * n: n for n in range(1, 9)}
 
 _SLOT_COMMENT = re.compile(r"^(RAM[123]|CARD)[-/](\d{1,2})$")
-
-
-class SoundDiverError(ValueError):
-    """A ``.LIB`` object this module cannot turn into a bank record."""
-
-
-@dataclass(frozen=True)
-class LibBank:
-    """The decodable patches, performances and wave sequences of one bank."""
-
-    scope: str
-    performances: List[bytes]
-    patches: List[bytes]
-    waveseq: Optional[bytes]
-    note: str
-
-
-@dataclass(frozen=True)
-class LibEntry:
-    index: int
-    name: str
-    location: str
-    comment: str
-    header: bytes
-    data: bytes
-    uses: bytes
 
 
 def _decode_block_text(block: bytes) -> str:

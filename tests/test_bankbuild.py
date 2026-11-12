@@ -240,7 +240,7 @@ class TestPlan:
     def _sources(self):
         seqs = make_waveseq({0: [40, 41], 1: [42, 43, 44]})[0]
         a = deps.Source(
-            bank_id="A",
+            scope_id="A",
             patches=[
                 make_patch("One", ((0, 0), (0, 40), (0, 40), (0, 40))),
                 make_patch("Two", ((0, 1), (0, 40), (0, 40), (0, 40))),
@@ -374,7 +374,7 @@ class TestASequenceThatQuotesAnother:
         waveseq = make_waveseq({0: [40, 41, 7], 7: [50, 51]})[0]
         return {
             "A": deps.Source(
-                bank_id="A",
+                scope_id="A",
                 patches=[make_patch("Quoter", waves=((0, 0),) * 4)],
                 performances=[],
                 waveseq=waveseq,
@@ -383,8 +383,8 @@ class TestASequenceThatQuotesAnother:
 
     def test_walk_sequence_reports_the_quote_against_its_bank(self):
         src = self._sources()
-        chain = deps.walk_sequence(src["A"].waveseq, 0, bank_id="A")
-        assert chain.bank_id == "A"
+        chain = deps.walk_sequence(src["A"].waveseq, 0, scope_id="A")
+        assert chain.scope_id == "A"
         assert chain.quotes == (("A", 7),), (
             "a quote is only actionable as 'sequence N of this bank'"
         )
@@ -403,7 +403,7 @@ class TestASequenceThatQuotesAnother:
         waveseq = make_waveseq({0: [40, 7], 7: [50, 0]})[0]
         src = {
             "A": deps.Source(
-                bank_id="A", waveseq=waveseq, patches=[make_patch(waves=((0, 0),) * 4)]
+                scope_id="A", waveseq=waveseq, patches=[make_patch(waves=((0, 0),) * 4)]
             )
         }
         order, _, unresolved = deps.quoted_closure(src, [("A", 0, 0)])
@@ -465,7 +465,7 @@ class TestASequenceThatQuotesAnother:
         waveseq = make_waveseq({0: [40, 7], 7: [50, 51]})[0]
         src = {
             "A": deps.Source(
-                bank_id="A",
+                scope_id="A",
                 waveseq=waveseq,
                 patches=[
                     make_patch("Two banks", waves=((0, 0), (2, 0), (0, 40), (0, 40)))

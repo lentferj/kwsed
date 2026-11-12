@@ -83,7 +83,7 @@ def _template_source(args: argparse.Namespace) -> deps.Source:
         "own initialised records are safer -- format a bank and dump "
         "it."
     )
-    return deps.Source(bank_id="TEMPLATE")
+    return deps.Source(scope_id="TEMPLATE")
 
 
 def _print_atomic_allocations(plan: perfcopy.AtomicPlan) -> None:

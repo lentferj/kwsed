@@ -38,7 +38,7 @@ Two things about the double that are easy to get wrong, and were:
 """
 
 import time
-from typing import Any
+from typing import Any, Callable, List, Optional, Tuple
 
 import pytest
 
@@ -46,38 +46,55 @@ from kws import backup, banks
 from kws import messages as m
 from kws import multi as multi_mod
 from kws import records as r
-from kws.bridge import DeviceError, DeviceRefused, WavestationBridge
+from kws.bridge import (
+    DeviceError,
+    DeviceRefused,
+    MidiInPort,
+    MidiOutPort,
+    WavestationBridge,
+)
 
 #: What a bank holds. A single patch is one record of this, not the bank.
 PATCH_BANK = bytes(banks.PATCHES_PER_BANK * r.PATCH_SIZE)
 ONE_PATCH = bytes(r.PATCH_SIZE)
 
 
-class FakeIn:
+class FakeIn(MidiInPort):
     """Answers from a queue, and records nothing."""
 
-    def __init__(self):
-        self.queue = []
+    def __init__(self) -> None:
+        self.queue: List[Tuple[List[int], float]] = []
 
-    def ignore_types(self, **_kw):
+    def ignore_types(self, sysex: bool, timing: bool, active_sense: bool) -> None:
         pass
 
-    def get_message(self):
+    def get_message(self) -> Optional[Tuple[List[int], float]]:
         return self.queue.pop(0) if self.queue else None
 
+    def close_port(self) -> None:
+        pass
 
-class FakeOut:
+    def delete(self) -> None:
+        pass
+
+
+class FakeOut(MidiOutPort):
     """Records what was sent, and can be told how to answer."""
 
-    def __init__(self):
-        self.sent = []
-        self.on_send = None
+    def __init__(self) -> None:
+        self.sent: List[bytes] = []
+        self.on_send: Optional[Callable[[List[int]], None]] = None
 
-    def send_message(self, data):
-        data = bytes(data)
-        self.sent.append(data)
+    def send_message(self, data: List[int]) -> None:
+        self.sent.append(bytes(data))
         if self.on_send is not None:
             self.on_send(data)
+
+    def close_port(self) -> None:
+        pass
+
+    def delete(self) -> None:
+        pass
 
 
 def _multiset_dump():
@@ -448,10 +465,9 @@ class TestSendPerformanceToBuffer:
     def test_nothing_is_sent_when_the_destination_cannot_be_read(self, tmp_path):
         """The backup is the undo. Without it, kwsed does not write."""
         unit = Unit(answer=False)
-        # a module constant in kws.bridge, read by name at the call site
-        import kws.bridge as bridge_mod
-
-        bridge_mod.SINGLE_OBJECT_TIMEOUT = 0.1
+        # the bridge reads its single-object timeout from the instance, so
+        # shortening it shortens the wait for a reply that never comes
+        unit.bridge.single_object_timeout = 0.1
         with pytest.raises(DeviceError, match="nothing was sent"):
             unit.bridge.write_patch("CARD", 3, ONE_PATCH, backup_dir=str(tmp_path))
         assert not any(

@@ -145,7 +145,11 @@ def test_complete_source_returns_empty(tmp_path: Path) -> None:
     ]
     perfs = [perf] + [bytes(r.PERFORMANCE_SIZE)] * (banks.PERFORMANCES_PER_BANK - 1)
     src = deps.Source(
-        bank_id="RAM1", performances=perfs, patches=patches, waveseq=seqs, bank_number=0
+        scope_id="RAM1",
+        performances=perfs,
+        patches=patches,
+        waveseq=seqs,
+        bank_number=0,
     )
     assert ic.find_companions(str(perf_path), src) == []
 

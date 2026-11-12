@@ -88,6 +88,7 @@ __all__ = [
     "load_preaudit_backup",
     "load_preaudit_patch_area",
     "load_preaudit_target",
+    "load_single_object_timeout",
     "migrate_legacy_config",
     "parse_preaudit_backup",
     "parse_preaudit_patch_range",
@@ -103,6 +104,7 @@ __all__ = [
     "save_show_patches",
     "save_deps_pane",
     "save_import_folder",
+    "save_single_object_timeout",
 ]
 
 _settings = bind("kwsed", DEFAULT_PATH)
@@ -393,6 +395,28 @@ def load_preaudit_target(path: str | None = None) -> tuple[Any, int] | None:
         return parse_preaudit_perf(value)
     except ValueError:
         return None
+
+
+DEFAULT_SINGLE_OBJECT_TIMEOUT = 15.0
+
+
+def load_single_object_timeout(path: str | None = None) -> float:
+    """The timeout for single object (patch/performance) reads, in seconds."""
+    data = _settings.read(path or DEFAULT_PATH)[0]
+    value = data.get("single_object_timeout")
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            pass
+    return DEFAULT_SINGLE_OBJECT_TIMEOUT
+
+
+def save_single_object_timeout(value: float, path: str | None = None) -> None:
+    """Store the single object timeout."""
+    _settings.update(path or DEFAULT_PATH, single_object_timeout=float(value))
 
 
 def load_preaudit_patch_area(

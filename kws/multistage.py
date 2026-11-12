@@ -125,7 +125,241 @@ def needs_staging(
     return False
 
 
-def plan_multi_staging(  # noqa: C901
+def _validate_target_banks(target_banks: Sequence[str]) -> None:
+    """Raise if any target bank is not writable."""
+    for name in target_banks:
+        bank = banks.bank(name)
+        if not bank.writable:
+            raise ValueError(f"target bank {name!r} is not writable")
+
+
+def _build_base_lists(
+    target_banks: Sequence[str],
+    mode: str,
+    srcs: Mapping[str, deps.Source],
+) -> Dict[str, List[relations.PerfId]]:
+    """Build base performance lists per target bank
+    (active performances for append mode)."""
+    base_lists: Dict[str, List[relations.PerfId]] = {}
+    for name in target_banks:
+        if mode == "append":
+            source = srcs.get(name)
+            active = perfcopy.active_performances(source) if source is not None else []
+            base_lists[name] = [relations.PerfId(name, slot) for slot in active]
+        else:
+            base_lists[name] = []
+    return base_lists
+
+
+def _resolve_resident_bank(
+    perf: relations.PerfId, resident_card_scope: Optional[str]
+) -> Optional[banks.Bank]:
+    """Determine the bank a resident (non-staged) performance lives on."""
+    if perf.scope_id == resident_card_scope and _is_card_scope(resident_card_scope):
+        return banks.bank("CARD")
+    try:
+        return banks.bank(perf.scope_id)
+    except LookupError:
+        return None
+
+
+def _try_stage_in_bank(
+    perf: relations.PerfId,
+    bank_name: str,
+    base_lists: Dict[str, List[relations.PerfId]],
+    staged_so_far: Dict[str, List[relations.PerfId]],
+    srcs: Mapping[str, deps.Source],
+) -> perfcopy.AtomicPlan:
+    """Try to stage a performance in a specific bank.
+    Returns the plan (check plan.fits)."""
+    candidate = base_lists[bank_name] + staged_so_far[bank_name] + [perf]
+    plan = perfcopy.plan_atomic_bank(
+        srcs, candidate, destination_bank=banks.bank(bank_name)
+    )
+    return plan
+
+
+def _process_channel(
+    d: DesiredChannel,
+    base_multiset: multi.Multiset,
+    srcs: Mapping[str, deps.Source],
+    target_banks: Sequence[str],
+    base_lists: Dict[str, List[relations.PerfId]],
+    staged_so_far: Dict[str, List[relations.PerfId]],
+    resident_card_scope: Optional[str],
+    stage_all_cards: bool,
+    force_atomic: bool,
+) -> Tuple[ChannelStageResult, Optional[str]]:
+    """Process a single desired channel. Returns (result, rejection_reason_or_None)."""
+    channel = d.channel
+    perf = d.perf
+
+    if perf is None:
+        bp = base_multiset.parts[channel - 1]
+        target_bank = None
+        try:
+            target_bank = banks.by_sysex(bp.bank)
+        except LookupError:
+            target_bank = None
+        res = ChannelStageResult(
+            channel=channel,
+            source_perf=None,
+            staged=False,
+            target_bank=target_bank,
+            target_perf_slot=50,
+            target_patch_slots=(),
+        )
+        return res, None
+
+    need = needs_staging(
+        perf,
+        srcs,
+        resident_card_scope=resident_card_scope,
+        stage_all_cards=stage_all_cards,
+        force_atomic=force_atomic or d.force_stage,
+    ) or (perf.scope_id in target_banks)
+
+    if not need:
+        target_bank = _resolve_resident_bank(perf, resident_card_scope)
+        if target_bank is None:
+            reason = (
+                f"channel {channel}: could not keep "
+                f"{perf.scope_id}:{perf.number:02d}: no such bank"
+            )
+            res = ChannelStageResult(
+                channel=channel,
+                source_perf=perf,
+                staged=False,
+                target_bank=None,
+                target_perf_slot=perf.number,
+                target_patch_slots=(),
+            )
+            return res, reason
+        res = ChannelStageResult(
+            channel=channel,
+            source_perf=perf,
+            staged=False,
+            target_bank=target_bank,
+            target_perf_slot=perf.number,
+            target_patch_slots=(),
+        )
+        return res, None
+
+    accepted_bank: Optional[str] = None
+    last_plan: Optional[perfcopy.AtomicPlan] = None
+    for bank_name in target_banks:
+        plan = _try_stage_in_bank(perf, bank_name, base_lists, staged_so_far, srcs)
+        last_plan = plan
+        if plan.fits:
+            accepted_bank = bank_name
+            break
+
+    if accepted_bank is None:
+        if last_plan is not None and last_plan.rejected:
+            reason = (
+                f"channel {channel}: could not stage "
+                f"{perf.scope_id}:{perf.number:02d}: " + "; ".join(last_plan.rejected)
+            )
+        else:
+            reason = (
+                f"channel {channel}: could not stage "
+                f"{perf.scope_id}:{perf.number:02d}: no target bank accepted"
+            )
+        res = ChannelStageResult(
+            channel=channel,
+            source_perf=perf,
+            staged=False,
+            target_bank=None,
+            target_perf_slot=perf.number,
+            target_patch_slots=(),
+        )
+        return res, reason
+
+    # Re-plan to get exact allocation for the accepted bank
+    plan = perfcopy.plan_atomic_bank(
+        srcs,
+        base_lists[accepted_bank] + staged_so_far[accepted_bank] + [perf],
+        destination_bank=banks.bank(accepted_bank),
+    )
+    alloc = plan.allocations[-1]
+    target_perf_slot = alloc.target_perf_slot
+    patch_slots = tuple(slot for _patch, slot in alloc.allocated_patches)
+    staged_so_far[accepted_bank].append(perf)
+
+    res = ChannelStageResult(
+        channel=channel,
+        source_perf=perf,
+        staged=True,
+        target_bank=banks.bank(accepted_bank),
+        target_perf_slot=target_perf_slot,
+        target_patch_slots=patch_slots,
+    )
+    return res, None
+
+
+def _remap_multiset_channel(
+    d: DesiredChannel,
+    base_multiset: multi.Multiset,
+    res: ChannelStageResult,
+) -> multi.Part:
+    """Rewrite a Multiset part based on the channel's staging result."""
+    channel = d.channel
+    bp = base_multiset.parts[channel - 1]
+
+    if d.perf is None:
+        return dataclasses.replace(bp, performance=50, level=d.level, flag=d.flag)
+
+    if res.staged:
+        if res.target_bank is None:
+            return bp
+        return dataclasses.replace(
+            bp,
+            bank=res.target_bank.sysex,
+            performance=res.target_perf_slot,
+            level=d.level,
+            flag=d.flag,
+        )
+
+    if res.target_bank is not None and not res.staged:
+        return dataclasses.replace(
+            bp,
+            bank=res.target_bank.sysex,
+            performance=res.target_perf_slot,
+            level=d.level,
+            flag=d.flag,
+        )
+
+    return bp
+
+
+def _build_banks(
+    target_banks: Sequence[str],
+    staged_so_far: Dict[str, List[relations.PerfId]],
+    srcs: Mapping[str, deps.Source],
+    mode: str,
+) -> Tuple[Dict[str, perfcopy.AtomicBuilt], List[str]]:
+    """Execute staged copies into target banks.
+    Returns (built_banks, rejected_messages)."""
+    built_banks: Dict[str, perfcopy.AtomicBuilt] = {}
+    rejected: List[str] = []
+    for bank_name in target_banks:
+        if not staged_so_far[bank_name]:
+            continue
+        built = perfcopy.copy_into_bank(
+            srcs,
+            bank_name,
+            staged_so_far[bank_name],
+            mode=mode,
+            destination_bank=banks.bank(bank_name),
+        )
+        built_banks[banks.bank(bank_name).id] = built
+        if built.plan.rejected:
+            for rtxt in built.plan.rejected:
+                rejected.append(rtxt)
+    return built_banks, rejected
+
+
+def plan_multi_staging(
     base_multiset: multi.Multiset,
     desired: Sequence[DesiredChannel],
     sources: Mapping[str, deps.Source],
@@ -149,21 +383,11 @@ def plan_multi_staging(  # noqa: C901
     if mode not in ("append", "clean"):
         raise ValueError(f"unknown mode {mode!r}")
 
-    for name in target_banks:
-        bank = banks.bank(name)
-        if not bank.writable:
-            raise ValueError(f"target bank {name!r} is not writable")
+    _validate_target_banks(target_banks)
 
     srcs = dict(sources)
 
-    base_lists: Dict[str, List[relations.PerfId]] = {}
-    for name in target_banks:
-        if mode == "append":
-            source = srcs.get(name)
-            active = perfcopy.active_performances(source) if source is not None else []
-            base_lists[name] = [relations.PerfId(name, slot) for slot in active]
-        else:
-            base_lists[name] = []
+    base_lists = _build_base_lists(target_banks, mode, srcs)
 
     staged_so_far: Dict[str, List[relations.PerfId]] = {
         name: [] for name in target_banks
@@ -176,179 +400,30 @@ def plan_multi_staging(  # noqa: C901
     rejected: List[str] = []
 
     for d in ordered_desired:
-        channel = d.channel
-        perf = d.perf
-
-        if perf is None:
-            bp = base_multiset.parts[channel - 1]
-            target_bank = None
-            try:
-                target_bank = banks.by_sysex(bp.bank)
-            except LookupError:
-                target_bank = None
-            res = ChannelStageResult(
-                channel=channel,
-                source_perf=None,
-                staged=False,
-                target_bank=target_bank,
-                target_perf_slot=50,
-                target_patch_slots=(),
-            )
-            results.append(res)
-            result_by_channel[channel] = res
-            continue
-
-        need = needs_staging(
-            perf,
+        res, reason = _process_channel(
+            d,
+            base_multiset,
             srcs,
-            resident_card_scope=resident_card_scope,
-            stage_all_cards=stage_all_cards,
-            force_atomic=force_atomic or d.force_stage,
-        ) or (perf.scope_id in target_banks)
-
-        if not need:
-            if perf.scope_id == resident_card_scope and _is_card_scope(
-                resident_card_scope
-            ):
-                target_bank = banks.bank("CARD")
-            else:
-                try:
-                    target_bank = banks.bank(perf.scope_id)
-                except LookupError:
-                    rejected.append(
-                        f"channel {channel}: could not keep "
-                        f"{perf.scope_id}:{perf.number:02d}: no such bank"
-                    )
-                    res = ChannelStageResult(
-                        channel=channel,
-                        source_perf=perf,
-                        staged=False,
-                        target_bank=None,
-                        target_perf_slot=perf.number,
-                        target_patch_slots=(),
-                    )
-                    results.append(res)
-                    result_by_channel[channel] = res
-                    continue
-            res = ChannelStageResult(
-                channel=channel,
-                source_perf=perf,
-                staged=False,
-                target_bank=target_bank,
-                target_perf_slot=perf.number,
-                target_patch_slots=(),
-            )
-            results.append(res)
-            result_by_channel[channel] = res
-            continue
-
-        accepted_bank: Optional[str] = None
-        last_plan: Optional[perfcopy.AtomicPlan] = None
-        for bank_name in target_banks:
-            candidate = base_lists[bank_name] + staged_so_far[bank_name] + [perf]
-            plan = perfcopy.plan_atomic_bank(
-                srcs, candidate, destination_bank=banks.bank(bank_name)
-            )
-            last_plan = plan
-            if plan.fits:
-                accepted_bank = bank_name
-                break
-
-        if accepted_bank is None:
-            if last_plan is not None and last_plan.rejected:
-                reason = (
-                    f"channel {channel}: could not stage "
-                    f"{perf.scope_id}:{perf.number:02d}: "
-                    + "; ".join(last_plan.rejected)
-                )
-            else:
-                reason = (
-                    f"channel {channel}: could not stage "
-                    f"{perf.scope_id}:{perf.number:02d}: no target bank accepted"
-                )
-            rejected.append(reason)
-            res = ChannelStageResult(
-                channel=channel,
-                source_perf=perf,
-                staged=False,
-                target_bank=None,
-                target_perf_slot=perf.number,
-                target_patch_slots=(),
-            )
-            results.append(res)
-            result_by_channel[channel] = res
-            continue
-
-        plan = perfcopy.plan_atomic_bank(
-            srcs,
-            base_lists[accepted_bank] + staged_so_far[accepted_bank] + [perf],
-            destination_bank=banks.bank(accepted_bank),
-        )
-        alloc = plan.allocations[-1]
-        target_perf_slot = alloc.target_perf_slot
-        patch_slots = tuple(slot for _patch, slot in alloc.allocated_patches)
-        staged_so_far[accepted_bank].append(perf)
-
-        res = ChannelStageResult(
-            channel=channel,
-            source_perf=perf,
-            staged=True,
-            target_bank=banks.bank(accepted_bank),
-            target_perf_slot=target_perf_slot,
-            target_patch_slots=patch_slots,
+            target_banks,
+            base_lists,
+            staged_so_far,
+            resident_card_scope,
+            stage_all_cards,
+            force_atomic,
         )
         results.append(res)
-        result_by_channel[channel] = res
+        result_by_channel[d.channel] = res
+        if reason is not None:
+            rejected.append(reason)
 
-    built_banks: Dict[str, perfcopy.AtomicBuilt] = {}
-    for bank_name in target_banks:
-        if not staged_so_far[bank_name]:
-            continue
-        built = perfcopy.copy_into_bank(
-            srcs,
-            bank_name,
-            staged_so_far[bank_name],
-            mode=mode,
-            destination_bank=banks.bank(bank_name),
-        )
-        built_banks[banks.bank(bank_name).id] = built
-        if built.plan.rejected:
-            for rtxt in built.plan.rejected:
-                rejected.append(rtxt)
+    built_banks, build_rejected = _build_banks(target_banks, staged_so_far, srcs, mode)
+    rejected.extend(build_rejected)
 
     new_parts = list(base_multiset.parts)
     for d in ordered_desired:
         channel = d.channel
-        bp = base_multiset.parts[channel - 1]
         res = result_by_channel[channel]
-
-        if d.perf is None:
-            new_parts[channel - 1] = dataclasses.replace(
-                bp, performance=50, level=d.level, flag=d.flag
-            )
-            continue
-
-        if res.staged:
-            if res.target_bank is None:
-                continue
-            new_parts[channel - 1] = dataclasses.replace(
-                bp,
-                bank=res.target_bank.sysex,
-                performance=res.target_perf_slot,
-                level=d.level,
-                flag=d.flag,
-            )
-            continue
-
-        if res.target_bank is not None and not res.staged:
-            new_parts[channel - 1] = dataclasses.replace(
-                bp,
-                bank=res.target_bank.sysex,
-                performance=res.target_perf_slot,
-                level=d.level,
-                flag=d.flag,
-            )
-            continue
+        new_parts[channel - 1] = _remap_multiset_channel(d, base_multiset, res)
 
     updated = dataclasses.replace(base_multiset, parts=tuple(new_parts))
 

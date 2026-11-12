@@ -28,9 +28,9 @@ RAM1 = banks.bank("RAM1")
 RAM2 = banks.bank("RAM2")
 
 
-def _src(bank_id, patches=None, performances=None, waveseq=None):
+def _src(scope_id, patches=None, performances=None, waveseq=None):
     return deps.Source(
-        bank_id=bank_id,
+        scope_id=scope_id,
         patches=patches if patches is not None else [],
         performances=performances if performances is not None else [],
         waveseq=waveseq,

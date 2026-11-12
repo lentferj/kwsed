@@ -24,9 +24,9 @@ from tests.test_bankbuild import make_patch, make_performance, make_waveseq
 RAM3 = banks.bank("RAM3")
 
 
-def _source(patches=None, performances=None, waveseq=None, bank_id="A"):
+def _source(patches=None, performances=None, waveseq=None, scope_id="A"):
     return deps.Source(
-        bank_id=bank_id,
+        scope_id=scope_id,
         patches=patches if patches is not None else [],
         performances=performances if performances is not None else [],
         waveseq=waveseq,
@@ -36,7 +36,7 @@ def _source(patches=None, performances=None, waveseq=None, bank_id="A"):
 def _build_sources():
     seqs = make_waveseq({0: [40, 41], 7: [50, 51]})[0]
     src = deps.Source(
-        bank_id="RAM1",
+        scope_id="RAM1",
         patches=[
             make_patch("P0", ((0, 0), (0, 40), (0, 40), (0, 40))),
             make_patch("P1", ((0, 1), (0, 40), (0, 40), (0, 40))),
@@ -121,10 +121,10 @@ class TestIsEmptyPatch:
 class TestCrossBankLocalization:
     def test_cross_bank(self):
         # source CARD/07 performance parts (0,0)[RAM1],(3,0)[ROM4],(11,0)[CARD/07]
-        ram1 = deps.Source(bank_id="RAM1", patches=[make_patch("R1")], performances=[])
-        rom4 = deps.Source(bank_id="ROM4", patches=[make_patch("R4")], performances=[])
+        ram1 = deps.Source(scope_id="RAM1", patches=[make_patch("R1")], performances=[])
+        rom4 = deps.Source(scope_id="ROM4", patches=[make_patch("R4")], performances=[])
         card07 = deps.Source(
-            bank_id="CARD/07",
+            scope_id="CARD/07",
             patches=[make_patch("C7")],
             performances=[make_performance("Cross", ((0, 0), (3, 0), (11, 0)))],
             waveseq=None,
@@ -149,10 +149,10 @@ class TestCrossBankLocalization:
 
 class TestStrictInterPerfIsolation:
     def test_isolation(self):
-        ram1 = deps.Source(bank_id="RAM1", patches=[make_patch("R1")], performances=[])
+        ram1 = deps.Source(scope_id="RAM1", patches=[make_patch("R1")], performances=[])
         # two performances both reference RAM1:0
         card = deps.Source(
-            bank_id="CARD/07",
+            scope_id="CARD/07",
             patches=[],
             performances=[
                 make_performance("A", ((0, 0),)),
@@ -181,7 +181,7 @@ class TestStrictInterPerfIsolation:
 class TestIntraPerfDedup:
     def test_dedup(self):
         src = deps.Source(
-            bank_id="RAM1",
+            scope_id="RAM1",
             patches=[make_patch("P0"), make_patch("P1")],
             performances=[make_performance("Perf", ((0, 0), (0, 0), (0, 1)))],
             waveseq=None,
@@ -197,7 +197,7 @@ class TestIntraPerfDedup:
 class TestZeroFragmentation:
     def _make(self):
         src = deps.Source(
-            bank_id="RAM1",
+            scope_id="RAM1",
             patches=[
                 make_patch("A"),
                 make_patch("B"),
@@ -241,7 +241,7 @@ class TestZeroFragmentation:
         )
         # feed built back as source
         src2 = deps.Source(
-            bank_id="RAM3",
+            scope_id="RAM3",
             performances=[
                 built.performances[
                     i * r.PERFORMANCE_SIZE : (i + 1) * r.PERFORMANCE_SIZE
@@ -256,7 +256,7 @@ class TestZeroFragmentation:
         )
         sources2 = {"RAM3": src2}
         new_perf = deps.Source(
-            bank_id="RAM1",
+            scope_id="RAM1",
             patches=[make_patch("F")],
             performances=[make_performance("P1", ((0, 0),))],
             waveseq=None,
@@ -287,7 +287,7 @@ class TestZeroFragmentation:
             destination_bank=RAM3,
         )
         src2 = deps.Source(
-            bank_id="RAM3",
+            scope_id="RAM3",
             performances=[
                 built.performances[
                     i * r.PERFORMANCE_SIZE : (i + 1) * r.PERFORMANCE_SIZE
@@ -302,7 +302,7 @@ class TestZeroFragmentation:
         )
         sources2 = {"RAM3": src2}
         new_perf_src = deps.Source(
-            bank_id="RAM1",
+            scope_id="RAM1",
             patches=[make_patch("X")],
             performances=[make_performance("PX", ((0, 0),))],
             waveseq=None,
@@ -341,7 +341,7 @@ class TestZeroFragmentation:
             destination_bank=RAM3,
         )
         src2 = deps.Source(
-            bank_id="RAM3",
+            scope_id="RAM3",
             performances=[
                 built.performances[
                     i * r.PERFORMANCE_SIZE : (i + 1) * r.PERFORMANCE_SIZE
@@ -380,13 +380,13 @@ class TestWaveSequence:
         r.set_step_links(bank, first, forward=first + 1, back=0, loop=0xFFFF)
         r.set_step_links(bank, first + 1, forward=0, back=first, loop=first)
         src = deps.Source(
-            bank_id="RAM1",
+            scope_id="RAM1",
             patches=[make_patch("Q", waves=((0, 0),) * 4)],
             performances=[make_performance("Perf", ((0, 0),))],
             waveseq=bytes(bank),
         )
         target = deps.Source(
-            "RAM3",
+            scope_id="RAM3",
             performances=[bytes(r.PERFORMANCE_SIZE)] * banks.PERFORMANCES_PER_BANK,
             patches=[bytes(r.PATCH_SIZE)] * banks.PATCHES_PER_BANK,
             waveseq=bytes(r.WAVESEQ_BANK_SIZE),
@@ -412,7 +412,7 @@ class TestWaveSequence:
     def test_waveseq(self):
         waveseq = make_waveseq({0: [40, 41, 7], 7: [50, 51]})[0]
         src = deps.Source(
-            bank_id="RAM1",
+            scope_id="RAM1",
             patches=[make_patch("Q", waves=((0, 0),) * 4)],
             performances=[make_performance("Perf", ((0, 0),))],
             waveseq=waveseq,
@@ -421,7 +421,7 @@ class TestWaveSequence:
         # two chosen performances both reference same source patch
         perf_ids = [relations.PerfId("RAM1", 0), relations.PerfId("RAM1", 0)]
         src2 = deps.Source(
-            bank_id="RAM1",
+            scope_id="RAM1",
             patches=[make_patch("Q", waves=((0, 0),) * 4)],
             performances=[
                 make_performance("Perf0", ((0, 0),)),
@@ -469,7 +469,7 @@ class TestBudgetRefusals:
         waveseq2 = make_waveseq({0: [40], 1: [41], 7: [50]})[0]
         patch = make_patch("P", waves=((0, 0), (0, 1), (0, 40), (0, 40)))
         src = deps.Source(
-            bank_id="RAM1",
+            scope_id="RAM1",
             patches=[patch],
             performances=[make_performance("Perf", ((0, 0),))],
             waveseq=waveseq2,
@@ -528,7 +528,7 @@ class TestBudgetRefusals:
         waveseq = make_waveseq({0: [40, 41]})[0]
         sources = {
             "RAM1": deps.Source(
-                bank_id="RAM1",
+                scope_id="RAM1",
                 patches=[make_patch("P", waves=((0, 0), (0, 40), (0, 40), (0, 40)))],
                 performances=[make_performance("Perf", ((0, 0),))],
                 waveseq=waveseq,
@@ -552,7 +552,7 @@ class TestActivePerformances:
             bytes(r.PERFORMANCE_SIZE),  # empty zero
             make_performance("B", ((0, 1),)),
         ]
-        src = deps.Source(bank_id="X", performances=recs, patches=[])
+        src = deps.Source(scope_id="X", performances=recs, patches=[])
         assert perfcopy.active_performances(src) == [0, 2]
 
 
@@ -567,7 +567,7 @@ class TestTemplateDoesNotLeaveStalePerformances:
 
     def _target(self):
         return deps.Source(
-            bank_id="RAM3",
+            scope_id="RAM3",
             patches=[make_patch("A"), make_patch("B"), make_patch("C")],
             performances=[
                 make_performance("First", ((2, 0),)),
@@ -591,7 +591,7 @@ class TestTemplateDoesNotLeaveStalePerformances:
             for i in range(banks.PERFORMANCES_PER_BANK)
         ]
         assert perfcopy.active_performances(
-            deps.Source(bank_id="RAM3", performances=records)
+            deps.Source(scope_id="RAM3", performances=records)
         ) == [0]
         for slot in range(1, banks.PERFORMANCES_PER_BANK):
             parts = r.performance_parts(records[slot])
@@ -612,7 +612,7 @@ class TestTemplateDoesNotLeaveStalePerformances:
             for i in range(banks.PERFORMANCES_PER_BANK)
         ]
         assert perfcopy.active_performances(
-            deps.Source(bank_id="RAM3", performances=records)
+            deps.Source(scope_id="RAM3", performances=records)
         ) == [0, 1]
         for slot in range(2, banks.PERFORMANCES_PER_BANK):
             parts = r.performance_parts(records[slot])
@@ -634,7 +634,7 @@ class TestSlotImport:
             patches.append(make_patch("Init"))
         waveseq = make_waveseq({0: [40, 41]})[0]
         return deps.Source(
-            bank_id="RAM3",
+            scope_id="RAM3",
             performances=perfs,
             patches=patches,
             waveseq=waveseq,
@@ -646,7 +646,7 @@ class TestSlotImport:
         waveseq = make_waveseq({0: [40, 41]})[0]
         src_perf = make_performance("SrcPerf", ((0, 0), (3, 0)))
         src = deps.Source(
-            bank_id="RAM1",
+            scope_id="RAM1",
             patches=[make_patch("SrcPatch", waves=((0, 0), (0, 40), (0, 40), (0, 40)))],
             performances=[src_perf],
             waveseq=waveseq,
@@ -805,7 +805,7 @@ class TestSlotImport:
         # source perf uses source patch with sequence in source bank
         waveseq = make_waveseq({0: [40, 41], 7: [50, 51]})[0]
         src = deps.Source(
-            bank_id="RAM1",
+            scope_id="RAM1",
             patches=[make_patch("Q", waves=((0, 0),) * 4)],
             performances=[make_performance("Perf", ((0, 0),))],
             waveseq=waveseq,
@@ -839,7 +839,7 @@ class TestSlotImport:
         # Test quoted sequence import
         waveseq2 = make_waveseq({0: [40, 7], 7: [50, 51]})[0]
         src2 = deps.Source(
-            bank_id="RAM1",
+            scope_id="RAM1",
             patches=[make_patch("Quoter", waves=((0, 0),) * 4)],
             performances=[make_performance("Perf2", ((0, 0),))],
             waveseq=waveseq2,
@@ -853,7 +853,7 @@ class TestSlotImport:
 
     def test_budget_rejection(self):
         src = deps.Source(
-            bank_id="RAM1",
+            scope_id="RAM1",
             patches=[make_patch("P", waves=((0, 0), (0, 1), (0, 40), (0, 40)))],
             performances=[make_performance("Perf", ((0, 0),))],
             waveseq=make_waveseq({0: [40], 1: [41]})[0],
@@ -880,7 +880,7 @@ class TestSlotImport:
         # no output: build raises before returning; ensure no partial? just exception
         # sequence budget
         src2 = deps.Source(
-            bank_id="RAM1",
+            scope_id="RAM1",
             patches=[make_patch("P", waves=((0, 0), (0, 1), (0, 40), (0, 40)))],
             performances=[make_performance("Perf", ((0, 0),))],
             waveseq=make_waveseq({0: [40], 1: [41]})[0],
@@ -913,7 +913,7 @@ class TestSlotImport:
 
     def test_relocation(self):
         src = deps.Source(
-            bank_id="RAM1",
+            scope_id="RAM1",
             patches=[make_patch("P", waves=((0, 0), (2, 5), (0, 40), (0, 40)))],
             performances=[make_performance("Perf", ((0, 0), (2, 3)))],
             waveseq=None,
@@ -997,7 +997,7 @@ class TestSlotImport:
         """
         alias = "RAM1#2"
         src = deps.Source(
-            bank_id=alias,
+            scope_id=alias,
             performances=[make_performance("Alias", ((0, 0),))],
             patches=[make_patch("AliasPatch")],
             bank_number=0,
@@ -1020,7 +1020,7 @@ class TestSlotImport:
         dest_src.performances[0] = make_performance("Keep", ((2, 2),))
         # source performance RAM1:0 uses patch 0
         src = deps.Source(
-            bank_id="RAM1",
+            scope_id="RAM1",
             patches=[make_patch("SrcPatch")],
             performances=[make_performance("SrcPerf", ((0, 0),))],
             waveseq=make_waveseq({0: [40, 41]})[0],
@@ -1086,13 +1086,13 @@ def _audition_sources():
     """A PCM-only source performance and an empty RAM3 to receive it."""
     patch = make_patch("SrcPatch", ((0, 40), (0, 40), (0, 40), (0, 40)))
     src = deps.Source(
-        bank_id="RAM1",
+        scope_id="RAM1",
         patches=[patch],
         performances=[make_performance("SrcPerf", ((0, 0), (0, 0)))],
         waveseq=None,
     )
     dest_src = deps.Source(
-        bank_id="RAM3",
+        scope_id="RAM3",
         patches=[make_patch("Init") for _ in range(banks.PATCHES_PER_BANK)],
         performances=[
             make_performance("Init", ()) for _ in range(banks.PERFORMANCES_PER_BANK)
