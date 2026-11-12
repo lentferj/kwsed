@@ -569,6 +569,59 @@ class DemoDevice:
             "mismatch": None,
         }
 
+    def copy_bank(
+        self,
+        source: int | str,
+        destination: int | str,
+        *,
+        backup_dir: str,
+        verify: bool = True,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """The same operation the bridge's :meth:`copy_bank` performs.
+
+        Reads the source's three kinds, remaps the performances the same
+        way, and writes through :meth:`write_bank_bundle`, so `--demo` and
+        the tests exercise the CLI's copy path with no ports open.
+        """
+        self._tick()
+        src = banks.bank(source)
+        dst = banks.bank(destination)
+        if not src.writable:
+            raise ValueError(
+                f"{src.label} is ROM and cannot be copied from. The banks "
+                f"that can are: "
+                f"{', '.join(b.label for b in banks.writable_banks())}."
+            )
+        if src.number == dst.number:
+            raise ValueError(f"copying {src.label} onto itself copies nothing")
+        decoded: Dict[str, bytes] = {}
+        for plural, kind in _BUNDLE_KINDS.items():
+            raw = self.read_raw(src.sysex, _DUMP_FUNCTION[kind], timeout=timeout)
+            packet = m.parse(raw)
+            if packet is None:
+                raise ValueError(f"{src.label} {kind} is not a valid frame")
+            data = packet.data()
+            expected = _WRITE_SIZES[kind]
+            if len(data) < expected:
+                raise ValueError(
+                    f"{src.label} {kind} decoded to {len(data)} bytes; a whole "
+                    f"bank is {expected}"
+                )
+            decoded[plural] = bytes(data[:expected])
+        decoded["performances"] = records.remap_performance_banks(
+            decoded["performances"], src.number, dst.number
+        )
+        return self.write_bank_bundle(
+            dst.number,
+            performances=decoded["performances"],
+            patches=decoded["patches"],
+            waveseq=decoded["waveseq"],
+            backup_dir=backup_dir,
+            verify=verify,
+            timeout=timeout,
+        )
+
     def read_patch(
         self,
         bank: int | str,

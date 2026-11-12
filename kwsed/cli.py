@@ -564,6 +564,40 @@ def _cmd_send(device: Any, args: argparse.Namespace) -> int:
     return spec.EXIT_ERROR
 
 
+def _cmd_copy_bank(device: Any, args: argparse.Namespace) -> int:
+    """Copy one whole bank into another, on the unit.
+
+    The destination is backed up first and every kind is read back to
+    verify, so a copy that went wrong is undone from the backup it made.
+    Refusals (ROM, a bank onto itself, an unreadable source) come from the
+    bridge before anything is sent.
+    """
+    from kws import backup, banks as bk
+
+    try:
+        source = bk.bank(args.source)
+        destination = bk.bank(args.destination)
+    except LookupError as exc:
+        print(str(exc))
+        return spec.EXIT_USAGE
+
+    print(f"copying: {source.label} -> {destination.label}, all three kinds")
+    where = args.backup_dir or backup.default_dir()
+    try:
+        result = device.copy_bank(source.number, destination.number, backup_dir=where)
+    except Exception as exc:
+        print(f"copy refused: {exc}")
+        return spec.EXIT_ERROR
+
+    print(f"backed up to: {result['backup']}")
+    if result["verified"] is True:
+        print("written and verified by reading it back")
+        return spec.EXIT_OK
+    print(f"written, but the read-back does NOT match: {result['mismatch']}")
+    print("The backup above holds what was there before.")
+    return spec.EXIT_ERROR
+
+
 def _read_dump(device: Any, bank_byte: int, function: int) -> bytes:
     """Ask the unit for one bank dump and return its decoded payload."""
     from kws import messages as m
@@ -1923,6 +1957,7 @@ _COMMANDS: Dict[str, Callable[[Any, argparse.Namespace], Any]] = {
     "dump": _cmd_dump,
     "select": _cmd_select,
     "send": _cmd_send,
+    "copy-bank": _cmd_copy_bank,
     "multi": _cmd_multi,
     "backup": _cmd_backup,
     "cards": _cmd_cards,
@@ -2212,6 +2247,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sp.add_argument(
         "--yes", action="store_true", help="actually write; without it nothing is sent"
+    )
+    sp.add_argument(
+        "--backup-dir",
+        default=None,
+        help="where to save the destination before overwriting",
+    )
+    sp = sub.add_parser(
+        "copy-bank",
+        help="COPY one whole bank into another on the unit",
+        description=(
+            "COPY one whole bank into another on the unit. All three kinds "
+            "travel (wave sequences, patches, performances); the destination "
+            "is read and backed up first, every written kind is read back to "
+            "verify, and the performances' parts that name the source bank "
+            "itself are remapped to the destination -- what the unit's own "
+            "MIDI/Global BANK COPY does from the panel, done here so the copy "
+            "has a backup and a verify."
+        ),
+    )
+    sp.add_argument("source", help="source bank: RAM1, RAM2, RAM3 or CARD")
+    sp.add_argument(
+        "destination",
+        help="destination bank: RAM1, RAM2, RAM3 or CARD (not the source)",
     )
     sp.add_argument(
         "--backup-dir",

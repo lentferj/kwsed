@@ -1735,3 +1735,44 @@ class TestCopyPerfFromAFile:
         )
         assert cli._cmd_copy_perf(None, args) == 2
         assert "error" in capsys.readouterr().err
+
+
+class TestCopyBank:
+    """`copy-bank`: two bank names, one fenced copy, on the demo device."""
+
+    def _args(self, tmp_path, source="RAM1", destination="CARD"):
+        return cli.build_parser().parse_args(
+            ["copy-bank", source, destination, "--backup-dir", str(tmp_path)]
+        )
+
+    def test_a_demo_copy_is_written_and_verified(self, tmp_path, capsys):
+        assert cli._cmd_copy_bank(DemoDevice(), self._args(tmp_path)) == 0
+        out = capsys.readouterr().out
+        assert "RAM 1 -> Card" in out
+        assert "written and verified" in out
+
+    def test_the_copy_remapped_the_source_self_references(self, tmp_path):
+        device = DemoDevice()
+        assert cli._cmd_copy_bank(device, self._args(tmp_path)) == 0
+        perf = device.read_bank("CARD", banks.Kind.PERFORMANCE)
+        parts = rec.performance_parts(b"".join(perf.records))
+        # RAM 1 is position 0, the Card 11: what named the source names the
+        # destination now, or the copy would still play from RAM 1
+        assert all(part.bank != 0 for part in parts)
+
+    def test_an_unknown_bank_is_a_usage_error(self, tmp_path, capsys):
+        assert cli._cmd_copy_bank(None, self._args(tmp_path, "RAM5")) == 2
+        assert "no bank" in capsys.readouterr().out
+
+    def test_a_bank_onto_itself_is_refused(self, tmp_path, capsys):
+        device = DemoDevice()
+        args = self._args(tmp_path, "RAM1", "RAM1")
+        assert cli._cmd_copy_bank(device, args) == 1
+        assert "copies nothing" in capsys.readouterr().out
+
+    def test_a_rom_source_is_refused(self, tmp_path, capsys):
+        assert cli._cmd_copy_bank(DemoDevice(), self._args(tmp_path, "ROM4")) == 1
+        assert "ROM 4 is ROM" in capsys.readouterr().out
+
+    def test_the_demo_run_ends_in_zero(self, capsys, tmp_path):
+        assert run(["copy-bank", "RAM1", "CARD", "--backup-dir", str(tmp_path)]) == 0
