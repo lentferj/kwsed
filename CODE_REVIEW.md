@@ -630,3 +630,76 @@ kwsed is a **high-quality, production-ready codebase** with deep domain knowledg
 The one unverified wire fact, the card-name offset, is now settled negatively: the `0x51` dump carries no name, and the dead read path has been removed. Beyond that, the codebase is maintainable, well-documented, and demonstrates expert-level understanding of both the hardware protocol and safe software practices for hardware control tools.
 
 **Overall Rating: A**
+
+---
+
+## Resolution status (2026-11-12)
+
+Status of the eleven recommendations above on branch `copy-bank`. The review
+text is left as written; this section records what was done, what was already
+done in the checkpoint, and what was closed without work.
+
+### High priority
+
+1. **Confirm `CARD_NAME_OFFSET` — resolved, negatively.** The bench probe
+   (2026-11-12) showed the `0x51` System Setup dump carries the documented
+   34-field system structure and **no card name**; a parameter change that
+   set the name did not alter the dump. `CARD_NAME_OFFSET`, `CARD_NAME_LEN`,
+   `read_card_name()`, the demo override and `tools/probe_card_name.py` were
+   removed (commit `6c91ecb`). Card identity is the content digest plus
+   fingerprints; `L` labels a bank. The negative result is recorded in
+   `docs/RESOLUTION_NOTES.md` §16, `TODO.md` item 23 and `docs/HCARD.md`.
+
+2. **Make `SINGLE_OBJECT_TIMEOUT` configurable — done** (`bde82e9`):
+   `kws.config.load_single_object_timeout` (default 15 s), used by the
+   bridge, CLI and app.
+
+3. **Split `kws/importers.py` — done.** It was already split into
+   `importer_syx/midi/sqs/lib/container` in the checkpoint; the facade was
+   tightened (`b24f7d2`).
+
+4. **Decompose C901 functions — done** (`f1339aa`): `plan_atomic_bank`,
+   `plan_slot_import`, `plan_multi_staging` and their builders now delegate
+   to named helpers; the `# noqa: C901` suppressions are gone.
+
+### Medium priority
+
+5. **Cache age indicator — done.** Already implemented in the checkpoint
+   (`bankstore.get_cache_age` from the stored `cached_at`, displayed by
+   `KwsedApp._cache_age_text` in the detail pane). A later attempt to switch
+   it to file mtime was reverted (`c196090`) because it removed the stored
+   timestamp without need.
+
+6. **Property-based tests — done.** Already present in the checkpoint
+   (`tests/test_properties.py`, 31 tests, 652 lines). A review-fix pass
+   accidentally replaced it with a 5-test file; that regression was reverted
+   (`c196090`).
+
+7. **Document fence opt-outs — done** (`12072de`): class and per-method
+   warnings in `kws/bridge.py`, and the destructive CLI command descriptions
+   say what a bypass loses.
+
+8. **Type `midi_in`/`midi_out` with `Protocol` — done.** Already present in
+   the checkpoint. The review-fix pass added unused `open_port` members;
+   that churn was reverted (`c196090`) because the bridge only probes it with
+   `hasattr`, so the protocols keep exactly the methods actually used.
+
+### Low priority
+
+9. **Unify `bank_id` / `scope_id` — closed without a rename.** Resolved in
+   the model: `deps.Source` already uses `scope_id`. The remaining `bank_id`
+   names are the vinsynlib favourites schema (`Favourite.bank_id`,
+   `Favorites.keys_for_bank`) and local variables that really are bank ids;
+   renaming those would change the external favourites key format for no
+   gain. This item is closed, not deferred.
+
+10. **TODO cleanup — done.** The card-name item (23) is resolved. `TODO.md`
+    was audited for other items this branch completed: bank copy (28), the
+    configurable single-object timeout, the import-format split and the card
+    name are noted there with their commits; items still open (the
+    unexplained single-object read, missing import formats, coverage gaps)
+    are left open. Cache age and property tests had no TODO entry to close.
+
+11. **Multiprocessing for bank reads — not pursued.** The SR answers one
+    request at a time on one MIDI stream, and parallel requests would
+    interleave replies. This is a deliberate decision, not pending work.

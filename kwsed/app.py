@@ -152,6 +152,7 @@ VIEW_LABELS = {
 }
 
 
+# This `bank_id` is the favourites key space, not the model's `scope_id`.
 def favorite_bank_id(bank_id: str, kind: str) -> str:
     """The key a favourite is filed under.
 
@@ -176,6 +177,7 @@ class ViewSlot:
     """
 
     slot: banks.Slot
+    #: Favourites key space (vinsynlib's schema), not the model's `scope_id`.
     bank_id: str
     name: str = ""
 

@@ -118,6 +118,9 @@ A whole-bank read works every time. A single patch read (`0x10` request,
   the whole thing looked erratic rather than merely slow.
 * The replies are correct when they come: the bank and number bytes name the
   slot that was asked for, and the data decodes.
+* The timeout is now configurable (`kws.config.load_single_object_timeout`,
+  default 15 s, commit `bde82e9`). That removes the tuning problem, not the
+  unexplained read, so this item stays open.
 
 **What is not:** the same slot answers five times running in one session and
 not at all in the next, with the same request, the same gap and a 14-second
@@ -627,7 +630,8 @@ rather than suspected:
   lists no parameter-change transmission, so the SR never reports it.
 
 `CARD_NAME_OFFSET`, `CARD_NAME_LEN`, `read_card_name()` and
-`tools/probe_card_name.py` were therefore dead code and have been removed.
+`tools/probe_card_name.py` were therefore dead code and have been removed
+(commit `6c91ecb`).
 The archive identifies a bank by **content digest** plus first-slot
 fingerprints (item 25), with a local label (`cards.json` `label`) for
 anything the user wants to name.
@@ -734,7 +738,9 @@ already backs up and verifies.
 
 ## 27. Import formats: SoundDiver wave sequences and multisets
 
-**Status:** open; wave sequences decode, multisets remain.
+**Status:** open; wave sequences decode, multisets remain. The reader has
+been split into format-specific modules (`importer_syx/midi/sqs/lib/container`,
+commit `b24f7d2`); this item is about missing formats, not file layout.
 
 `kws/importers.py` reads whole banks and single objects from raw SysEx,
 Standard MIDI files, SoundQuest `.sqs` (embedded Korg SysEx) and Edisyn bank
@@ -785,6 +791,8 @@ patches, compacted and remapped.
 
 **Status:** implemented; the two hardware questions are resolved. The
 unit's move is remotely drivable, and kwsed still does its own copy.
+Implemented across `4db379e` (messages), `66a927a` (bridge), `60b6e7c`
+(app) and `1ab5129` (CLI); the panel measurement is `4736d9b`.
 
 `remap_performance_banks` in `kws/records.py` rewrites every performance
 part that names the source bank to the destination, both halves of the
