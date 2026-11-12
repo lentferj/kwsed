@@ -83,9 +83,6 @@ class FakeIn(MidiInPort):
     def get_message(self) -> Optional[Tuple[List[int], float]]:
         return self.queue.pop(0) if self.queue else None
 
-    def open_port(self, port: int) -> None:
-        pass
-
     def close_port(self) -> None:
         pass
 
@@ -99,9 +96,6 @@ class FakeOut(MidiOutPort):
 
     def send_message(self, data: List[int]) -> None:
         self.sent.append(bytes(data))
-
-    def open_port(self, port: int) -> None:
-        pass
 
     def close_port(self) -> None:
         pass
@@ -554,9 +548,6 @@ class TestReadsMatchTheBankTheyAskedFor:
             def get_message(self) -> Optional[Tuple[List[int], float]]:
                 return self.queue.pop(0) if self.queue else None
 
-            def open_port(self, port: int) -> None:
-                pass
-
             def close_port(self) -> None:
                 pass
 
@@ -570,9 +561,6 @@ class TestReadsMatchTheBankTheyAskedFor:
                 # answer after the request, so _drain cannot eat it first
                 if len(data) > 4 and data[4] in (0x1C, 0x1D):
                     midi_in.queue.append((list(reply), 0.0))
-
-            def open_port(self, port: int) -> None:
-                pass
 
             def close_port(self) -> None:
                 pass
@@ -636,9 +624,6 @@ class TestALargeSendIsRefusedWithoutTheAlsaPath:
             ) -> None:
                 # Keyword-compatible with the port Protocol.
                 del sysex, timing, active_sense
-
-            def open_port(self, port: int) -> None:
-                pass
 
             def get_message(self) -> Optional[Tuple[List[int], float]]:
                 return None

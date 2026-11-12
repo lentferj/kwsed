@@ -252,6 +252,7 @@ def save(
     envelope: Dict[str, object] = {
         "version": 1,
         "scope": scope_id,
+        "cached_at": time.time(),
     }
     # Carry over kinds not being overwritten, so a partial capture merges
     # rather than erasing the rest of the bank.
@@ -306,14 +307,22 @@ def has_complete_bank(scope_id: str, directory: Optional[str] = None) -> bool:
     return len(pat) == _EXPECTED["patches"]
 
 
-def get_cache_age(scope_id: str, directory: str) -> float | None:
+def get_cache_age(scope_id: str, directory: Optional[str] = None) -> Optional[float]:
     """Return the age of the cached bank in seconds, or None if not cached.
 
-    The age is computed as the current time minus the mtime of the cache file.
-    If the cache file does not exist, ``None`` is returned.
+    The age is computed as the current time minus the ``cached_at`` timestamp
+    stored when the bank was saved. If the cache file does not exist, is
+    corrupt, or lacks a ``cached_at`` field, ``None`` is returned.
     """
     where = _path(scope_id, directory)
     try:
-        return time.time() - os.path.getmtime(where)
-    except OSError:
+        with open(where, encoding="utf-8") as handle:
+            raw = json.load(handle)
+    except (OSError, ValueError):
         return None
+    if not isinstance(raw, dict):
+        return None
+    cached_at = raw.get("cached_at")
+    if not isinstance(cached_at, (int, float)):
+        return None
+    return time.time() - cached_at

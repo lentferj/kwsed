@@ -254,8 +254,7 @@ class TestCacheAge:
         os.makedirs(d, exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             f.write("{not json")
-        # get_cache_age now uses mtime, so it returns a value if the file exists
-        assert bankstore.get_cache_age("RAM1", directory=d) is not None
+        assert bankstore.get_cache_age("RAM1", directory=d) is None
 
     def test_get_cache_age_none_for_old_format_no_timestamp(self, tmp_path):
         d = str(tmp_path)
@@ -264,25 +263,34 @@ class TestCacheAge:
         env = {"version": 1, "scope": "OLD", "performances": "AAAA"}
         with open(path, "w", encoding="utf-8") as f:
             json.dump(env, f)
-        # get_cache_age now uses mtime, so it returns a value if the file exists
-        assert bankstore.get_cache_age("OLD", directory=d) is not None
+        assert bankstore.get_cache_age("OLD", directory=d) is None
 
-    def test_mtime_written(self, tmp_path):
+    def test_cached_at_written_to_json(self, tmp_path):
         d = str(tmp_path)
         scope = "RAM1"
         bankstore.save(scope, performances=_perf_blob(), directory=d)
         path = os.path.join(d, "RAM1.json")
-        # The mtime should be very close to now
-        assert abs(os.path.getmtime(path) - time.time()) < 2
+        with open(path, encoding="utf-8") as f:
+            raw = json.load(f)
+        assert "cached_at" in raw
+        assert isinstance(raw["cached_at"], (int, float))
+        # The timestamp should be very close to now
+        assert abs(raw["cached_at"] - time.time()) < 2
 
-    def test_mtime_updated_on_partial_merge(self, tmp_path):
+    def test_cached_at_preserved_on_partial_merge(self, tmp_path):
         d = str(tmp_path)
         scope = "RAM1"
         bankstore.save(scope, performances=_perf_blob(), directory=d)
-        # Small delay to ensure different mtimes
+        # Small delay to ensure different timestamps if it were rewritten
         time.sleep(0.01)
         first_mtime = os.path.getmtime(os.path.join(d, "RAM1.json"))
         bankstore.save(scope, patches=_patch_blob(), directory=d)
         second_mtime = os.path.getmtime(os.path.join(d, "RAM1.json"))
-        # File should be rewritten and mtime updated
-        assert second_mtime > first_mtime
+        # File should be rewritten
+        assert second_mtime >= first_mtime
+        # cached_at should be updated to the new save time
+        with open(os.path.join(d, "RAM1.json"), encoding="utf-8") as f:
+            raw = json.load(f)
+        assert "cached_at" in raw
+        assert isinstance(raw["cached_at"], (int, float))
+        assert abs(raw["cached_at"] - time.time()) < 2

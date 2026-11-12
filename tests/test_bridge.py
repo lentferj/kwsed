@@ -72,9 +72,6 @@ class FakeIn(MidiInPort):
     def get_message(self) -> Optional[Tuple[List[int], float]]:
         return self.queue.pop(0) if self.queue else None
 
-    def open_port(self, port: int) -> None:
-        pass
-
     def close_port(self) -> None:
         pass
 
@@ -93,9 +90,6 @@ class FakeOut(MidiOutPort):
         self.sent.append(bytes(data))
         if self.on_send is not None:
             self.on_send(data)
-
-    def open_port(self, port: int) -> None:
-        pass
 
     def close_port(self) -> None:
         pass
