@@ -86,22 +86,33 @@ and for a Multiset:
 - Live automation of FX parameters while a note sounds.
 - ROM performances: refused, as every write is.
 
-**The layout is a hypothesis until step 0 confirms it.** The working
-assumption for the 21-byte block is:
+**The 21-byte layout is transcribed, not guessed.** Edisyn's record
+builder (`KorgWavestationPerformance.buildPerformance`) writes it field by
+field, and the arithmetic closes exactly:
 
 ```
-offset 16  routing / chain     1 byte   (series vs parallel, mix)
-offset 17  FX 1 type           1 byte   (0-55)
-offset 18  FX 1 parameters     9 bytes  (packed, group-dependent)
-offset 27  FX 2 type           1 byte
-offset 28  FX 2 parameters     9 bytes
+byte 0    FX 1 type (bits 0-5, stored = type + 2)
+          bit 6: sign of FX 1 mix-mod amount
+          bit 7: series routing flag
+byte 1    FX 2 type (bits 0-5, stored = type + 2)
+          bit 6: sign of FX 2 mix-mod amount
+          bit 7: always 1 (extended-effects enable)
+byte 2    FX 1 mix amount (low nibble) / FX 2 mix amount (high nibble)
+byte 3    FX 1 mix-mod source (low) / FX 2 mix-mod source (high)
+byte 4    |FX 1 mix-mod amount| (low) / |FX 2 mix-mod amount| (high)
+bytes 5-12   FX 1 parameter block, 8 bytes
+bytes 13-20  FX 2 parameter block, 8 bytes
 ```
 
-That is 21 bytes and it matches Edisyn's storage-block indices (0–8 per
-processor) plus a type byte per processor. The routing byte is the one
-piece without a citation; the plan treats it as the first thing to prove.
-A Multiset carries the same block at bytes 1–21; its byte 0 is the FX
-control channel, not part of the block.
+Extended effects (types 48-55) are encoded as type byte 2 plus
+`type - 47` in the low bits of the processor's first parameter byte
+(byte 5 for FX 1, 13 for FX 2); normal types store `type + 2`.
+
+Step 0 is therefore a **confirmation on the unit**, not a derivation: read
+a performance, check the bytes against the panel and a known factory
+sound, then write one value and read it back. A Multiset carries the same
+block at bytes 1–21; its byte 0 is the FX control channel, not part of the
+block.
 
 ## 3. What to take from the templates
 
@@ -182,8 +193,8 @@ class MultisetFx:        # a Multiset's block plus its control channel
 The method that worked for the rest of the record: derive a candidate
 structurally, then check it field by field against Edisyn and the unit.
 
-1. Read a spread of performances (factory RAM/ROM and Card) and extract
-   bytes 16–36.
+1. Read a spread of performances (factory RAM/ROM and Card) and compare
+   bytes 16–36 with the transcribed layout above.
 2. Group them by the byte that looks like the type (0–55), and check the
    group count and parameter ranges against Edisyn's `FX_GROUP`,
    `FX_PARAMETERS` and `FX_PCL_LIST`.
@@ -335,7 +346,7 @@ kwscli fx --multi 7 --control-channel 3 --yes
 
 ## 10. Order of work
 
-1. **Step 0**: derive and confirm the 21-byte block in both records
+1. **Step 0**: confirm the transcribed 21-byte block in both records
    (performance bytes 16–36, Multiset bytes 1–21 plus the control
    channel) on the bench; record it. No code.
 2. `kws/fx.py`: tables, codec, `FxBlock`, `MultisetFx`, tests; model the
