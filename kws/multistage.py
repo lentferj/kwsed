@@ -359,6 +359,63 @@ def _build_banks(
     return built_banks, rejected
 
 
+def _initialize_staged_so_far(
+    target_banks: Sequence[str],
+) -> Dict[str, List[relations.PerfId]]:
+    """Initialize the staged_so_far dictionary."""
+    return {name: [] for name in target_banks}
+
+
+def _collect_staging_results(
+    base_multiset: multi.Multiset,
+    desired: Sequence[DesiredChannel],
+    srcs: Mapping[str, deps.Source],
+    target_banks: Sequence[str],
+    base_lists: Dict[str, List[relations.PerfId]],
+    staged_so_far: Dict[str, List[relations.PerfId]],
+    resident_card_scope: Optional[str],
+    stage_all_cards: bool,
+    force_atomic: bool,
+) -> Tuple[List[ChannelStageResult], Dict[int, ChannelStageResult], List[str]]:
+    """Process all desired channels and collect results and rejections."""
+    results: List[ChannelStageResult] = []
+    result_by_channel: Dict[int, ChannelStageResult] = {}
+    rejected: List[str] = []
+
+    ordered_desired = sorted(desired, key=lambda d: d.channel)
+    for d in ordered_desired:
+        res, reason = _process_channel(
+            d,
+            base_multiset,
+            srcs,
+            target_banks,
+            base_lists,
+            staged_so_far,
+            resident_card_scope,
+            stage_all_cards,
+            force_atomic,
+        )
+        results.append(res)
+        result_by_channel[d.channel] = res
+        if reason is not None:
+            rejected.append(reason)
+    return results, result_by_channel, rejected
+
+
+def _remap_all_channels(
+    base_multiset: multi.Multiset,
+    desired: Sequence[DesiredChannel],
+    result_by_channel: Dict[int, ChannelStageResult],
+) -> multi.Multiset:
+    """Remap all channels in the Multiset."""
+    new_parts = list(base_multiset.parts)
+    for d in desired:
+        channel = d.channel
+        res = result_by_channel[channel]
+        new_parts[channel - 1] = _remap_multiset_channel(d, base_multiset, res)
+    return dataclasses.replace(base_multiset, parts=tuple(new_parts))
+
+
 def plan_multi_staging(
     base_multiset: multi.Multiset,
     desired: Sequence[DesiredChannel],
@@ -386,46 +443,25 @@ def plan_multi_staging(
     _validate_target_banks(target_banks)
 
     srcs = dict(sources)
-
     base_lists = _build_base_lists(target_banks, mode, srcs)
+    staged_so_far = _initialize_staged_so_far(target_banks)
 
-    staged_so_far: Dict[str, List[relations.PerfId]] = {
-        name: [] for name in target_banks
-    }
-
-    ordered_desired = sorted(desired, key=lambda d: d.channel)
-
-    results: List[ChannelStageResult] = []
-    result_by_channel: Dict[int, ChannelStageResult] = {}
-    rejected: List[str] = []
-
-    for d in ordered_desired:
-        res, reason = _process_channel(
-            d,
-            base_multiset,
-            srcs,
-            target_banks,
-            base_lists,
-            staged_so_far,
-            resident_card_scope,
-            stage_all_cards,
-            force_atomic,
-        )
-        results.append(res)
-        result_by_channel[d.channel] = res
-        if reason is not None:
-            rejected.append(reason)
+    results, result_by_channel, rejected = _collect_staging_results(
+        base_multiset,
+        desired,
+        srcs,
+        target_banks,
+        base_lists,
+        staged_so_far,
+        resident_card_scope,
+        stage_all_cards,
+        force_atomic,
+    )
 
     built_banks, build_rejected = _build_banks(target_banks, staged_so_far, srcs, mode)
     rejected.extend(build_rejected)
 
-    new_parts = list(base_multiset.parts)
-    for d in ordered_desired:
-        channel = d.channel
-        res = result_by_channel[channel]
-        new_parts[channel - 1] = _remap_multiset_channel(d, base_multiset, res)
-
-    updated = dataclasses.replace(base_multiset, parts=tuple(new_parts))
+    updated = _remap_all_channels(base_multiset, desired, result_by_channel)
 
     return MultiStagePlan(
         updated_multiset=updated,

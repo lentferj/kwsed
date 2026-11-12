@@ -308,7 +308,85 @@ def _commit_allocation(
     plan.patch_count += len(unique_patches)
 
 
-def plan_atomic_bank(  # noqa: C901
+def _calculate_fresh_steps_atomic(
+    new_seqs: List[deps.SequenceKey],
+    chains: Mapping[deps.SequenceKey, Any],
+    used: Set[Tuple[str, int, int]],
+) -> int:
+    """Count fresh steps needed for atomic planning."""
+    fresh = 0
+    seen_fresh: Set[Tuple[str, int, int]] = set()
+    for key in new_seqs:
+        for step in chains[key].steps:
+            tag = (key[0], key[1], step)
+            if tag not in used and tag not in seen_fresh:
+                seen_fresh.add(tag)
+                fresh += 1
+    return fresh
+
+
+def _plan_one_atomic(
+    plan: AtomicPlan,
+    budget: bankbuild.Budget,
+    used: Set[Tuple[str, int, int]],
+    srcs: Mapping[str, deps.Source],
+    request_index: int,
+    perf_id: relations.PerfId,
+) -> None:
+    """Plan a single performance for an atomic bank."""
+    scope = perf_id.scope_id
+    num = perf_id.number
+
+    if _check_performance_budget(plan, budget, scope, num, ""):
+        return
+
+    record = _load_and_validate_source(srcs, scope, num)
+    if record is None:
+        plan.rejected.append(f"{scope}:{num:02d} - performance not loaded")
+        return
+
+    name = dumps.record_name(record)
+    parts, unique_patches = _collect_unique_patches(record, scope)
+    k = len(unique_patches)
+
+    if _check_patch_budget(plan, budget, k, scope, num, name):
+        return
+
+    if _validate_patches_loaded_slot(srcs, unique_patches, scope, num, name, plan):
+        return
+
+    seeds = _collect_sequence_seeds(srcs, unique_patches)
+    order, chains, unresolved = deps.quoted_closure(dict(srcs), seeds)
+    if unresolved:
+        _src_id, wave_bank, seq = unresolved[0]
+        plan.rejected.append(
+            f"{scope}:{num:02d} ({name}) needs wave sequence {seq} "
+            f"from bank {wave_bank}, whose wave sequence bank is not loaded"
+        )
+        return
+
+    new_seqs = [key for key in order if key not in plan.sequence_map]
+    fresh = _calculate_fresh_steps_atomic(new_seqs, chains, used)
+
+    if _check_sequence_budget(plan, budget, new_seqs, scope, num, name):
+        return
+    if _check_step_budget_atomic(plan, budget, used, fresh, scope, num, name):
+        return
+
+    _commit_allocation(
+        plan,
+        used,
+        request_index,
+        perf_id,
+        name,
+        parts,
+        unique_patches,
+        new_seqs,
+        chains,
+    )
+
+
+def plan_atomic_bank(
     sources: Mapping[str, deps.Source],
     chosen: Sequence[relations.PerfId],
     *,
@@ -321,65 +399,7 @@ def plan_atomic_bank(  # noqa: C901
     srcs = dict(sources)
 
     for request_index, perf_id in enumerate(chosen):
-        scope = perf_id.scope_id
-        num = perf_id.number
-
-        if _check_performance_budget(plan, budget, scope, num, ""):
-            continue
-
-        record = _load_and_validate_source(srcs, scope, num)
-        if record is None:
-            plan.rejected.append(f"{scope}:{num:02d} - performance not loaded")
-            continue
-
-        name = dumps.record_name(record)
-        parts, unique_patches = _collect_unique_patches(record, scope)
-        k = len(unique_patches)
-
-        if _check_patch_budget(plan, budget, k, scope, num, name):
-            continue
-
-        if _validate_patches_loaded_slot(srcs, unique_patches, scope, num, name, plan):
-            continue
-
-        seeds = _collect_sequence_seeds(srcs, unique_patches)
-        order, chains, unresolved = deps.quoted_closure(srcs, seeds)
-        if unresolved:
-            _src_id, wave_bank, seq = unresolved[0]
-            plan.rejected.append(
-                f"{scope}:{num:02d} ({name}) needs wave sequence {seq} "
-                f"from bank {wave_bank}, whose wave sequence bank is not loaded"
-            )
-            continue
-
-        new_seqs = [key for key in order if key not in plan.sequence_map]
-
-        # fresh steps
-        fresh = 0
-        seen_fresh: Set[Tuple[str, int, int]] = set()
-        for key in new_seqs:
-            for step in chains[key].steps:
-                tag = (key[0], key[1], step)
-                if tag not in used and tag not in seen_fresh:
-                    seen_fresh.add(tag)
-                    fresh += 1
-
-        if _check_sequence_budget(plan, budget, new_seqs, scope, num, name):
-            continue
-        if _check_step_budget_atomic(plan, budget, used, fresh, scope, num, name):
-            continue
-
-        _commit_allocation(
-            plan,
-            used,
-            request_index,
-            perf_id,
-            name,
-            parts,
-            unique_patches,
-            new_seqs,
-            chains,
-        )
+        _plan_one_atomic(plan, budget, used, srcs, request_index, perf_id)
 
     plan.steps_used = len(used)
     return plan
@@ -448,7 +468,74 @@ def _prepare_templates(
     return performances, patches, waveseq
 
 
-def _build_wave_sequences(  # noqa: C901
+def _copy_wave_sequence_steps(
+    holder: deps.Source,
+    seq: int,
+    src_id: str,
+    wave_bank: int,
+    waveseq: bytearray,
+    next_step: int,
+    moved: Dict[Tuple[str, int, int], int],
+) -> int:
+    """Copy steps for one wave sequence. Return the new next_step."""
+    if holder.waveseq is None:
+        raise ValueError(f"{src_id} has no wave sequence bank")
+    chain = deps.walk_sequence(holder.waveseq, seq, scope_id=src_id)
+    pool = (src_id, wave_bank)
+    for old in chain.steps:
+        if pool + (old,) in moved:
+            continue
+        if next_step >= rec.STEPS_PER_BANK:
+            raise ValueError(
+                f"the destination's pool of {rec.STEPS_PER_BANK} "
+                f"steps is full; {src_id} sequence {seq} does not "
+                f"fit. This should have been caught while planning."
+            )
+        moved[pool + (old,)] = next_step
+        at_new = rec.STEP_BASE + next_step * rec.STEP_SIZE
+        at_old = rec.STEP_BASE + old * rec.STEP_SIZE
+        waveseq[at_new : at_new + rec.STEP_SIZE] = holder.waveseq[
+            at_old : at_old + rec.STEP_SIZE
+        ]
+        next_step += 1
+    return next_step
+
+
+def _link_wave_sequence_steps(
+    holder: deps.Source,
+    seq: int,
+    src_id: str,
+    wave_bank: int,
+    waveseq: bytearray,
+    made: AtomicPlan,
+    moved: Dict[Tuple[str, int, int], int],
+) -> None:
+    """Relink steps and wave sequence quotes."""
+    if holder.waveseq is None:
+        raise ValueError(f"{src_id} has no wave sequence bank")
+    chain = deps.walk_sequence(holder.waveseq, seq, scope_id=src_id)
+    pool = (src_id, wave_bank)
+    for old in chain.steps:
+        info = rec.step(holder.waveseq, old)
+        rec.set_step_links(
+            waveseq,
+            moved[pool + (old,)],
+            forward=_step_link(info["forward"], moved.get(pool + (info["forward"],))),
+            back=_step_link(info["back"], moved.get(pool + (info["back"],))),
+            loop=_step_link(info["loop"], moved.get(pool + (info["loop"],))),
+        )
+        if info["wave"] < rec.ROM_WAVE_BASE:
+            quoted = (src_id, wave_bank, info["wave"])
+            if quoted not in made.sequence_map:
+                raise ValueError(
+                    f"{src_id} sequence {seq} quotes sequence "
+                    f"{info['wave']}, which the plan does not carry. "
+                    f"This should have been caught while planning."
+                )
+            rec.set_step_wave(waveseq, moved[pool + (old,)], made.sequence_map[quoted])
+
+
+def _build_wave_sequences(
     srcs: Mapping[str, deps.Source],
     made: AtomicPlan,
     waveseq: bytearray,
@@ -456,69 +543,38 @@ def _build_wave_sequences(  # noqa: C901
     """Build wave sequences into the waveseq bytearray."""
     next_step = 1
     moved: Dict[Tuple[str, int, int], int] = {}
-    for (src_id, wave_bank, seq), slot in sorted(
-        made.sequence_map.items(), key=lambda kv: kv[1]
-    ):
+    sorted_map = sorted(made.sequence_map.items(), key=lambda kv: kv[1])
+
+    # First pass: copy steps
+    for (src_id, wave_bank, seq), _slot in sorted_map:
         holder = srcs[src_id]
         if holder.waveseq is None:
-            raise ValueError(
-                f"{src_id} has no wave sequence bank, but the plan carries "
-                f"sequence {seq} from it. This should have been caught "
-                f"while planning."
-            )
-        chain = deps.walk_sequence(holder.waveseq, seq, scope_id=src_id)
-        pool = (src_id, wave_bank)
-        for old in chain.steps:
-            if pool + (old,) in moved:
-                continue
-            if next_step >= rec.STEPS_PER_BANK:
-                raise ValueError(
-                    f"the destination's pool of {rec.STEPS_PER_BANK} "
-                    f"steps is full; {src_id} sequence {seq} does not "
-                    f"fit. This should have been caught while planning."
-                )
-            moved[pool + (old,)] = next_step
-            at_new = rec.STEP_BASE + next_step * rec.STEP_SIZE
-            at_old = rec.STEP_BASE + old * rec.STEP_SIZE
-            waveseq[at_new : at_new + rec.STEP_SIZE] = holder.waveseq[
-                at_old : at_old + rec.STEP_SIZE
-            ]
-            next_step += 1
-        for old in chain.steps:
-            info = rec.step(holder.waveseq, old)
-            rec.set_step_links(
-                waveseq,
-                moved[pool + (old,)],
-                forward=_step_link(
-                    info["forward"], moved.get(pool + (info["forward"],))
-                ),
-                back=_step_link(info["back"], moved.get(pool + (info["back"],))),
-                loop=_step_link(info["loop"], moved.get(pool + (info["loop"],))),
-            )
-            if info["wave"] < rec.ROM_WAVE_BASE:
-                quoted = (src_id, wave_bank, info["wave"])
-                if quoted not in made.sequence_map:
-                    raise ValueError(
-                        f"{src_id} sequence {seq} quotes sequence "
-                        f"{info['wave']}, which the plan does not carry. "
-                        f"This should have been caught while planning."
-                    )
-                rec.set_step_wave(
-                    waveseq, moved[pool + (old,)], made.sequence_map[quoted]
-                )
+            raise ValueError(f"{src_id} has no wave sequence bank")
+        next_step = _copy_wave_sequence_steps(
+            holder, seq, src_id, wave_bank, waveseq, next_step, moved
+        )
+
+    # Second pass: links and headers
+    for (src_id, wave_bank, seq), slot in sorted_map:
+        holder = srcs[src_id]
+        _link_wave_sequence_steps(holder, seq, src_id, wave_bank, waveseq, made, moved)
+
         head = rec.SEQ_BASE + slot * rec.SEQ_SIZE
         old_head = rec.SEQ_BASE + seq * rec.SEQ_SIZE
-        waveseq[head : head + rec.SEQ_SIZE] = holder.waveseq[
-            old_head : old_head + rec.SEQ_SIZE
-        ]
-        first = rec.sequence_header(holder.waveseq, seq)["link"]
-        waveseq[head] = (moved.get(pool + (first,), 0) >> 8) & 0xFF
-        waveseq[head + 1] = moved.get(pool + (first,), 0) & 0xFF
-        name_at = rec.SEQNAME_BASE + slot * rec.SEQNAME_SIZE
-        old_name = rec.SEQNAME_BASE + seq * rec.SEQNAME_SIZE
-        waveseq[name_at : name_at + rec.SEQNAME_SIZE] = holder.waveseq[
-            old_name : old_name + rec.SEQNAME_SIZE
-        ]
+        if holder.waveseq is not None:
+            waveseq[head : head + rec.SEQ_SIZE] = holder.waveseq[
+                old_head : old_head + rec.SEQ_SIZE
+            ]
+            first = rec.sequence_header(holder.waveseq, seq)["link"]
+            pool = (src_id, wave_bank)
+            waveseq[head] = (moved.get(pool + (first,), 0) >> 8) & 0xFF
+            waveseq[head + 1] = moved.get(pool + (first,), 0) & 0xFF
+            name_at = rec.SEQNAME_BASE + slot * rec.SEQNAME_SIZE
+            old_name = rec.SEQNAME_BASE + seq * rec.SEQNAME_SIZE
+            waveseq[name_at : name_at + rec.SEQNAME_SIZE] = holder.waveseq[
+                old_name : old_name + rec.SEQNAME_SIZE
+            ]
+
     taken = set(made.sequence_map.values())
     for slot in range(rec.SEQUENCES_PER_BANK):
         if slot in taken:
@@ -1254,7 +1310,161 @@ def _compute_totals(
     plan.steps_used = len(pinned_steps) + new_steps_count
 
 
-def plan_slot_import(  # noqa: C901
+def _plan_one_slot_import(
+    plan: SlotImportPlan,
+    budget: bankbuild.Budget,
+    srcs: Mapping[str, deps.Source],
+    slot: int,
+    perf_id: relations.PerfId,
+    dest: banks.Bank,
+    pinned_steps: Set[int],
+    pinned_seqs: Set[int],
+    free_patch_slots: List[int],
+    free_seq_slots: List[int],
+    state: Dict[str, Any],
+) -> None:
+    """Plan one performance for slot import."""
+    scope = perf_id.scope_id
+    num = perf_id.number
+    source = srcs.get(scope)
+    if source is None or num >= len(source.performances):
+        plan.rejected.append(f"{scope}:{num:02d} - performance not loaded")
+        return
+
+    record = source.performances[num]
+    name = dumps.record_name(record)
+    parts = [p for p in rec.performance_parts(record) if p.used]
+    unique_patches = _collect_local_unique_patches(parts, scope, srcs)
+
+    if _validate_patches_loaded_slot(srcs, unique_patches, scope, num, name, plan):
+        return
+
+    source_bank_number = _source_bank_number(scope, srcs)
+    uniq_seed = _collect_sequence_seeds_for_patches(
+        srcs, unique_patches, source_bank_number
+    )
+    order, chains, unresolved = deps.quoted_closure(dict(srcs), uniq_seed)
+    if unresolved:
+        u = unresolved[0]
+        plan.rejected.append(
+            f"{scope}:{num:02d} ({name}) needs wave sequence {u[2]} "
+            f"from bank {u[1]}, not loaded"
+        )
+        return
+
+    new_seqs = [key for key in order if key not in plan.sequence_map]
+    if _check_sequence_slot_budget(
+        new_seqs, free_seq_slots, state["used_new_seq_slots"], scope, num, name, plan
+    ):
+        return
+
+    fresh = _count_fresh_steps(new_seqs, chains, pinned_steps)
+    if _check_step_budget(
+        fresh,
+        budget,
+        pinned_steps,
+        state["new_steps_count"],
+        scope,
+        num,
+        name,
+        plan,
+    ):
+        return
+
+    seq_slot_map = _build_tentative_seq_slot_map(
+        plan, new_seqs, free_seq_slots, state["used_new_seq_slots"]
+    )
+    patch_dest_bytes = _compute_patch_dest_bytes(
+        srcs, unique_patches, source_bank_number, dest.number, seq_slot_map
+    )
+
+    patch_slot_for_pid, reused, needed_new_patches, _new_patch_bytes_list = (
+        _determine_patch_slots(
+            patch_dest_bytes,
+            state["patch_bytes_to_slot"],
+            free_patch_slots,
+            state["used_new_patch_slots"],
+        )
+    )
+
+    if _check_patch_slot_budget(
+        needed_new_patches,
+        free_patch_slots,
+        state["used_new_patch_slots"],
+        scope,
+        num,
+        name,
+        plan,
+    ):
+        return
+
+    if _check_performance_budget_slot_import(plan, budget, scope, num, name):
+        return
+
+    avail_seq_slots = [
+        s for s in free_seq_slots if s not in state["used_new_seq_slots"]
+    ]
+    state["new_steps_count"] = _commit_sequences(
+        plan,
+        new_seqs,
+        avail_seq_slots,
+        state["used_new_seq_slots"],
+        state["new_steps_count"],
+        fresh,
+    )
+
+    allocated = _commit_patches(
+        patch_dest_bytes,
+        patch_slot_for_pid,
+        state["patch_bytes_to_slot"],
+        free_patch_slots,
+        state["used_new_patch_slots"],
+        state["new_patch_slots_used"],
+    )
+
+    part_patch_slots = _build_part_patch_slots(parts, scope, srcs, patch_slot_for_pid)
+
+    alloc = AtomicPerfAllocation(
+        request_index=len(plan.allocations),
+        source_perf=perf_id,
+        target_perf_slot=slot,
+        name=name,
+        part_patch_slots=part_patch_slots,
+        allocated_patches=tuple(allocated),
+        reused_patch_slots=tuple(reused),
+    )
+    plan.allocations.append(alloc)
+
+
+def _check_pinned_sequences(
+    plan: SlotImportPlan,
+    target_src: deps.Source,
+    target_scope: str,
+    dest: banks.Bank,
+    pinned_patches: Set[int],
+    srcs: Mapping[str, deps.Source],
+) -> bool:
+    """Check if all pinned wave sequences are loaded. Return True if errors found."""
+    seeds_check = []
+    for ps in pinned_patches:
+        if ps < len(target_src.patches):
+            for wave in rec.patch_waves(target_src.patches[ps]):
+                if wave.is_sequence and wave.bank == dest.number:
+                    seeds_check.append((target_scope, wave.bank, wave.wave))
+    _order, _chains, unresolved_list = deps.quoted_closure(
+        dict(srcs), list(set(seeds_check))
+    )
+    if unresolved_list:
+        u = unresolved_list[0]
+        plan.rejected.append(
+            f"{target_scope} pinned patch uses wave sequence {u[2]} from bank "
+            f"{u[1]}, whose wave sequence bank is not loaded"
+        )
+        return True
+    return False
+
+
+def plan_slot_import(
     sources: Mapping[str, deps.Source],
     target_scope: str,
     assignments: Mapping[int, relations.PerfId],
@@ -1287,7 +1497,6 @@ def plan_slot_import(  # noqa: C901
         destination_bank=dest, assignments=sorted(assignments.items())
     )
 
-    # duplicate / range check
     if _validate_assignments(plan):
         return plan
 
@@ -1296,160 +1505,53 @@ def plan_slot_import(  # noqa: C901
         return plan
 
     assigned_slots: Set[int] = {slot for slot, _ in plan.assignments}
-
-    # pinned
-    pinned_patches, pinned_patch_bytes, pinned_seqs, pinned_steps, unresolved = (
+    pinned_patches, pinned_patch_bytes, pinned_seqs, pinned_steps, _unresolved = (
         _compute_pinned(srcs, target_scope, dest, target_src, assigned_slots)
     )
-    # detect unresolved
-    seeds_check: List[deps.SequenceKey] = []
-    for ps in pinned_patches:
-        if ps >= len(target_src.patches):
-            continue
-        for wave in rec.patch_waves(target_src.patches[ps]):
-            if wave.is_sequence and wave.bank == dest.number:
-                seeds_check.append((target_scope, wave.bank, wave.wave))
-    seen_s = set()
-    uniq_s = []
-    for s in seeds_check:
-        if s not in seen_s:
-            seen_s.add(s)
-            uniq_s.append(s)
-    _order, _chains, unresolved_list = deps.quoted_closure(srcs, uniq_s)
-    if unresolved_list:
-        u = unresolved_list[0]
-        plan.rejected.append(
-            f"{target_scope} pinned patch uses wave sequence {u[2]} from bank "
-            f"{u[1]}, whose wave sequence bank is not loaded"
-        )
+
+    if _check_pinned_sequences(
+        plan, target_src, target_scope, dest, pinned_patches, srcs
+    ):
         return plan
 
     free_patch_slots, free_seq_slots = _compute_free_slots(pinned_patches, pinned_seqs)
 
-    used_new_seq_slots: Set[int] = set()
-    used_new_patch_slots: Set[int] = set()
-    new_steps_count = 0
-    patch_bytes_to_slot = _initialize_patch_reuse_map(
-        share_existing, pinned_patch_bytes
-    )
-    new_patch_slots_used: Set[int] = set()
+    state = {
+        "used_new_seq_slots": set(),
+        "used_new_patch_slots": set(),
+        "new_steps_count": 0,
+        "patch_bytes_to_slot": _initialize_patch_reuse_map(
+            share_existing, pinned_patch_bytes
+        ),
+        "new_patch_slots_used": set(),
+    }
 
     for slot, perf_id in plan.assignments:
-        scope = perf_id.scope_id
-        num = perf_id.number
-        source = srcs.get(scope)
-        if source is None or num >= len(source.performances):
-            plan.rejected.append(f"{scope}:{num:02d} - performance not loaded")
-            continue
-        record = source.performances[num]
-        name = dumps.record_name(record)
-        parts = [p for p in rec.performance_parts(record) if p.used]
-
-        # localized unique patches
-        unique_patches = _collect_local_unique_patches(parts, scope, srcs)
-
-        if _validate_patches_loaded_slot(srcs, unique_patches, scope, num, name, plan):
-            continue
-
-        source_bank_number = _source_bank_number(scope, srcs)
-
-        # source seq seeds filtered
-        uniq_seed = _collect_sequence_seeds_for_patches(
-            srcs, unique_patches, source_bank_number
-        )
-        order, chains, unresolved = deps.quoted_closure(srcs, uniq_seed)
-        if unresolved:
-            u = unresolved[0]
-            plan.rejected.append(
-                f"{scope}:{num:02d} ({name}) needs wave sequence "
-                f"{u[2]} from bank {u[1]}, not loaded"
-            )
-            continue
-
-        new_seqs = [key for key in order if key not in plan.sequence_map]
-
-        # sequence slots availability
-        if _check_sequence_slot_budget(
-            new_seqs, free_seq_slots, used_new_seq_slots, scope, num, name, plan
-        ):
-            continue
-
-        # fresh steps
-        fresh = _count_fresh_steps(new_seqs, chains, pinned_steps)
-        if _check_step_budget(
-            fresh, budget, pinned_steps, new_steps_count, scope, num, name, plan
-        ):
-            continue
-
-        # tentative seq slot map
-        seq_slot_map = _build_tentative_seq_slot_map(
-            plan, new_seqs, free_seq_slots, used_new_seq_slots
-        )
-
-        # patch bytes with remapped waves
-        patch_dest_bytes = _compute_patch_dest_bytes(
-            srcs, unique_patches, source_bank_number, dest.number, seq_slot_map
-        )
-
-        # determine patch slots (reused vs new)
-        patch_slot_for_pid, reused, needed_new_patches, _new_patch_bytes_list = (
-            _determine_patch_slots(
-                patch_dest_bytes,
-                patch_bytes_to_slot,
-                free_patch_slots,
-                used_new_patch_slots,
-            )
-        )
-
-        if _check_patch_slot_budget(
-            needed_new_patches,
-            free_patch_slots,
-            used_new_patch_slots,
-            scope,
-            num,
-            name,
+        _plan_one_slot_import(
             plan,
-        ):
-            continue
-
-        # performance budget
-        if _check_performance_budget_slot_import(plan, budget, scope, num, name):
-            continue
-
-        # commit sequences
-        avail_seq_slots = [s for s in free_seq_slots if s not in used_new_seq_slots]
-        new_steps_count = _commit_sequences(
-            plan, new_seqs, avail_seq_slots, used_new_seq_slots, new_steps_count, fresh
-        )
-
-        # commit patches
-        allocated = _commit_patches(
-            patch_dest_bytes,
-            patch_slot_for_pid,
-            patch_bytes_to_slot,
+            budget,
+            srcs,
+            slot,
+            perf_id,
+            dest,
+            pinned_steps,
+            pinned_seqs,
             free_patch_slots,
-            used_new_patch_slots,
-            new_patch_slots_used,
+            free_seq_slots,
+            state,
         )
 
-        # part patch slots
-        part_patch_slots = _build_part_patch_slots(
-            parts, scope, srcs, patch_slot_for_pid
-        )
-
-        alloc = AtomicPerfAllocation(
-            request_index=len(plan.allocations),
-            source_perf=perf_id,
-            target_perf_slot=slot,
-            name=name,
-            part_patch_slots=part_patch_slots,
-            allocated_patches=tuple(allocated),
-            reused_patch_slots=tuple(reused),
-        )
-        plan.allocations.append(alloc)
-
-    # totals
-    _compute_totals(plan, pinned_patches, pinned_seqs, pinned_steps, new_steps_count)
+    new_steps_count_raw = state["new_steps_count"]
+    if not isinstance(new_steps_count_raw, int):
+        raise TypeError("new_steps_count must be int")
+    new_steps_count = new_steps_count_raw
+    _compute_totals(
+        plan,
+        pinned_patches,
+        pinned_seqs,
+        pinned_steps,
+        new_steps_count,
+    )
     return plan
 
 
@@ -1517,7 +1619,7 @@ def _prepare_slot_import_templates(
     return performances, patches, waveseq
 
 
-def _build_slot_import_wave_sequences(  # noqa: C901
+def _build_slot_import_wave_sequences(
     srcs: Mapping[str, deps.Source],
     made: SlotImportPlan,
     waveseq: bytearray,
@@ -1529,63 +1631,44 @@ def _build_slot_import_wave_sequences(  # noqa: C901
         s for s in range(1, rec.STEPS_PER_BANK) if s not in pinned_steps
     ]
     used_step_numbers: Set[int] = set()
-    step_cursor = 0
+    step_cursor = [0]  # mutable for helper access
     moved: Dict[Tuple[deps.SequenceKey, int], int] = {}
-    for key, slot in sorted(made.sequence_map.items(), key=lambda kv: kv[1]):
+    sorted_map = sorted(made.sequence_map.items(), key=lambda kv: kv[1])
+
+    # First pass: copy steps
+    for key, _slot in sorted_map:
         holder = srcs[key[0]]
         if holder.waveseq is None:
             raise ValueError(f"{key[0]} has no wave sequence bank")
-        chain = deps.walk_sequence(holder.waveseq, key[2], scope_id=key[0])
-        for old in chain.steps:
-            tag = (key, old)
-            if tag in moved:
-                continue
-            while (
-                step_cursor < len(free_steps_sorted)
-                and free_steps_sorted[step_cursor] in used_step_numbers
-            ):
-                step_cursor += 1
-            if step_cursor >= len(free_steps_sorted):
-                raise ValueError("no free step")
-            new_step = free_steps_sorted[step_cursor]
-            used_step_numbers.add(new_step)
-            moved[tag] = new_step
-            at_new = rec.STEP_BASE + new_step * rec.STEP_SIZE
-            at_old = rec.STEP_BASE + old * rec.STEP_SIZE
-            waveseq[at_new : at_new + rec.STEP_SIZE] = holder.waveseq[
-                at_old : at_old + rec.STEP_SIZE
-            ]
-            step_cursor += 1
-        for old in chain.steps:
-            info = rec.step(holder.waveseq, old)
-            rec.set_step_links(
-                waveseq,
-                moved[(key, old)],
-                forward=_step_link(info["forward"], moved.get((key, info["forward"]))),
-                back=_step_link(info["back"], moved.get((key, info["back"]))),
-                loop=_step_link(info["loop"], moved.get((key, info["loop"]))),
-            )
-            if info["wave"] < rec.ROM_WAVE_BASE:
-                quoted = (key[0], key[1], info["wave"])
-                if quoted not in made.sequence_map:
-                    raise ValueError(
-                        f"{key[0]} sequence {key[2]} quotes "
-                        f"sequence {info['wave']}, not carried"
-                    )
-                rec.set_step_wave(waveseq, moved[(key, old)], made.sequence_map[quoted])
+        _copy_slot_import_steps(
+            holder,
+            key,
+            waveseq,
+            free_steps_sorted,
+            used_step_numbers,
+            step_cursor,
+            moved,
+        )
+
+    # Second pass: links and headers
+    for key, slot in sorted_map:
+        holder = srcs[key[0]]
+        _link_slot_import_steps(holder, key, waveseq, made, moved)
+
         head = rec.SEQ_BASE + slot * rec.SEQ_SIZE
         old_head = rec.SEQ_BASE + key[2] * rec.SEQ_SIZE
-        waveseq[head : head + rec.SEQ_SIZE] = holder.waveseq[
-            old_head : old_head + rec.SEQ_SIZE
-        ]
-        first = rec.sequence_header(holder.waveseq, key[2])["link"]
-        waveseq[head] = (moved.get((key, first), 0) >> 8) & 0xFF
-        waveseq[head + 1] = moved.get((key, first), 0) & 0xFF
-        name_at = rec.SEQNAME_BASE + slot * rec.SEQNAME_SIZE
-        old_name = rec.SEQNAME_BASE + key[2] * rec.SEQNAME_SIZE
-        waveseq[name_at : name_at + rec.SEQNAME_SIZE] = holder.waveseq[
-            old_name : old_name + rec.SEQNAME_SIZE
-        ]
+        if holder.waveseq is not None:
+            waveseq[head : head + rec.SEQ_SIZE] = holder.waveseq[
+                old_head : old_head + rec.SEQ_SIZE
+            ]
+            first = rec.sequence_header(holder.waveseq, key[2])["link"]
+            waveseq[head] = (moved.get((key, first), 0) >> 8) & 0xFF
+            waveseq[head + 1] = moved.get((key, first), 0) & 0xFF
+            name_at = rec.SEQNAME_BASE + slot * rec.SEQNAME_SIZE
+            old_name = rec.SEQNAME_BASE + key[2] * rec.SEQNAME_SIZE
+            waveseq[name_at : name_at + rec.SEQNAME_SIZE] = holder.waveseq[
+                old_name : old_name + rec.SEQNAME_SIZE
+            ]
 
     taken_seq_slots = pinned_seqs | set(made.sequence_map.values())
     for slot in range(rec.SEQUENCES_PER_BANK):
@@ -1595,6 +1678,71 @@ def _build_slot_import_wave_sequences(  # noqa: C901
         waveseq[head : head + rec.SEQ_SIZE] = bytes(rec.SEQ_SIZE)
         name_at = rec.SEQNAME_BASE + slot * rec.SEQNAME_SIZE
         waveseq[name_at : name_at + rec.SEQNAME_SIZE] = bytes(rec.SEQNAME_SIZE)
+
+
+def _copy_slot_import_steps(
+    holder: deps.Source,
+    key: deps.SequenceKey,
+    waveseq: bytearray,
+    free_steps_sorted: List[int],
+    used_step_numbers: Set[int],
+    step_cursor: List[int],
+    moved: Dict[Tuple[deps.SequenceKey, int], int],
+) -> None:
+    """Copy steps for one wave sequence in slot import."""
+    if holder.waveseq is None:
+        raise ValueError(f"{key[0]} has no wave sequence bank")
+    chain = deps.walk_sequence(holder.waveseq, key[2], scope_id=key[0])
+    for old in chain.steps:
+        tag = (key, old)
+        if tag in moved:
+            continue
+        while (
+            step_cursor[0] < len(free_steps_sorted)
+            and free_steps_sorted[step_cursor[0]] in used_step_numbers
+        ):
+            step_cursor[0] += 1
+        if step_cursor[0] >= len(free_steps_sorted):
+            raise ValueError("no free step")
+        new_step = free_steps_sorted[step_cursor[0]]
+        used_step_numbers.add(new_step)
+        moved[tag] = new_step
+        at_new = rec.STEP_BASE + new_step * rec.STEP_SIZE
+        at_old = rec.STEP_BASE + old * rec.STEP_SIZE
+        waveseq[at_new : at_new + rec.STEP_SIZE] = holder.waveseq[
+            at_old : at_old + rec.STEP_SIZE
+        ]
+        step_cursor[0] += 1
+
+
+def _link_slot_import_steps(
+    holder: deps.Source,
+    key: deps.SequenceKey,
+    waveseq: bytearray,
+    made: SlotImportPlan,
+    moved: Dict[Tuple[deps.SequenceKey, int], int],
+) -> None:
+    """Relink steps and wave sequence quotes in slot import."""
+    if holder.waveseq is None:
+        raise ValueError(f"{key[0]} has no wave sequence bank")
+    chain = deps.walk_sequence(holder.waveseq, key[2], scope_id=key[0])
+    for old in chain.steps:
+        info = rec.step(holder.waveseq, old)
+        rec.set_step_links(
+            waveseq,
+            moved[(key, old)],
+            forward=_step_link(info["forward"], moved.get((key, info["forward"]))),
+            back=_step_link(info["back"], moved.get((key, info["back"]))),
+            loop=_step_link(info["loop"], moved.get((key, info["loop"]))),
+        )
+        if info["wave"] < rec.ROM_WAVE_BASE:
+            quoted = (key[0], key[1], info["wave"])
+            if quoted not in made.sequence_map:
+                raise ValueError(
+                    f"{key[0]} sequence {key[2]} quotes "
+                    f"sequence {info['wave']}, not carried"
+                )
+            rec.set_step_wave(waveseq, moved[(key, old)], made.sequence_map[quoted])
 
 
 def _build_slot_import_patches(
