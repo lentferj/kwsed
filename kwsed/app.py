@@ -247,6 +247,13 @@ KEY_HINTS = (
     "q quit",
 )
 
+# The family caps the legend and lets an app pick the cap. The default of
+# two lines is right for the canonical list, but kwsed's is longer: at a
+# hundred columns it needs four, and a two-line cap would hide `z` undo,
+# `w` write gate and `B` copy bank behind the pointer. Four shows the
+# whole list at that width and still caps it on a narrow terminal.
+KeyHints.MAX_LINES = 4
+
 
 def _bank_label(sysex_byte: int) -> str:
     """A part's bank number as a person reads it.

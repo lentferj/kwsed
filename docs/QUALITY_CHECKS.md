@@ -55,7 +55,7 @@ project's own dependencies plus the toolchain. The one thing it skips is
 
 `vinsynlib` is not in this audit's scope: the target resolves
 `requirements-dev.txt`, the pinned toolchain, while `vinsynlib` is a runtime
-dependency. It comes from PyPI now (0.2.0), so `pip install` resolves it like
+dependency. It comes from PyPI now (0.4.4), so `pip install` resolves it like
 the rest, and it carries no third-party dependency of its own at this layer --
 so there is nothing here for an index to say is vulnerable.
 
