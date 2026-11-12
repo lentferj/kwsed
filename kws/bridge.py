@@ -228,7 +228,8 @@ class MidiInPort(Protocol):
 
     def ignore_types(self, sysex: bool, timing: bool, active_sense: bool) -> None:
         """Configure which message types the port reports."""
-        ...
+        # The names are the port's own keyword API; a stub uses none of them.
+        del sysex, timing, active_sense
 
     def close_port(self) -> None:
         """Close the underlying system port."""

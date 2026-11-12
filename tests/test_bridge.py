@@ -66,7 +66,8 @@ class FakeIn(MidiInPort):
         self.queue: List[Tuple[List[int], float]] = []
 
     def ignore_types(self, sysex: bool, timing: bool, active_sense: bool) -> None:
-        pass
+        # Keyword-compatible with the port Protocol; nothing to ignore here.
+        del sysex, timing, active_sense
 
     def get_message(self) -> Optional[Tuple[List[int], float]]:
         return self.queue.pop(0) if self.queue else None

@@ -870,7 +870,7 @@ class TestSlotImport:
             "RAM3",
             {49: relations.PerfId("RAM1", 0)},
             destination_bank=dest,
-            budget=bankbuild.Budget(patches=0) if False else bankbuild.Budget(),
+            budget=bankbuild.Budget(),
         )
         # With all 35 pinned, should reject patch
         assert not plan.fits
