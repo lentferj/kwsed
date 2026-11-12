@@ -1740,8 +1740,10 @@ class TestCopyPerfFromAFile:
 class TestCopyBank:
     """`copy-bank`: two bank names, one fenced copy, on the demo device."""
 
-    def _args(self, tmp_path, source="RAM1", destination="CARD", yes=True):
+    def _args(self, tmp_path, source="RAM1", destination="CARD", yes=True, method=None):
         extra = ["--yes"] if yes else []
+        if method is not None:
+            extra += ["--method", method]
         return cli.build_parser().parse_args(
             ["copy-bank", source, destination, "--backup-dir", str(tmp_path), *extra]
         )
@@ -1789,3 +1791,18 @@ class TestCopyBank:
             run(["copy-bank", "RAM1", "CARD", "--backup-dir", str(tmp_path), "--yes"])
             == 0
         )
+
+    def test_the_device_method_is_accepted(self, tmp_path, capsys):
+        assert (
+            cli._cmd_copy_bank(DemoDevice(), self._args(tmp_path, method="device")) == 0
+        )
+        out = capsys.readouterr().out
+        assert "written and verified" in out
+        assert "via the unit's move" in out
+
+    def test_an_unknown_method_is_a_usage_error(self):
+        with pytest.raises(SystemExit) as excinfo:
+            cli.build_parser().parse_args(
+                ["copy-bank", "RAM1", "CARD", "--method", "panel"]
+            )
+        assert excinfo.value.code == 2

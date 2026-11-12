@@ -1100,7 +1100,11 @@ def _decoded_bank(device: DemoDevice, bank: str, function: int) -> bytes:
 class TestBankCopyUi:
     @staticmethod
     async def _fire(
-        app: KwsedApp, pilot: Any, source: Any, destination: Any
+        app: KwsedApp,
+        pilot: Any,
+        source: Any,
+        destination: Any,
+        method: str = "fence",
     ) -> list[Any]:
         """Open the picker, arm the screen, fire, and wait for the dismissal."""
         writable = [b for b in banks.writable_banks() if b.number != source.number]
@@ -1116,6 +1120,9 @@ class TestBankCopyUi:
         app._copy_bank_target_chosen(source, writable, writable.index(destination))
         await pilot.pause()
         assert isinstance(app.screen, BankCopyScreen)
+        if method == "device":
+            await pilot.press("m")
+            await pilot.pause()
         await pilot.press("a")
         await pilot.pause()
         await pilot.press("w")
@@ -1146,6 +1153,87 @@ class TestBankCopyUi:
             assert app.screen._armed is True
         assert calls == []
         assert app.device.bundle_write_count == 0
+
+    @pytest.mark.asyncio
+    async def test_the_method_toggles_and_is_shown(self, tmp_path: Any) -> None:
+        app = _make_app(tmp_path)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.push_screen(BankCopyScreen(app, banks.bank("RAM1"), banks.bank("CARD")))
+            await pilot.pause()
+            assert isinstance(app.screen, BankCopyScreen)
+            screen = app.screen
+            assert screen._method == "fence"
+            assert "kwsed: read, remap, write, verify" in screen._describe()
+            await pilot.press("m")
+            await pilot.pause()
+            assert screen._method == "device"
+            assert "the unit's MOVE" in screen._describe()
+            await pilot.press("m")
+            await pilot.pause()
+            assert screen._method == "fence"
+            assert "kwsed: read, remap, write, verify" in screen._describe()
+
+    @pytest.mark.asyncio
+    async def test_changing_the_method_disarms(self, tmp_path: Any) -> None:
+        app = _make_app(tmp_path)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.push_screen(BankCopyScreen(app, banks.bank("RAM1"), banks.bank("CARD")))
+            await pilot.pause()
+            assert isinstance(app.screen, BankCopyScreen)
+            screen = app.screen
+            await pilot.press("a")
+            await pilot.pause()
+            assert screen._armed is True
+            await pilot.press("m")
+            await pilot.pause()
+            assert screen._armed is False
+            state = str(screen.query_one("#bank-copy-state", Static).render())
+            assert "disarmed" in state
+            assert "method changed" in state
+
+    @pytest.mark.asyncio
+    async def test_fire_with_the_device_method(self, tmp_path: Any) -> None:
+        app = _make_app(tmp_path)
+        device = app.device
+        source = banks.bank("RAM1")
+        destination = banks.bank("CARD")
+        ram_perfs = _decoded_bank(device, "RAM1", m.Function.ALL_PERFORMANCE_DUMP)
+        ram_patches = _decoded_bank(device, "RAM1", m.Function.ALL_PATCH_DUMP)
+        ram_waveseq = _decoded_bank(device, "RAM1", m.Function.ALL_WAVESEQ_DUMP)
+        statuses: list[str] = []
+        app.notify_status = lambda msg, *a, **k: statuses.append(str(msg))  # type: ignore[method-assign]
+        original = device.copy_bank
+        calls: list[Any] = []
+
+        def record(*args: Any, **kwargs: Any) -> Any:
+            calls.append(kwargs.get("method"))
+            return original(*args, **kwargs)
+
+        device.copy_bank = record
+        try:
+            async with app.run_test() as pilot:
+                await pilot.pause()
+                app._write_gate = EditGate(armed=True)
+                results = await self._fire(
+                    app, pilot, source, destination, method="device"
+                )
+        finally:
+            device.copy_bank = original
+        assert calls == ["device"]
+        assert results and results[0]["ok"] is True
+        assert results[0]["destination"] == "Card"
+        assert results[0]["verified"] is True
+        got_perfs = _decoded_bank(device, "CARD", m.Function.ALL_PERFORMANCE_DUMP)
+        got_patches = _decoded_bank(device, "CARD", m.Function.ALL_PATCH_DUMP)
+        got_waveseq = _decoded_bank(device, "CARD", m.Function.ALL_WAVESEQ_DUMP)
+        assert got_perfs == r.remap_performance_banks(
+            ram_perfs, source.number, destination.number
+        )
+        assert got_patches == ram_patches
+        assert got_waveseq == ram_waveseq
+        assert any("unit's move" in s for s in statuses)
 
     @pytest.mark.asyncio
     async def test_fire_writes_and_dismisses(self, tmp_path: Any) -> None:
