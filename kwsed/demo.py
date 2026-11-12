@@ -612,7 +612,7 @@ class DemoDevice:
         decoded["performances"] = records.remap_performance_banks(
             decoded["performances"], src.number, dst.number
         )
-        return self.write_bank_bundle(
+        result = self.write_bank_bundle(
             dst.number,
             performances=decoded["performances"],
             patches=decoded["patches"],
@@ -621,6 +621,10 @@ class DemoDevice:
             verify=verify,
             timeout=timeout,
         )
+        # The exact post-copy state of the destination, per kind, decoded --
+        # same key the bridge reports, so callers need no re-read.
+        result["written"] = dict(decoded)
+        return result
 
     def read_patch(
         self,
