@@ -2908,7 +2908,7 @@ class KwsedApp(App[None]):
     def _copy_bank_write(
         self, source: Any, destination: Any, screen: Any, method: str = "fence"
     ) -> None:
-        """One whole-bank copy off the UI thread, through the fence."""
+        """One whole-bank copy off the UI thread, by the chosen method."""
 
         def work() -> Any:
             from kws import backup as _backup
