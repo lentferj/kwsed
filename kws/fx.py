@@ -48,6 +48,7 @@ __all__ = [
     "EffectParam",
     "Effect",
     "FxBlock",
+    "EMPTY_FX",
 ]
 
 FX_SIZE = 21
@@ -151,6 +152,7 @@ class Effect:
 
     type: int
     raw: bytes  #: 8 parameter bytes
+    stored_type_bits: Optional[int] = None  #: raw 6-bit field from byte 0/1
 
     def __post_init__(self) -> None:
         if len(self.raw) != 8:
@@ -328,7 +330,17 @@ class Effect:
                 (field_raw & fm) << f.bit
             )
             new_raw[f.byte] &= 0xFF
-        return Effect(type=self.type, raw=bytes(new_raw))
+        return Effect(
+            type=self.type, raw=bytes(new_raw), stored_type_bits=self.stored_type_bits
+        )
+
+    def with_type(self, new_type: int) -> "Effect":
+        """A copy of this effect with a new logical type.
+
+        ``stored_type_bits`` is cleared so :meth:`FxBlock.to_bytes` re-encodes
+        the type from the logical value.
+        """
+        return Effect(type=new_type, raw=self.raw, stored_type_bits=None)
 
 
 # ---------------------------------------------------------------------------
@@ -356,27 +368,26 @@ class FxBlock:
         data = bytes(block)
         if len(data) != FX_SIZE:
             raise ValueError(f"an FX block is {FX_SIZE} bytes, not {len(data)}")
-        # Validate type bytes.
-        for i in (0, 1):
-            bits = data[i] & 0x3F
-            # Valid stored type bits: 2..49 (types 0..47) and 2 for
-            # extended types.  Bits 50..57 never occur in a valid block.
-            if bits < 2 or bits > 49:
-                raise ValueError(f"type byte {i} out of range: {bits}")
         series = bool(data[0] & 0x80)
         raw1 = data[5:13]
         raw2 = data[13:21]
 
         def resolve_type(bits: int, raw: bytes) -> int:
-            if bits == 2:
-                ext = raw[0] & 0x0F
-                if ext:
-                    return 47 + ext
-                return 0
-            return bits - 2
+            # bits 2-49: normal type = bits - 2 (extended when bits==2
+            # and the low nibble of the first parameter byte is nonzero).
+            if 2 <= bits <= 49:
+                if bits == 2:
+                    ext = raw[0] & 0x0F
+                    if ext:
+                        return 47 + ext
+                return bits - 2
+            # Anything else: logical Off; raw bits preserved separately.
+            return 0
 
-        type1 = resolve_type(data[0] & 0x3F, raw1)
-        type2 = resolve_type(data[1] & 0x3F, raw2)
+        bits1 = data[0] & 0x3F
+        bits2 = data[1] & 0x3F
+        type1 = resolve_type(bits1, raw1)
+        type2 = resolve_type(bits2, raw2)
 
         mix = (data[2] & 0x0F, (data[2] >> 4) & 0x0F)
         mod_source = (data[3] & 0x0F, (data[3] >> 4) & 0x0F)
@@ -394,8 +405,8 @@ class FxBlock:
 
         return cls(
             series=series,
-            fx1=Effect(type=type1, raw=raw1),
-            fx2=Effect(type=type2, raw=raw2),
+            fx1=Effect(type=type1, raw=raw1, stored_type_bits=bits1),
+            fx2=Effect(type=type2, raw=raw2, stored_type_bits=bits2),
             mix=mix,
             mod_source=mod_source,
             mod_amount=mod_amount,
@@ -403,24 +414,39 @@ class FxBlock:
             extended_enable=bool(data[1] & 0x80),
         )
 
+    @classmethod
+    def empty(cls) -> "FxBlock":
+        """A valid "Off" block: both processors type 0, extended-enable set."""
+        return cls(
+            series=False,
+            fx1=Effect(type=0, raw=bytes(8), stored_type_bits=2),
+            fx2=Effect(type=0, raw=bytes(8), stored_type_bits=2),
+            mix=(0, 0),
+            mod_source=(0, 0),
+            mod_amount=(0, 0),
+            mod_sign=(False, False),
+            extended_enable=True,
+        )
+
     def to_bytes(self) -> bytes:
         out = bytearray(FX_SIZE)
         # FX 1 type byte.
-        if self.fx1.type >= 48:
+        if self.fx1.stored_type_bits is not None:
+            type_bits1 = self.fx1.stored_type_bits
+            raw1 = bytearray(self.fx1.raw)
+        elif self.fx1.type >= 48:
             type_bits1 = 2
             ext1 = self.fx1.type - 47
             raw1 = bytearray(self.fx1.raw)
-            # Extended effects store ``fxtype - 47`` in the low bits of the
-            # processor's first parameter byte.  Extended groups 26-30 do
-            # use bytenum == 0 in their PCL, so that storage overlaps the
-            # extended marker: follow Edisyn's OR semantics (not replace)
-            # so the parameter byte's high bits survive.
             raw1[0] = raw1[0] | (ext1 & 0x0F)
         else:
             type_bits1 = self.fx1.type + 2
             raw1 = bytearray(self.fx1.raw)
         # FX 2.
-        if self.fx2.type >= 48:
+        if self.fx2.stored_type_bits is not None:
+            type_bits2 = self.fx2.stored_type_bits
+            raw2 = bytearray(self.fx2.raw)
+        elif self.fx2.type >= 48:
             type_bits2 = 2
             ext2 = self.fx2.type - 47
             raw2 = bytearray(self.fx2.raw)
@@ -447,3 +473,7 @@ class FxBlock:
         out[5:13] = raw1
         out[13:21] = raw2
         return bytes(out)
+
+
+#: A module-level "Off" block, equivalent to :meth:`FxBlock.empty`.
+EMPTY_FX = FxBlock.empty()

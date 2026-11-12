@@ -34,12 +34,22 @@ Multisets.
 The layout was derived rather than read, and the arithmetic is the evidence:
 ``22 + 16 * 4 = 86`` lands flush on the record boundary, and ``32 * 86 =
 2752`` is exactly where the names begin.
+
+Record layout (86 bytes):
+    byte 0        FX control channel (stored raw 0-15; panel shows 1-16)
+    bytes 1-21    the 21-byte FX block (kws.fx.FxBlock)
+    bytes 22-85   16 channels x 4 bytes
+
+The control channel's stored convention (0-15) is to be confirmed on
+hardware; the FX block is the same codec as a performance's.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import List, Sequence
+
+from kws.fx import FxBlock
 
 __all__ = [
     "MULTISETS",
@@ -86,10 +96,16 @@ class Multiset:
     number: int
     name: str
     parts: tuple[Part, ...]
-    #: The first :data:`PART_BASE` bytes of the record, which are not
-    #: modelled by kwsed. Preserved on round trip so editing one field
-    #: never clobbers the unmodelled settings block.
-    settings: bytes = field(default_factory=lambda: bytes(PART_BASE))
+    #: FX control channel (stored raw 0-15; panel shows 1-16).
+    control_channel: int = 0
+    #: The Multiset's own 21-byte FX block.
+    fx: FxBlock = field(default_factory=FxBlock.empty)
+
+    def __post_init__(self) -> None:
+        if not (0 <= self.control_channel <= 15):
+            raise ValueError(
+                f"control channel must be 0-15, not {self.control_channel}"
+            )
 
     @property
     def display(self) -> str:
@@ -140,13 +156,14 @@ def parse(data: Sequence[int]) -> List[Multiset]:
                 number=number,
                 name=_name(data[at : at + NAME_SIZE]),
                 parts=tuple(parts),
-                settings=bytes(data[base : base + PART_BASE]),
+                control_channel=data[base],
+                fx=FxBlock.from_bytes(bytes(data[base + 1 : base + 22])),
             )
         )
     return out
 
 
-def encode(multisets: Sequence[Multiset]) -> bytes:  # noqa: C901
+def encode(multisets: Sequence[Multiset]) -> bytes:
     """Encode 32 Multisets back into the plain data of a 0x62 dump.
 
     The first :data:`PART_BASE` bytes of each Multiset's record are not
@@ -163,10 +180,9 @@ def encode(multisets: Sequence[Multiset]) -> bytes:  # noqa: C901
         if entry is None:
             continue
         base = number * MULTISET_SIZE
-        settings = entry.settings or b""
-        for index in range(PART_BASE):
-            if index < len(settings):
-                data[base + index] = settings[index] & 0x7F
+        data[base] = entry.control_channel & 0x7F
+        fx_bytes = entry.fx.to_bytes()
+        data[base + 1 : base + 22] = fx_bytes
         for part in entry.parts:
             at = base + PART_BASE + (part.channel - 1) * PART_SIZE
             data[at] = part.bank & 0x7F

@@ -162,16 +162,9 @@ def test_performance_slice_roundtrip():
     assert len(new_record) == len(record)
 
 
-def test_invalid_type_byte_raises():
-    block = bytearray(FX_SIZE)
-    block[0] = 1  # invalid type bits
-    block[1] = 2 | 0x80
-    try:
-        FxBlock.from_bytes(bytes(block))
-    except ValueError as exc:
-        assert "0" in str(exc) or "byte" in str(exc).lower()
-    else:
-        raise AssertionError("expected ValueError")
+@given(st.binary(min_size=FX_SIZE, max_size=FX_SIZE))
+def test_roundtrip_arbitrary_bytes(block: bytes) -> None:
+    assert FxBlock.from_bytes(block).to_bytes() == block
 
 
 def test_fx_size():
@@ -217,3 +210,14 @@ class TestPclFieldAssembly:
         for row in rows:
             if row.key != target.key:
                 assert changed.display(row) == base.display(row)
+
+
+def test_empty_roundtrips_and_types_zero():
+    from kws.fx import FxBlock
+
+    fb = FxBlock.empty()
+    assert fb.fx1.type == 0
+    assert fb.fx2.type == 0
+    assert FxBlock.from_bytes(fb.to_bytes()) == fb
+    assert FxBlock.from_bytes(fb.to_bytes()).fx1.type == 0
+    assert FxBlock.from_bytes(fb.to_bytes()).fx2.type == 0
