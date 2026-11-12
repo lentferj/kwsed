@@ -1,7 +1,12 @@
 # FX Editing (Performance and Multiset Effects)
 
-Status: design draft, 2026-11-12. Nothing here is implemented yet; step 0
-confirms the byte layout before any of it is built.
+Status: core implemented 2026-11-12; the hardware confirmation (step 0)
+is still open. Done: `kws/fx.py` (tables and the 21-byte codec), the
+Multiset block in `kws/multi.py`, read-only `kwscli fx`, the read-only then
+editable `FxScreen` for performances and Multisets, and the fenced writes
+through `write_performance` / `write_multi`. Not done: CLI writes
+(`--set`, `--copy-from`, `--control-channel`), Copy FX in the UI, the
+hardware probe, and the step-0 confirmation.
 
 ## 1. What the device offers
 
@@ -396,3 +401,28 @@ Each step is a commit that passes `make check` and the full suite.
 - **The panel's Copy FX direction** is documented as performance →
   Multiset; the reverse is offered by kwsed because it is the same 21
   bytes, but the panel's behaviour is the one to match if they differ.
+
+
+## Progress (2026-11-12)
+
+Implemented and tested without the device:
+
+- `kws/fx.py` + `kws/fx_tables.py`: 56 types, 31 groups, the PCL-joined
+  parameter model (multi-field high bits and signs), the 21-byte block
+  codec with lossless round-trip for arbitrary bytes.
+- `kws/multi.py`: the Multiset's byte 0 control channel and bytes 1-21 as
+  an `FxBlock`; round-trip tests include the all-zero demo block.
+- `kwscli fx` (read): performance, Multiset and type list.
+- `FxScreen`: read-only, then editable; type changes are confirmed; `a`/`w`
+  write one performance through the fence; `x` in the Multiset editor
+  writes the whole setup through `write_multi`.
+- Tests: codec/property, multiset round-trip, CLI, app UI (read, edit,
+  write, gate locked, failure, Multiset entry and write).
+
+Still to do:
+
+- CLI writes (`--set`, `--copy-from`, `--control-channel`).
+- Copy FX from a performance into a Multiset in the UI (the panel's §5.8).
+- `tools/probe_fx.py` and the hardware step-0 confirmation: read a
+  performance and a Multiset, compare the bytes with the panel, write one
+  value, read back. Until then the codec is transcribed, not measured.
