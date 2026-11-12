@@ -89,6 +89,12 @@ __all__ = [
     "parameter_change",
     "EXECUTE_WRITE",
     "execute_write",
+    "BANK_MOVE_SOURCE_BANK",
+    "BANK_MOVE_TYPE",
+    "BANK_MOVE_DEST_BANK",
+    "EXECUTE_BANK_MOVE",
+    "BANK_MOVE_TYPES",
+    "bank_move",
     "REQUEST_FOR_DUMP",
     "DATA_OFFSET",
 ]
@@ -656,3 +662,43 @@ def execute_write(channel: int = 0) -> bytes:
     pair for years.
     """
     return parameter_change(EXECUTE_WRITE, 1, channel=channel)
+
+
+#: The unit's own MIDI/Global BANK MOVE, as four documented parameter
+#: changes. Names are Korg's, as Edisyn spells them. Measured on a bench
+#: SR 2026-11-12 (docs/RESOLUTION_NOTES.md §15): 213 names the source bank,
+#: 346 the kind, 379 the destination, and 472 executes on +1. Bank values
+#: are System Exclusive bytes (RAM 1 = 0, RAM 2 = 1, RAM 3 = 4, Card = 3),
+#: not display positions.
+BANK_MOVE_SOURCE_BANK = 213
+BANK_MOVE_TYPE = 346
+BANK_MOVE_DEST_BANK = 379
+EXECUTE_BANK_MOVE = 472
+
+#: BANK_COPY_TYPE values, as the unit's own page cycles them (measured):
+#: 0 performances, 1 patches, 2 wave sequences, 3 all three.
+BANK_MOVE_TYPES = {
+    "performance": 0,
+    "patch": 1,
+    "waveseq": 2,
+    "all": 3,
+}
+
+
+def bank_move(
+    source: int, destination: int, *, kind: str = "all", channel: int = 0
+) -> List[bytes]:
+    """The unit's BANK MOVE as the four parameter changes it sends.
+
+    ``source`` and ``destination`` are System Exclusive bank bytes, the
+    same ones a request carries. The return value is the frame list in the
+    order the panel sets them: source, kind, destination, execute.
+    """
+    if kind not in BANK_MOVE_TYPES:
+        raise ValueError(f"no move type {kind!r}; have {', '.join(BANK_MOVE_TYPES)}")
+    return [
+        parameter_change(BANK_MOVE_SOURCE_BANK, source, channel=channel),
+        parameter_change(BANK_MOVE_TYPE, BANK_MOVE_TYPES[kind], channel=channel),
+        parameter_change(BANK_MOVE_DEST_BANK, destination, channel=channel),
+        parameter_change(EXECUTE_BANK_MOVE, 1, channel=channel),
+    ]

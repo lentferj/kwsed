@@ -194,21 +194,16 @@ def _build_device(args: argparse.Namespace) -> Any:
 
 #: BANK_COPY_TYPE (346), as the unit's own page cycles it. Measured on the
 #: bench: 0 copies performances, 1 patches, 2 wave sequences, 3 all three.
-MOVE_TYPES = {
-    "performance": 0,
-    "patch": 1,
-    "waveseq": 2,
-    "all": 3,
-}
+MOVE_TYPES = m.BANK_MOVE_TYPES
 
 #: The four parameter changes the panel's MOVE BANK DATA? sends. The names
 #: are Korg's, as Edisyn spells them: 213 source bank, 346 copy type, 379
 #: destination bank, 472 execute. The bank values are the System Exclusive
 #: bytes, the same ones a request carries.
-MOVE_SOURCE_BANK = 213
-MOVE_TYPE = 346
-MOVE_DEST_BANK = 379
-EXECUTE_BANK_MOVE = 472
+MOVE_SOURCE_BANK = m.BANK_MOVE_SOURCE_BANK
+MOVE_TYPE = m.BANK_MOVE_TYPE
+MOVE_DEST_BANK = m.BANK_MOVE_DEST_BANK
+EXECUTE_BANK_MOVE = m.EXECUTE_BANK_MOVE
 
 
 def bank_move_frames(
@@ -218,14 +213,7 @@ def bank_move_frames(
     channel: int,
 ) -> List[bytes]:
     """The unit's own bank move, as the panel expresses it."""
-    if kind not in MOVE_TYPES:
-        raise ValueError(f"no move type {kind!r}; have {', '.join(MOVE_TYPES)}")
-    return [
-        m.parameter_change(MOVE_SOURCE_BANK, source.sysex, channel=channel),
-        m.parameter_change(MOVE_TYPE, MOVE_TYPES[kind], channel=channel),
-        m.parameter_change(MOVE_DEST_BANK, destination.sysex, channel=channel),
-        m.parameter_change(EXECUTE_BANK_MOVE, 1, channel=channel),
-    ]
+    return m.bank_move(source.sysex, destination.sysex, kind=kind, channel=channel)
 
 
 def _backup_destination(device: Any, entry: banks.Bank, where: str) -> str:
