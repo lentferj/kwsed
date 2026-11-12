@@ -196,13 +196,14 @@ def set_performance_part(
 def remap_performance_banks(perf_bank: bytes, source: int, destination: int) -> bytes:
     """Point every part that names ``source`` at ``destination``.
 
-    This is the remap the unit's own MIDI/Global BANK COPY performs: a bank
-    copied to another bank would otherwise still play its patches from the
-    bank it was copied from. Only **self-references** move -- a part pointing
-    at ROM, at the Card or at a third bank stays where it points, and a
-    whole-bank copy must not drag those along. Patches and wave sequences
-    need no remap: patches point at waves in PCM ROM, which do not move, and
-    each bank carries its own wave-sequence pool, so the numbers survive the
+    This is the remap the unit's own MIDI/Global BANK MOVE performs
+    (measured in the RAM-to-RAM and Card-to-RAM directions): a bank copied
+    to another bank would otherwise still play its patches from the bank it
+    came from. Only **self-references** move -- a part pointing at ROM, at
+    the Card or at a third bank stays where it points, and a whole-bank
+    copy must not drag those along. Patches and wave sequences need no
+    remap: patches point at waves in PCM ROM, which do not move, and each
+    bank carries its own wave-sequence pool, so the numbers survive the
     copy unchanged.
 
     Banks are positions 0-11 as :class:`kws.banks.Bank` numbers them (RAM 1

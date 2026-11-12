@@ -1828,13 +1828,20 @@ class WavestationBridge:
     ) -> Dict[str, Any]:
         """Copy one whole bank into another, kinds together and undoable.
 
-        This is the unit's MIDI/Global BANK COPY, performed over documented
-        requests instead of from the front panel, and fenced: the
-        destination's previous contents are backed up into one envelope
-        before anything is sent, and every written kind is read back and
-        compared. The panel function offers neither, which is why this does
-        not merely trigger it -- there is no documented SysEx request that
-        would.
+        This is the unit's MIDI/Global BANK MOVE, done here as a true copy
+        and fenced: the destination's previous contents are backed up into
+        one envelope before anything is sent, and every written kind is read
+        back and compared. The panel function offers neither.
+
+        The panel operation *is* expressible over MIDI -- four documented
+        parameter changes (213 source bank, 346 type, 379 destination bank,
+        472 ``EXECUTE_BANK_MOVE``), measured on the bench and reproduced by
+        ``tools/probe_bank_copy.py move`` -- so this method is not used
+        because a trigger is missing. It is used because the panel's move
+        gives no backup and no read-back, and because on the bench its
+        "MOVE BANK DATA?" prompt left the source bank byte-identical (it
+        behaved as a copy). kwsed's own read/remap/write does not depend on
+        that behaviour.
 
         All three kinds are copied. A partial copy (performances without the
         wave-sequence pool they name) silently changes how the destination
@@ -1846,7 +1853,8 @@ class WavestationBridge:
         to name the destination, so the copy is self-contained rather than
         still playing from where it came from. Parts pointing at ROM, the
         Card or a third bank are left alone -- see
-        :func:`kws.records.remap_performance_banks`.
+        :func:`kws.records.remap_performance_banks`. The panel does the same,
+        measured in both the RAM-to-RAM and Card-to-RAM directions.
         """
         src = banks.bank(source)
         dst = banks.bank(destination)

@@ -2268,7 +2268,7 @@ def build_parser() -> argparse.ArgumentParser:
             "is read and backed up first, every written kind is read back to "
             "verify, and the performances' parts that name the source bank "
             "itself are remapped to the destination -- what the unit's own "
-            "MIDI/Global BANK COPY does from the panel, done here so the copy "
+            "MIDI/Global BANK MOVE does from the panel, done here so the copy "
             "has a backup and a verify."
         ),
     )
