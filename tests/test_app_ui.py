@@ -2807,3 +2807,76 @@ class TestFxScreen:
             assert "cable unplugged" in str(
                 screen.query_one("#fx-state", Static).content
             )
+
+
+class TestMultisetFx:
+    """A Multiset has its own FX block; `x` opens it and writes the setup."""
+
+    async def test_x_in_the_multiset_editor_opens_its_fx(self, app: Any) -> None:
+        from kwsed.app import MultiEditScreen
+
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.action_multi()
+            await settle(pilot, 30)
+            app.action_edit_multi()
+            await settle(pilot, 5)
+            assert isinstance(app.screen, MultiEditScreen)
+            await pilot.press("x")
+            await settle(pilot, 5)
+            assert isinstance(app.screen, FxScreen)
+            title = str(app.screen.query_one("#fx-title", Label).content)
+            assert "Multiset" in title
+            table = app.screen.query_one("#fx-table", DataTable)
+            labels = [str(table.get_row_at(row)[0]) for row in range(table.row_count)]
+            assert "FX control channel" in labels
+
+    async def test_the_write_goes_through_write_multi(
+        self, app: Any, tmp_path: Any
+    ) -> None:
+        calls: list[bytes] = []
+
+        def fake(data: bytes, *, backup_dir: str, verify: bool = True) -> Any:
+            calls.append(bytes(data))
+            return {
+                "verified": True,
+                "backup": "not-read.json",
+                "kind": "multi",
+                "slot": "Multi Mode Setup",
+            }
+
+        app.device.write_multi = fake
+        app._backup_dir = str(tmp_path / "backups")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.action_multi()
+            await settle(pilot, 30)
+            app._write_gate = EditGate(armed=True)
+            app._edit_multiset_fx(app._multisets[0])
+            await settle(pilot, 5)
+            assert isinstance(app.screen, FxScreen)
+            await pilot.press("a")
+            await pilot.press("w")
+            await settle(pilot, 30)
+            assert len(calls) == 1
+            assert not isinstance(app.screen, FxScreen)
+
+    async def test_a_locked_gate_refuses_the_multiset_write(self, app: Any) -> None:
+        calls: list[Any] = []
+        app.device.write_multi = lambda *a, **k: calls.append(1)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.action_multi()
+            await settle(pilot, 30)
+            app._write_gate = EditGate(armed=False)
+            app._edit_multiset_fx(app._multisets[0])
+            await settle(pilot, 5)
+            assert isinstance(app.screen, FxScreen)
+            await pilot.press("a")
+            await settle(pilot, 2)
+            state = str(app.screen.query_one("#fx-state", Static).content)
+            assert "locked" in state
+            await pilot.press("w")
+            await settle(pilot, 10)
+            assert calls == []
+            assert isinstance(app.screen, FxScreen)

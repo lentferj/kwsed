@@ -45,7 +45,7 @@ import os
 import sys
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from typing import (
     TYPE_CHECKING,
@@ -309,6 +309,7 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
         Binding("b", "bank", "Bank", show=False),
         Binding("s", "stage", "Stage to RAM", show=False),
         Binding("n", "rename", "Rename", show=False),
+        Binding("x", "edit_fx", "FX", show=False),
     ]
 
     def __init__(
@@ -325,6 +326,7 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
         archive: Optional[Dict[int, Any]] = None,
         physical: Optional[Dict[str, Any]] = None,
         resident_scope: Optional[str] = None,
+        on_edit_fx: Optional[Callable[[Any], None]] = None,
     ) -> None:
         super().__init__()
         # A copy: the original list and its entries are not mutated.
@@ -345,6 +347,7 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
         self._staged_plan: Optional[Any] = None
         self._armed = False
         self._table: Optional[DataTable[Any]] = None
+        self._on_edit_fx = on_edit_fx
 
     # --- helpers ----------------------------------------------------------
 
@@ -941,6 +944,13 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
             pass
         self.dismiss(result if isinstance(result, dict) else {"result": result})
 
+    def action_edit_fx(self) -> None:
+        """Open the FX block of the selected Multiset."""
+        if self._on_edit_fx is None:
+            self._status("FX editing is not available here", refused=True)
+            return
+        self._on_edit_fx(self._ms())
+
     def _status(self, message: str, *, refused: bool = False) -> None:
         try:
             status = self.query_one("#multi-edit-state", Static)
@@ -999,6 +1009,8 @@ class FxScreen(ModalScreen[None]):
         *,
         gate_armed: Optional[bool] = None,
         gate: Any = None,
+        subject: str = "performance",
+        control_channel: Optional[int] = None,
     ) -> None:
         super().__init__()
         self._block = block
@@ -1007,6 +1019,8 @@ class FxScreen(ModalScreen[None]):
         self._armed = False
         self._gate_armed = gate_armed
         self._gate = gate
+        self._subject = subject
+        self._control_channel = control_channel
         self._pending_type: Optional[Tuple[int, int]] = None
         self._rows: list[tuple[Any, ...]] = self._descriptors(block)
         self.rows = self._rows
@@ -1015,6 +1029,8 @@ class FxScreen(ModalScreen[None]):
 
     def _descriptors(self, block: FxBlock) -> list[tuple[Any, ...]]:
         rows: list[tuple[Any, ...]] = []
+        if self._control_channel is not None:
+            rows.append(("control", None, "control"))
         rows.append(("routing", None, "series"))
         rows.append(("type", 0, "type"))
         for param in block.fx1.rows():
@@ -1060,7 +1076,7 @@ class FxScreen(ModalScreen[None]):
         return "MIDI mode unknown"
 
     def _title_text(self) -> str:
-        return f"FX ({self._gate_text()})"
+        return f"FX - {self._subject} ({self._gate_text()})"
 
     def _status(self, message: str) -> None:
         try:
@@ -1082,6 +1098,12 @@ class FxScreen(ModalScreen[None]):
             self.row_descriptors = self._rows
             self.descriptors = self._rows
         self.dismiss(None)
+
+    def _write_failed(self, message: str) -> None:
+        self.write_failed(message)
+
+    def _write_succeeded(self, result: Any = None) -> None:
+        self.write_done(self._block)
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -1126,6 +1148,8 @@ class FxScreen(ModalScreen[None]):
     def _label(self, desc: Any) -> str:
         kind = desc[0]
         fx_index = desc[1]
+        if kind == "control":
+            return "FX control channel"
         if kind == "routing":
             return "routing"
         if kind == "type":
@@ -1145,6 +1169,8 @@ class FxScreen(ModalScreen[None]):
         kind = desc[0]
         fx_index = desc[1]
         block = self._block
+        if kind == "control":
+            return str((self._control_channel or 0) + 1)
         if kind == "routing":
             return "series" if block.series else "parallel"
         if kind == "type":
@@ -8496,8 +8522,43 @@ class KwsedApp(App[None]):
                 sources=getattr(self, "_sources", None),
                 archive=getattr(self, "_archive", None),
                 physical=getattr(self, "_physical", None),
+                on_edit_fx=self._edit_multiset_fx,
             )
         )
+
+    def _edit_multiset_fx(self, multiset: Any) -> None:
+        """Open the selected Multiset's own FX block."""
+        if self._busy:
+            self.notify_status("busy", refused=True)
+            return
+
+        def on_write(block: FxBlock, screen: Any) -> None:
+            self._multiset_fx_write(multiset, block, screen)
+
+        self.push_screen(
+            FxScreen(
+                multiset.fx,
+                None,
+                on_write,
+                gate_armed=self._write_gate.armed,
+                subject=f"Multiset {multiset.number:02d}",
+                control_channel=multiset.control_channel,
+            )
+        )
+
+    def _multiset_fx_write(self, multiset: Any, block: FxBlock, screen: Any) -> None:
+        """Write one Multiset's FX through the whole-setup fence."""
+        if not self._write_gate.armed:
+            screen.write_failed("the write gate is locked (w on the browser)")
+            return
+        updated = [
+            replace(entry, fx=block) if entry.number == multiset.number else entry
+            for entry in getattr(self, "_multisets", [])
+        ]
+        if not updated:
+            screen.write_failed("no Multisets are loaded; read them first (m)")
+            return
+        self._multi_edit_write_worker(updated, self.device, self._backup_dir, screen)
 
     def action_edit_fx(self) -> None:  # noqa: C901
         entry = self._cursor_entry()
