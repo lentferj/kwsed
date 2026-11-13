@@ -117,3 +117,24 @@ def test_the_control_channel_names_channels_and_kb():
     assert multi.control_channel_text(6) == "7"
     assert multi.control_channel_text(15) == "16"
     assert multi.control_channel_text(16) == "KB"
+
+
+def test_part_channel_out_of_range_raises():
+    """A hand-built Part with channel 0 or 17 must not encode silently."""
+    import pytest
+
+    for bad in (0, 17):
+        with pytest.raises(ValueError):
+            bad_part = Part(channel=bad, bank=0, performance=0, level=0, flag=0)
+            ms = multi.Multiset(
+                number=0, name="X", parts=(bad_part,) + _make_parts()[1:]
+            )
+            multi.encode([ms])
+
+
+def test_valid_boundary_channels_round_trip():
+    """Channels 1 and 16 are accepted and survive a parse/encode round-trip."""
+    ms = multi.Multiset(number=0, name="X", parts=_make_parts())
+    encoded = multi.encode([ms])
+    sets = multi.parse(encoded)
+    assert multi.encode(sets) == encoded

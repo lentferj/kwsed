@@ -92,6 +92,10 @@ class Part:
     level: int  #: 0-127
     flag: int  #: unidentified; 1 on channels 1-15, 0 on 16
 
+    def __post_init__(self) -> None:
+        if not (1 <= self.channel <= CHANNELS):
+            raise ValueError(f"channel must be 1-16, not {self.channel}")
+
     @property
     def used(self) -> bool:
         return self.performance < 50
