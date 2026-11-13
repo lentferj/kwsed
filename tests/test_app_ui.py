@@ -2999,3 +2999,29 @@ class TestPerformancePicker:
             assert app._archive[24].digest == "old-digest"
             assert app._active_card is None, "the stale hint is not evidence"
             assert "not in the archive" in panel_text(app, "#status")
+
+    async def test_the_favourites_view_includes_the_active_card(
+        self, app: Any, tmp_path: Any
+    ) -> None:
+        from kws import cards as _cards
+        from kwsed.app import PerformancePickerScreen
+
+        app._active_card = 39
+        app._archive[39] = _cards.capture(39, "", {5: "CardPerf"}, {0: "P"}, digest="d")
+        app.favorites.toggle(favorite_bank_id("CARD/39", "performance"), 5)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.action_multi()
+            await settle(pilot, 30)
+            app.action_edit_multi()
+            await settle(pilot, 5)
+            editor = app.screen
+            editor._edit_perf(0)
+            await settle(pilot, 5)
+            picker = app.screen
+            assert isinstance(picker, PerformancePickerScreen)
+            await pilot.press("F")
+            await settle(pilot, 2)
+            table = picker.query_one("#perf-picker", DataTable)
+            names = [str(table.get_row_at(row)[2]) for row in range(table.row_count)]
+            assert "CardPerf" in names, "the active card's favourites are included"

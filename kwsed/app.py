@@ -483,6 +483,7 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
         resident_scope: Optional[str] = None,
         on_edit_fx: Optional[Callable[[Any], None]] = None,
         favorites: Any = None,
+        card_scope: Optional[str] = None,
     ) -> None:
         super().__init__()
         # A copy: the original list and its entries are not mutated.
@@ -505,6 +506,7 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
         self._table: Optional[DataTable[Any]] = None
         self._on_edit_fx = on_edit_fx
         self._favorites = favorites
+        self._card_scope = card_scope
 
     # --- helpers ----------------------------------------------------------
 
@@ -772,14 +774,17 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
 
         rows: List[PerformanceRow] = []
         for bank in _banks.BANKS:
-            scope = bank.id
+            is_card = bank.id == "CARD"
+            # The card part names the slot, not which bank is in it; the
+            # active card's scope is where its names and favourites live.
+            scope = (self._card_scope or bank.id) if is_card else bank.id
             for number in range(_banks.PERFORMANCES_PER_BANK):
-                name = ""
-                if self._catalog is not None:
+                name = self._scope_name(scope, number) if is_card else ""
+                if not name and self._catalog is not None:
                     try:
                         name = str(
                             self._catalog.display_name(
-                                scope, number, _banks.Kind.PERFORMANCE
+                                bank.id, number, _banks.Kind.PERFORMANCE
                             )
                             or ""
                         )
@@ -8724,8 +8729,26 @@ class KwsedApp(App[None]):
                 physical=getattr(self, "_physical", None),
                 on_edit_fx=self._edit_multiset_fx,
                 favorites=getattr(self, "favorites", None),
+                card_scope=self._picker_card_scope(),
             )
         )
+
+    def _picker_card_scope(self) -> str:
+        """The card scope whose favourites the performance picker should use.
+
+        The active card when it is known; otherwise the card bank being
+        viewed (a weaker hint, but better than the shared bare slot); else
+        ``CARD``. The bank number cannot be read, so this is always a hint.
+        """
+        scope = self._active_card_scope()
+        if scope != "CARD":
+            return scope
+        if self._current_card is not None:
+            try:
+                return _cards.scope_id(self._current_card)
+            except Exception:  # noqa: S110 - fall back to the bare slot
+                pass
+        return scope
 
     def _edit_multiset_fx(self, multiset: Any) -> None:
         """Open the selected Multiset's own FX block."""
