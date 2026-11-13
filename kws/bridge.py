@@ -1212,7 +1212,12 @@ class WavestationBridge:
             result["mismatch"] = _first_difference(bytes(data), bytes(after))
         return result
 
-    def read_multi(self, *, timeout: Optional[float] = None) -> bytes:
+    def read_multi(
+        self,
+        *,
+        timeout: Optional[float] = None,
+        label: str = "receiving the Multi Mode Setup",
+    ) -> bytes:
         """The Multisets, as the raw 0x62 message. Read-only, makes no sound.
 
         One request draws three replies -- 0x55, 0x5E and then 0x62 -- which
@@ -1221,30 +1226,39 @@ class WavestationBridge:
         the other two are read and discarded so they cannot be mistaken for
         the answer to the next request.
 
+        The three replies total about 13 kB, so the read runs inside a
+        progress scope; ``label`` names the phase when a write calls it
+        ("backing up ..." before the send, "checking ..." after it).
+
         The request code is **0x06**, documented. kwsed inferred 0x32 first,
         from the convention that a request sits 0x30 below its dump, and got
         silence -- see docs/RESOLUTION_NOTES.md section 8.
         """
-        self._drain()
-        self._send(_multi_request(self.channel))
-        deadline = time.time() + (DUMP_TIMEOUT if timeout is None else timeout)
-        while time.time() < deadline:
-            message = self._in.get_message()
-            if message is None:
-                time.sleep(0.003)
-                continue
-            packet = m.parse(message[0])
-            if packet is None or packet.channel != self.channel:
-                continue
-            if packet.is_error:
-                raise DeviceRefused(packet.function)
-            if packet.function == m.Function.MULTISET_DUMP:
-                return bytes(message[0])
-        raise TimeoutError(
-            "no Multiset dump came back. The request is 0x06 and takes no "
-            "argument; check the global channel and that System Exclusive "
-            "reception is enabled."
-        )
+        # 0x55 + 0x5E + 0x62 on the wire, the order the unit sends them.
+        wire = 2761 + 2761 + 7563
+        with self._progress_scope(label, _wire_estimate(wire)) as estimate:
+            started = time.monotonic()
+            self._drain()
+            self._send(_multi_request(self.channel))
+            deadline = time.time() + (DUMP_TIMEOUT if timeout is None else timeout)
+            while time.time() < deadline:
+                message = self._in.get_message()
+                if message is None:
+                    self._estimate_progress(started, estimate)
+                    time.sleep(0.003)
+                    continue
+                packet = m.parse(message[0])
+                if packet is None or packet.channel != self.channel:
+                    continue
+                if packet.is_error:
+                    raise DeviceRefused(packet.function)
+                if packet.function == m.Function.MULTISET_DUMP:
+                    return bytes(message[0])
+            raise TimeoutError(
+                "no Multiset dump came back. The request is 0x06 and takes no "
+                "argument; check the global channel and that System Exclusive "
+                "reception is enabled."
+            )
 
     def write_multi(
         self,
@@ -1278,7 +1292,9 @@ class WavestationBridge:
         )
 
         try:
-            before = self.read_multi(timeout=timeout)
+            before = self.read_multi(
+                timeout=timeout, label="backing up the Multi Mode Setup"
+            )
         except Exception as exc:
             raise DeviceError(
                 "could not read the Multi Mode Setup before writing it, so "
@@ -1327,7 +1343,10 @@ class WavestationBridge:
             )
 
         self._drain()
-        self._send(sent)
+        with self._progress_scope(
+            "writing the Multi Mode Setup", _wire_estimate(len(sent))
+        ):
+            self._send(sent)
 
         result: Dict[str, Any] = {
             "backup": saved,
@@ -1338,7 +1357,9 @@ class WavestationBridge:
             return result
 
         try:
-            after = self.read_multi(timeout=timeout)
+            after = self.read_multi(
+                timeout=timeout, label="checking the Multi Mode Setup"
+            )
         except Exception as exc:
             result["verified"] = False
             result["mismatch"] = (

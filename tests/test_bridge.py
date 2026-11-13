@@ -777,3 +777,28 @@ class TestWriteMulti:
             for message in unit.midi_out.sent
             if len(message) > 5 and message[4] == m.Function.MULTISET_DUMP
         ]
+
+
+def test_read_multi_reports_progress():
+    unit = Unit()
+    events = []
+    unit.bridge.progress = lambda label, fraction: events.append((label, fraction))
+    unit.bridge.read_multi(timeout=1.0)
+    labels = [label for label, _ in events]
+    assert any(label == "receiving the Multi Mode Setup" for label in labels)
+    assert events[-1][1] is None, "the scope always announces its end"
+
+
+def test_write_multi_reports_backup_write_and_check(tmp_path):
+    unit = Unit()
+    events = []
+    unit.bridge.progress = lambda label, fraction: events.append((label, fraction))
+    packet = m.parse(unit.multi_message)
+    assert packet is not None
+    encoded = multi_mod.encode(multi_mod.parse(packet.data()))
+    unit.bridge.write_multi(encoded, backup_dir=str(tmp_path))
+    labels = [label for label, _ in events]
+    assert any("backing up" in label for label in labels)
+    assert any("writing the Multi Mode Setup" in label for label in labels)
+    assert any("checking" in label for label in labels)
+    assert events[-1][1] is None
