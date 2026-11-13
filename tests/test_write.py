@@ -1164,6 +1164,34 @@ class TestBankCopy:
         assert result["verified"] is False
         assert result["mismatch"]
 
+    def test_a_failed_verify_copy_carries_no_written(self, tmp_path):
+        unit = Unit()
+        self._load_source(unit)
+        original = unit._sent
+
+        def lying(data):
+            original(data)
+            raw = bytes(data)
+            if (
+                len(raw) > 5
+                and raw[4] == m.Function.ALL_PERFORMANCE_DUMP
+                and raw[5] == CARD_SYSEX
+            ):
+                stored = bytearray(
+                    unit.dumps[(CARD_SYSEX, m.Function.ALL_PERFORMANCE_DUMP)]
+                )
+                stored[0] ^= 0xFF
+                unit.dumps[(CARD_SYSEX, m.Function.ALL_PERFORMANCE_DUMP)] = bytes(
+                    stored
+                )
+
+        unit.midi_out.send_message = lying  # type: ignore[method-assign]
+
+        result = unit.bridge.copy_bank("RAM1", "CARD", backup_dir=str(tmp_path))
+
+        assert result["verified"] is False
+        assert "written" not in result
+
     def test_a_long_waveseq_dump_is_truncated_and_copied(self, tmp_path):
         unit = Unit()
         _patch_bank, _perf_bank, waveseq = self._load_source(unit)

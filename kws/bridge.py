@@ -2010,10 +2010,13 @@ class WavestationBridge:
             verify=verify,
             timeout=timeout,
         )
-        # The exact post-copy state of the destination, per kind, decoded --
-        # the caller can update its caches and archives from this without a
-        # re-read. Present only on success: a failed copy raises instead.
-        result["written"] = dict(expected)
+        # `written` is the destination state only when verified; on a
+        # failed verify the destination state is unknown, and callers must
+        # check `verified` before trusting anything. Chosen shape: `written`
+        # is set only when `verified` is True, so it is absent otherwise
+        # (failed verify or `verify=False`).
+        if result.get("verified") is True:
+            result["written"] = dict(expected)
         return result
 
     def _copy_bank_via_device(
