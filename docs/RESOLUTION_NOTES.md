@@ -268,7 +268,7 @@ value 7 stored 6, and 16 stored 15, at byte 85 of that Multiset's 86-byte
 record; the change is one byte. The panel's edit echoes parameter 29
 (`MULTISET_FX_CONTROL_CHAN`), which is a globally addressed parameter that
 edits the *current* Multiset -- which is why it looks per-Multiset on the
-panel. KB's stored value is still to be measured. Byte 0 of the 22-byte head
+panel. KB stores 16 (0x10), measured the same day after setting MULTI:2 to KB and storing it. Byte 0 of the 22-byte head
 is not the control channel; it is part of the FX head.
 
 ### 8.3 `0x32` was inferred, probed, and is wrong

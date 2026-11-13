@@ -45,8 +45,8 @@ The FX control channel is **the last byte of the record**, stored as
 channel - 1 (0 = channel 1, 15 = channel 16). Measured on the bench
 2026-11-13: MULTI:2 set to 7 stored 6, set to 16 stored 15; the panel's
 parameter-change echo is parameter 29 (``MULTISET_FX_CONTROL_CHAN``), a
-global *address* that edits the current Multiset's value. KB's stored
-value is still to be measured.
+global *address* that edits the current Multiset's value. KB stores 16
+(measured 2026-11-13).
 """
 
 from __future__ import annotations
@@ -130,6 +130,20 @@ class Multiset:
     @property
     def display(self) -> str:
         return f"{self.number:02d} {self.name}" if self.name else f"{self.number:02d}"
+
+
+#: The stored control byte for **KB** (the keyboard), measured 2026-11-13
+#: after setting MULTI:2 to KB and storing it. Channels 1-16 store 0-15.
+CONTROL_CHANNEL_KB = 16
+
+
+def control_channel_text(raw: int) -> str:
+    """The panel's name for a stored FX control byte."""
+    if raw == CONTROL_CHANNEL_KB:
+        return "KB"
+    if 0 <= raw < 16:
+        return str(raw + 1)
+    return f"{raw} (raw)"
 
 
 def _name(raw: Sequence[int]) -> str:

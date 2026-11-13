@@ -52,7 +52,7 @@ bytes 22-85   16 parts x 4 bytes; the 16th part's fourth byte is the
 which is exactly the arithmetic `kws/multi.py` already uses
 (`PART_BASE = 22`, `MULTISET_SIZE = 86`, names at 2752). Measured on the
 bench 2026-11-13: the control channel is the **last byte of the record**,
-stored as channel - 1; the panel's parameter-change echo is parameter 29
+stored as channel - 1, with 16 for KB; the panel's parameter-change echo is parameter 29
 (`MULTISET_FX_CONTROL_CHAN`), a global address that edits the current
 Multiset's value. Byte 0 of the head is not the control channel.
 

@@ -109,3 +109,11 @@ def test_the_control_channel_is_the_last_record_byte():
     assert sets[1].parts[15].flag == 0, "channel 16 has no flag slot"
     encoded = multi.encode(sets)
     assert encoded[1 * multi.MULTISET_SIZE + 85] == 6
+
+
+def test_the_control_channel_names_channels_and_kb():
+    """Measured 2026-11-13: 0-15 are channels 1-16, 16 is KB."""
+    assert multi.control_channel_text(0) == "1"
+    assert multi.control_channel_text(6) == "7"
+    assert multi.control_channel_text(15) == "16"
+    assert multi.control_channel_text(16) == "KB"
