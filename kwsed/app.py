@@ -9400,7 +9400,7 @@ class KwsedApp(App[None]):
         number = entry.number
 
         def work() -> Any:
-            record = self.device.read_performance(bank.sysex, number)
+            record = self.device.read_performance(bank.number, number)
             try:
                 setup = self.device.read_system_setup()
             except Exception:

@@ -25,6 +25,7 @@ import argparse
 import json
 import os
 import pathlib
+from typing import Any
 
 import pytest
 
@@ -1832,6 +1833,40 @@ class TestFx:
         assert run(["fx", "RAM5", "0"]) == 2
         assert run(["fx", "RAM1", "50"]) == 2
         assert run(["fx", "--multi", "32"]) == 2
+
+    def test_fx_on_ram3_reads_ram3_not_rom5(self, capsys):
+        """RAM 3 is position 2 but wire byte 4: the CLI must read position
+        2, or it prints ROM 5's FX while saying RAM 3."""
+        import argparse
+
+        from kws.fx import Effect, FxBlock
+
+        block_ram3 = FxBlock(
+            series=False,
+            fx1=Effect(type=1, raw=bytes(8)),
+            fx2=Effect(type=0, raw=bytes(8)),
+            mix=(0, 0),
+            mod_source=(0, 0),
+            mod_amount=(0, 0),
+        ).to_bytes()
+        record_ram3 = bytes([0x11]) * 16 + block_ram3 + bytes([0x11]) * (181 - 37)
+        calls: list[Any] = []
+
+        class FakeDevice:
+            def read_performance(self, bank, number, **kwargs):
+                calls.append((bank, number))
+                entry = banks.bank(bank)
+                assert entry.id == "RAM3", f"read went to {entry.id}"
+                return bytes(record_ram3)
+
+            def close(self):
+                pass
+
+        args = argparse.Namespace(bank="RAM3", number=7, multi=None)
+        assert cli._cmd_fx(FakeDevice(), args) == 0
+        assert calls == [(banks.bank("RAM3").number, 7)]
+        out = capsys.readouterr().out
+        assert "Small Hall" in out
 
 
 class TestBackupShow:

@@ -2840,6 +2840,76 @@ class TestFxScreen:
                 screen.query_one("#fx-state", Static).content
             )
 
+    async def test_fx_on_ram3_reads_ram3_not_rom5(self, app: Any) -> None:
+        """RAM 3 is position 2 but wire byte 4: the FX read must use the
+        position, or it opens ROM 5's record and writes it back into RAM 3."""
+        from kws.fx import Effect, FxBlock
+
+        def _record(first: int, fx1_type: int) -> bytes:
+            block = FxBlock(
+                series=False,
+                fx1=Effect(type=fx1_type, raw=bytes(8)),
+                fx2=Effect(type=0, raw=bytes(8)),
+                mix=(0, 0),
+                mod_source=(0, 0),
+                mod_amount=(0, 0),
+            ).to_bytes()
+            return bytes([first]) * 16 + block + bytes([first]) * (181 - 37)
+
+        ram3_record = _record(0x11, 1)
+        rom5_record = _record(0x22, 5)
+        reads: list[Any] = []
+        writes: list[Any] = []
+
+        def fake_read(bank: Any, number: int, *args: Any, **kwargs: Any) -> bytes:
+            reads.append((bank, number))
+            entry = banks.bank(bank)
+            if entry.id == "RAM3":
+                return bytes(ram3_record)
+            if entry.id == "ROM5":
+                return bytes(rom5_record)
+            raise AssertionError(f"unexpected bank {bank!r}")
+
+        def fake_write(
+            bank: Any, number: int, data: bytes, *args: Any, **kwargs: Any
+        ) -> Any:
+            writes.append((bank, number, bytes(data)))
+            return {
+                "verified": True,
+                "backup": "not-read.json",
+                "kind": "performance",
+                "bank": "RAM 3",
+            }
+
+        app.device.read_performance = fake_read
+        app.device.write_performance = fake_write
+        app._write_gate = EditGate(armed=True)
+        app._cursor_entry = lambda: banks.Slot(
+            banks.bank("RAM3"), banks.Kind.PERFORMANCE, 7
+        )
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.action_edit_fx()
+            await settle(pilot, 30)
+            assert isinstance(app.screen, FxScreen)
+            assert reads == [(banks.bank("RAM3").number, 7)]
+            assert banks.bank(reads[0][0]).id == "RAM3"
+            assert app.screen._block.to_bytes() == ram3_record[16:37]
+            target = next(
+                row for row in app.screen._block.fx1.rows() if row.label == "Pre Delay"
+            )
+            app.screen._apply_param(0, target, 300)
+            expected = bytes(app.screen._block.to_bytes())
+            await pilot.press("a")
+            await pilot.press("w")
+            await settle(pilot, 25)
+            assert len(writes) == 1
+            assert banks.bank(writes[0][0]).id == "RAM3"
+            assert writes[0][1] == 7
+            assert writes[0][2][16:37] == expected
+            assert writes[0][2][:16] == ram3_record[:16]
+            assert writes[0][2][37:] == ram3_record[37:]
+
 
 class TestMultisetFx:
     """A Multiset has its own FX block; `x` opens it and writes the setup."""

@@ -2083,7 +2083,7 @@ def _cmd_fx(device: Any, args: argparse.Namespace) -> int:
     if device is None:
         print("error: this command needs a unit", file=sys.stderr)
         return spec.EXIT_USAGE
-    record = device.read_performance(bank_entry.sysex, number)
+    record = device.read_performance(bank_entry.number, number)
     block = fxmod.FxBlock.from_bytes(record[16:37])
     _print_fx_block(block)
     return spec.EXIT_OK
