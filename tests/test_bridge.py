@@ -822,3 +822,16 @@ def test_write_multi_stores_the_annotations_block(tmp_path):
         "CARD/39"
     )
     assert "dump" in blocks, "the SysEx dump is unchanged"
+
+
+def test_the_progress_label_names_the_card_and_its_wire_byte():
+    unit = Unit()
+    labels = []
+    unit.bridge.progress = lambda label, fraction: labels.append(label)
+    try:
+        unit.bridge.read_raw(
+            banks.bank("CARD").sysex, m.Function.ALL_WAVESEQ_DUMP, timeout=0.05
+        )
+    except TimeoutError:
+        pass  # the label is announced before the wait
+    assert any("Card bank 3" in label for label in labels)

@@ -2149,7 +2149,15 @@ class WavestationBridge:
     ) -> bytes:
         """One bank dump of a given kind, as the bytes that arrived."""
         wire = _FUNCTION_WIRE_BYTES.get(function, 8000)
-        label = f"receiving bank {bank_number} {m.Function.name(function)}"
+        try:
+            bank_label = banks.by_sysex(bank_number).label
+        except LookupError:
+            bank_label = f"bank {bank_number}"
+        if bank_label == "Card":
+            # The wire byte is not the display position: say both, so the
+            # progress line does not look like a ROM bank.
+            bank_label = f"Card bank {bank_number}"
+        label = f"receiving {bank_label} {m.Function.name(function)}"
         with self._progress_scope(label, _wire_estimate(wire)) as estimate:
             started = time.monotonic()
             self._drain()
