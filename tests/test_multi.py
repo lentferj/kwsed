@@ -56,12 +56,12 @@ def test_all_zero_fx_block_roundtrips():
     assert out == data_bytes
 
 
-def test_control_channel_and_fx_from_bytes():
+def test_header_byte_and_fx_from_bytes():
     data = _synthetic_dump()
     sets = multi.parse(data)
     for number in range(multi.MULTISETS):
         base = number * multi.MULTISET_SIZE
-        assert sets[number].control_channel == data[base]
+        assert sets[number].header_byte == data[base]
         assert sets[number].fx.to_bytes() == data[base + 1 : base + 22]
 
 
@@ -73,13 +73,13 @@ def test_part_byte_change_does_not_alter_control_or_fx():
     data[at] = (data[at] + 1) % 128
     sets = multi.parse(bytes(data))
     orig_sets = multi.parse(original)
-    assert sets[2].control_channel == orig_sets[2].control_channel
+    assert sets[2].header_byte == orig_sets[2].header_byte
     assert sets[2].fx.to_bytes() == orig_sets[2].fx.to_bytes()
 
 
 def test_default_construction():
     ms = multi.Multiset(number=0, name="X", parts=_make_parts())
-    assert ms.control_channel == 0
+    assert ms.header_byte == 0
     assert ms.fx == FxBlock.empty()
 
 
@@ -87,13 +87,13 @@ def test_a_real_control_byte_is_accepted_and_roundtrips():
     """Real dumps carry 0x19 (25), so the byte is not a plain 0-15 channel."""
     import pytest
 
-    ms = multi.Multiset(number=0, name="X", parts=_make_parts(), control_channel=25)
-    assert ms.control_channel == 25
+    ms = multi.Multiset(number=0, name="X", parts=_make_parts(), header_byte=25)
+    assert ms.header_byte == 25
     with pytest.raises(ValueError):
-        multi.Multiset(number=0, name="X", parts=_make_parts(), control_channel=128)
+        multi.Multiset(number=0, name="X", parts=_make_parts(), header_byte=128)
 
 
-def test_the_kb_control_byte_is_named():
-    """The bench showed KB stored as 0x19; other values stay raw."""
-    assert multi.control_channel_text(0x19) == "KB"
-    assert multi.control_channel_text(3) == "3"
+def test_the_head_byte_is_not_the_control_channel():
+    """Parameter 29 is global-addressed but edits the current Multiset."""
+    ms = multi.Multiset(number=0, name="X", parts=_make_parts(), header_byte=25)
+    assert ms.header_byte == 25

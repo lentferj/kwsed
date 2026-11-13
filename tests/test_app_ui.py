@@ -2827,9 +2827,6 @@ class TestMultisetFx:
             assert isinstance(app.screen, FxScreen)
             title = str(app.screen.query_one("#fx-title", Label).content)
             assert "Multiset" in title
-            table = app.screen.query_one("#fx-table", DataTable)
-            labels = [str(table.get_row_at(row)[0]) for row in range(table.row_count)]
-            assert "FX control channel" in labels
 
     async def test_the_write_goes_through_write_multi(
         self, app: Any, tmp_path: Any

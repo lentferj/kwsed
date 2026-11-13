@@ -36,13 +36,13 @@ The layout was derived rather than read, and the arithmetic is the evidence:
 2752`` is exactly where the names begin.
 
 Record layout (86 bytes):
-    byte 0        FX control byte (raw; low bits channel, high bits flags)
+    byte 0        first byte of the FX head (raw; not the control channel)
     bytes 1-21    the 21-byte FX block (kws.fx.FxBlock)
     bytes 22-85   16 channels x 4 bytes
 
-The control byte's stored convention (a value such as 0x19 is seen) is
-to be confirmed on hardware; the FX block is the same codec as a
-performance's.
+Byte 0 is not the FX control channel: that is global parameter 29,
+measured on the bench 2026-11-13. Byte 0 is part of the copied FX head;
+its meaning is still open.
 """
 
 from __future__ import annotations
@@ -68,19 +68,6 @@ MULTISETS = 32
 
 MULTISET_SIZE = 86
 CHANNELS = 16
-
-#: The stored byte for an FX control channel set to **KB** (the keyboard),
-#: measured on the bench 2026-11-13: the panel showed KB and the dump read
-#: 0x19. Other values (channels 1-16, OFF) are still to be mapped, so the
-#: raw byte is preserved and only KB is named.
-CONTROL_CHANNEL_KB = 0x19
-
-
-def control_channel_text(raw: int) -> str:
-    """How the panel names a stored FX control byte, as far as measured."""
-    if raw == CONTROL_CHANNEL_KB:
-        return "KB"
-    return str(raw)
 
 
 #: Settings first, then one four-byte part per MIDI channel.
@@ -111,17 +98,19 @@ class Multiset:
     number: int
     name: str
     parts: tuple[Part, ...]
-    #: Stored byte 0 of the record. Real dumps carry values such as 0x19
-    #: (25), so it is not a plain 0-15 channel: the low bits look like the
-    #: channel and the high bits carry flags. Kept raw until measured.
-    control_channel: int = 0
+    #: Byte 0 of the 22-byte head, kept raw. It is **not** the FX control
+    #: channel: the panel's FXControlChan is global parameter 29, measured
+    #: on the bench 2026-11-13 (the unit echoes "+1".."+16"), and changing
+    #: it does not alter these records. Byte 0 is part of the copied FX
+    #: head; its meaning is still open.
+    header_byte: int = 0
     #: The Multiset's own 21-byte FX block.
     fx: FxBlock = field(default_factory=FxBlock.empty)
 
     def __post_init__(self) -> None:
-        if not (0 <= self.control_channel <= 127):
+        if not (0 <= self.header_byte <= 127):
             raise ValueError(
-                f"control channel must be a 7-bit byte, not {self.control_channel}"
+                f"header byte must be a 7-bit byte, not {self.header_byte}"
             )
 
     @property
@@ -173,7 +162,7 @@ def parse(data: Sequence[int]) -> List[Multiset]:
                 number=number,
                 name=_name(data[at : at + NAME_SIZE]),
                 parts=tuple(parts),
-                control_channel=data[base],
+                header_byte=data[base],
                 fx=FxBlock.from_bytes(bytes(data[base + 1 : base + 22])),
             )
         )
@@ -197,7 +186,7 @@ def encode(multisets: Sequence[Multiset]) -> bytes:
         if entry is None:
             continue
         base = number * MULTISET_SIZE
-        data[base] = entry.control_channel & 0x7F
+        data[base] = entry.header_byte & 0x7F
         fx_bytes = entry.fx.to_bytes()
         data[base + 1 : base + 22] = fx_bytes
         for part in entry.parts:
