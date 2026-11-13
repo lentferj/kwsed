@@ -177,3 +177,44 @@ def test_load_preaudit_target_malformed(tmp_path):
     path = tmp_path / "config.toml"
     path.write_text('preaudit_target_perf = "ROM4:1"\n', encoding="utf-8")
     assert config.load_preaudit_target(str(path)) is None
+
+
+@pytest.mark.parametrize("value", ["true", "false"])
+def test_load_single_object_timeout_bool_falls_back(tmp_path, value):
+    from kws import config
+
+    path = tmp_path / "config.toml"
+    path.write_text(f"single_object_timeout = {value}\n", encoding="utf-8")
+    assert config.load_single_object_timeout(str(path)) == (
+        config.DEFAULT_SINGLE_OBJECT_TIMEOUT
+    )
+
+
+@pytest.mark.parametrize("value", ["0", "0.0", "-1", "-5.5"])
+def test_load_single_object_timeout_non_positive_falls_back(tmp_path, value):
+    from kws import config
+
+    path = tmp_path / "config.toml"
+    path.write_text(f"single_object_timeout = {value}\n", encoding="utf-8")
+    assert config.load_single_object_timeout(str(path)) == (
+        config.DEFAULT_SINGLE_OBJECT_TIMEOUT
+    )
+
+
+@pytest.mark.parametrize("value", ["3600", "1e9"])
+def test_load_single_object_timeout_absurd_falls_back(tmp_path, value):
+    from kws import config
+
+    path = tmp_path / "config.toml"
+    path.write_text(f"single_object_timeout = {value}\n", encoding="utf-8")
+    assert config.load_single_object_timeout(str(path)) == (
+        config.DEFAULT_SINGLE_OBJECT_TIMEOUT
+    )
+
+
+def test_load_single_object_timeout_valid_unchanged(tmp_path):
+    from kws import config
+
+    path = tmp_path / "config.toml"
+    path.write_text("single_object_timeout = 5.0\n", encoding="utf-8")
+    assert config.load_single_object_timeout(str(path)) == 5.0

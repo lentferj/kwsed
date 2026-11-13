@@ -37,6 +37,7 @@ able to tell which one is unhappy.
 
 from __future__ import annotations
 
+import math
 import os
 import re
 from typing import Any
@@ -407,16 +408,46 @@ DEFAULT_CONFIG = {
 
 def load_single_object_timeout(path: str | None = None) -> float:
     """The timeout for single object (patch/performance) reads, in seconds."""
+    # Bad values fall back to the default, like the neighboring loaders
+    # (load_card_mode, load_preaudit_backup, load_preaudit_target): a bad
+    # hand edit should cost a slow read, not a refusal to run.
+    #
+    # A bool is not a timeout here -- isinstance(True, int) is True, so a
+    # hand-edited `single_object_timeout = true` would otherwise become 1.0
+    # seconds, worse than the default it was meant to fix. Cf. the bool
+    # guard precedent in banks.bank(): "A bool is not a bank id here".
+    #
+    # The value is a per-read deadline in seconds: bridge.py reads it as
+    # `deadline = time.time() + timeout`, so 0 or a negative value is
+    # already expired and every single-object read times out instantly.
+    # The unit answers a single patch request after about 9.9 seconds
+    # (see bridge.DEFAULT_SINGLE_OBJECT_TIMEOUT, default 15.0 here), so
+    # the sane range is 0.1..60.0 seconds: below a tenth of a second no
+    # reply could ever arrive, and above a minute the user waits out a
+    # typo (e.g. milliseconds) on every read.
+    #
+    # Nothing in the app or CLI writes this key (save_single_object_timeout
+    # has no callers) -- hand-edited files are the only source, so every
+    # out-of-range or non-finite value below just means the default.
     data = _settings.read(path or DEFAULT_PATH)[0]
     value = data.get("single_object_timeout")
+    if isinstance(value, bool):
+        return DEFAULT_SINGLE_OBJECT_TIMEOUT
+    candidate: float | None = None
     if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, str):
+        candidate = float(value)
+    elif isinstance(value, str):
         try:
-            return float(value)
+            candidate = float(value)
         except ValueError:
-            pass
-    return DEFAULT_SINGLE_OBJECT_TIMEOUT
+            candidate = None
+    if candidate is None:
+        return DEFAULT_SINGLE_OBJECT_TIMEOUT
+    if not math.isfinite(candidate):
+        return DEFAULT_SINGLE_OBJECT_TIMEOUT
+    if not 0.1 <= candidate <= 60.0:
+        return DEFAULT_SINGLE_OBJECT_TIMEOUT
+    return candidate
 
 
 def save_single_object_timeout(value: float, path: str | None = None) -> None:
