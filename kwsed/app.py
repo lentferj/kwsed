@@ -569,6 +569,53 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
     def _ms(self) -> Any:
         return self._multisets_copy[self._selected]
 
+    def _intended_card_scope(self, channel: int) -> Optional[str]:
+        """The card bank a card channel means, if it uses the Card slot.
+
+        A pending choice wins; otherwise keep the card already recorded for
+        this channel, even when only its performance number was nudged.
+        Losing that would silently collapse every card channel onto whichever
+        bank happens to be active at write time.
+        """
+        from kws import banks as _banks
+
+        part = self._ms().parts[channel]
+        if part.bank != _banks.bank("CARD").sysex:
+            return None
+        scope = self._desired_scopes.get(channel)
+        if scope and scope != "CARD":
+            return scope
+        snapshot = (self._snapshots or {}).get(self._selected)
+        binding = snapshot.channels.get(channel) if snapshot is not None else None
+        if binding is not None:
+            recorded = getattr(binding, "card_scope", None)
+            if recorded:
+                return str(recorded)
+        if self._card_scope and self._card_scope != "CARD":
+            return self._card_scope
+        return None
+
+    def _intended_card_scopes(self) -> Dict[int, str]:
+        """Channel indices to intended card scope, for the used card parts."""
+        from kws import banks as _banks
+
+        card_bank = _banks.bank("CARD").sysex
+        scopes: Dict[int, str] = {}
+        for index, part in enumerate(self._ms().parts[:16]):
+            if not getattr(part, "used", False) or part.bank != card_bank:
+                continue
+            scope = self._intended_card_scope(index)
+            if scope:
+                scopes[index] = scope
+        return scopes
+
+    def _mixed_card_scopes(self) -> List[str]:
+        """The distinct card banks this Multiset asks for, sorted."""
+        return sorted(set(self._intended_card_scopes().values()))
+
+    def _is_mixed_cards(self) -> bool:
+        return len(self._mixed_card_scopes()) > 1
+
     def _snapshot(self) -> Any:
         """What this Multiset points at now, for the live multi catalog."""
         from kws import multi as _multi_mod
@@ -579,8 +626,7 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
         record = encoded[at : at + _multi_mod.MULTISET_SIZE]
 
         def card_scope_for(channel: int) -> Optional[str]:
-            scope = self._desired_scopes.get(channel) or self._card_scope
-            return scope if scope and scope != "CARD" else None
+            return self._intended_card_scope(channel)
 
         def name_for(bank: int, number: int, scope: Optional[str]) -> str:
             if scope:
@@ -611,7 +657,10 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
     def _title(self) -> str:
         ms = self._ms()
         name = getattr(ms, "name", "") or ""
-        return f"Edit Multiset {getattr(ms, 'number', self._selected):02d} — {name}"
+        title = f"Edit Multiset {getattr(ms, 'number', self._selected):02d} — {name}"
+        if self._is_mixed_cards():
+            title += " — MIXED CARDS"
+        return title
 
     def _name_for_part(self, part: Any) -> str:
         if not getattr(part, "used", False):
@@ -764,15 +813,29 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
             column = 0
         table.clear()
         ms = self._ms()
+        marks = {
+            mismatch.channel
+            for mismatch in (self._mismatches or {}).get(self._selected, [])
+        }
         for i in range(16):
             part = ms.parts[i] if i < len(ms.parts) else None
             table.add_row(*self._row_cells(i, part), key=f"r{i}")
+        if isinstance(table, WarningTable):
+            table.set_warning_rows({f"r{i}" for i in marks})
         if table.row_count and len(table.columns):
             row = max(0, min(row, table.row_count - 1))
             column = max(0, min(column, len(table.columns) - 1))
             table.move_cursor(row=row, column=column)
         found = (self._mismatches or {}).get(self._selected, [])
-        if found:
+        if self._is_mixed_cards():
+            scopes = ", ".join(
+                self._scope_label(scope) for scope in self._mixed_card_scopes()
+            )
+            self._status(
+                f"MIXED CARDS ({scopes}) — the unit uses the active card; "
+                "s stages into RAM"
+            )
+        elif found:
             self._status(
                 "recorded: "
                 + "; ".join(
@@ -780,6 +843,7 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
                     for mismatch in found[:2]
                 )
             )
+        self._rebuild_title()
 
     def _row_cells(self, i: int, part: Any) -> tuple[Any, ...]:
         if part is None:
@@ -1107,7 +1171,7 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
             if not getattr(part, "used", False):
                 perf = None
             else:
-                scope = self._desired_scopes.get(i)
+                scope = self._intended_card_scope(i)
                 if scope is None:
                     try:
                         scope = _banks.by_sysex(part.bank).id
@@ -1197,10 +1261,65 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
                 "card performances into RAM first. Nothing sent yet."
             )
 
-    def action_fire(self) -> None:  # noqa: C901
+    def action_fire(self) -> None:
         if not self._armed:
             self._status("not armed - press a first", refused=True)
             return
+        if self._is_mixed_cards():
+            self._confirm_mixed_write()
+            return
+        self._write_now()
+
+    def _confirm_mixed_write(self) -> None:
+        by_scope: Dict[str, List[int]] = {}
+        for channel, scope in self._intended_card_scopes().items():
+            by_scope.setdefault(scope, []).append(channel + 1)
+        scope_lines = [
+            f"  {self._scope_label(scope)}: "
+            + ", ".join(f"{channel:02d}" for channel in sorted(channels))
+            for scope, channels in sorted(by_scope.items())
+        ]
+        active = self._card_scope or "CARD"
+        active_label = self._scope_label(active) if active != "CARD" else "unknown"
+        prompt = "\n".join(
+            [
+                "MIXED CARD REFERENCES",
+                "",
+                "This Multiset uses performances from:",
+                *scope_lines,
+                "",
+                "The Wavestation has one CARD slot and stores",
+                "only performance numbers, not the card.",
+                f"All card channels will use the active card ({active_label}).",
+                "",
+                "Press s first to stage them into RAM and keep",
+                "this Multiset self-contained.",
+                "",
+                "Write to the active card anyway?",
+            ]
+        )
+        self.app.push_screen(
+            ConfirmScreen(
+                prompt,
+                confirm="Write anyway",
+                cancel="Cancel",
+                danger=True,
+            ),
+            self._mixed_confirmed,
+        )
+
+    def _mixed_confirmed(self, confirmed: Optional[bool]) -> None:
+        if not confirmed:
+            self._armed = False
+            self._status(
+                "write cancelled — s stages the card performances into RAM; "
+                "a then w writes to the active card anyway"
+            )
+            return
+        self._armed = True
+        self._write_now()
+
+    def _write_now(self) -> None:  # noqa: C901
         self._armed = False
         app = None
         try:
@@ -1317,14 +1436,16 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
     def _write_succeeded(self, result: Any) -> None:
         try:
             app = self.app
+            written = list(self._multisets_copy)
+            if hasattr(app, "_multi_sets"):
+                app._multi_sets = written
+            if hasattr(app, "_multisets"):
+                app._multisets = written
             if hasattr(app, "_record_multi_snapshot"):
                 # The screen holds the state that was written (after staging,
-                # if any), so the catalog cannot go stale on this path.
-                app._record_multi_snapshot(self._snapshot())
-            if hasattr(app, "_multi_sets"):
-                app._multi_sets = list(self._multisets_copy)
-            if hasattr(app, "_multisets"):
-                app._multisets = list(self._multisets_copy)
+                # if any). Pass the written setups so the check runs against
+                # them rather than the previous read.
+                app._record_multi_snapshot(self._snapshot(), written)
             if hasattr(app, "_after_multi_write"):
                 app._after_multi_write()
         except Exception:  # noqa: S110
@@ -9041,6 +9162,33 @@ class KwsedApp(App[None]):
                 name_at=name_at,
                 multiset=sets[number],
             )
+            scopes = sorted(
+                {
+                    binding.card_scope
+                    for binding in snapshot.channels.values()
+                    if binding.card_scope
+                }
+            )
+            if len(scopes) > 1:
+                first = next(
+                    binding.channel
+                    for binding in snapshot.channels.values()
+                    if binding.card_scope
+                )
+                found.insert(
+                    0,
+                    _multisets_mod.Mismatch(
+                        multi=number,
+                        channel=first,
+                        kind="mixed",
+                        text=(
+                            "uses performances from "
+                            + ", ".join(self._scope_label(scope) for scope in scopes)
+                            + "; the unit can only use the active card — "
+                            "press e, then s to stage them into RAM"
+                        ),
+                    ),
+                )
             if found:
                 out[number] = found
         return out
@@ -9142,13 +9290,30 @@ class KwsedApp(App[None]):
             )
         )
 
-    def _record_multi_snapshot(self, snapshot: Any) -> None:
-        """Put one snapshot in the live multi catalog and save it."""
+    def _record_multi_snapshot(
+        self,
+        snapshot: Any,
+        multisets: Optional[Sequence[Any]] = None,
+    ) -> None:
+        """Put one snapshot in the live multi catalog and save it.
+
+        With ``multisets`` (the setups just written) the check is re-run
+        against those exact setups, so a mixed-card Multiset is still
+        flagged immediately. Without it (the editor's plain ``r``), the
+        record is the assertion and its own entry is cleared.
+        """
         self._multi_catalog[snapshot.number] = snapshot
-        self._multi_mismatches.pop(snapshot.number, None)
+        if multisets is not None:
+            fresh = self._check_multi_snapshots(multisets)
+            self._multi_mismatches.clear()
+            self._multi_mismatches.update(fresh)
+        else:
+            self._multi_mismatches.pop(snapshot.number, None)
         if self._multisets_path is not None:
             _multisets_mod.save(self._multi_catalog, self._multisets_path)
         if getattr(self, "_screen_stack", None) and self._multisets:
+            self._build_row_model()
+            self._apply_row_model()
             self._refresh_multi_rows()
 
     def _picker_card_scope(self) -> str:
