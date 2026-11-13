@@ -2993,6 +2993,69 @@ class TestMultisetFx:
             assert calls == []
             assert isinstance(app.screen, FxScreen)
 
+    async def test_a_held_exchange_refuses_the_multiset_fx_write(
+        self, app: Any
+    ) -> None:
+        calls: list[Any] = []
+        app.device.write_multi = lambda *a, **k: calls.append(1)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.action_multi()
+            await settle(pilot, 30)
+            app._write_gate = EditGate(armed=True)
+            app._edit_multiset_fx(app._multisets[0])
+            await settle(pilot, 5)
+            assert isinstance(app.screen, FxScreen)
+            await pilot.press("a")
+            await settle(pilot, 2)
+            app._exchange.acquire()
+            try:
+                await pilot.press("w")
+                await settle(pilot, 10)
+                state = str(app.screen.query_one("#fx-state", Static).content)
+                assert "busy" in state
+                assert calls == []
+                assert isinstance(app.screen, FxScreen)
+            finally:
+                app._exchange.release()
+
+    async def test_the_multiset_fx_write_releases_the_exchange(
+        self, app: Any, tmp_path: Any
+    ) -> None:
+        calls: list[bytes] = []
+
+        def fake(
+            data: bytes,
+            *,
+            backup_dir: str,
+            verify: bool = True,
+            annotations: Any = None,
+        ) -> Any:
+            calls.append(bytes(data))
+            return {
+                "verified": True,
+                "backup": "not-read.json",
+                "kind": "multi",
+                "slot": "Multi Mode Setup",
+            }
+
+        app.device.write_multi = fake
+        app._backup_dir = str(tmp_path / "backups")
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.action_multi()
+            await settle(pilot, 30)
+            app._write_gate = EditGate(armed=True)
+            app._edit_multiset_fx(app._multisets[0])
+            await settle(pilot, 5)
+            assert isinstance(app.screen, FxScreen)
+            await pilot.press("a")
+            await pilot.press("w")
+            await settle(pilot, 30)
+            assert len(calls) == 1
+            assert not app._exchange.locked()
+            assert not isinstance(app.screen, FxScreen)
+
     def test_the_type_warning_fits_the_confirm_dialog(self) -> None:
         from kwsed.app import FX_TYPE_WARNING
 

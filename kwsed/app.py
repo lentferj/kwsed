@@ -9365,6 +9365,12 @@ class KwsedApp(App[None]):
         if not updated:
             screen.write_failed("no Multisets are loaded; read them first (m)")
             return
+        if self._busy:
+            screen.write_failed("busy")
+            return
+        if not self._exchange.acquire(blocking=False):
+            screen.write_failed("busy")
+            return
         self._multi_edit_write_worker(updated, self.device, self._backup_dir, screen)
 
     def action_edit_fx(self) -> None:  # noqa: C901
