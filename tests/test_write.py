@@ -1164,6 +1164,39 @@ class TestBankCopy:
         assert result["verified"] is False
         assert result["mismatch"]
 
+    def test_a_long_waveseq_dump_is_truncated_and_copied(self, tmp_path):
+        unit = Unit()
+        _patch_bank, _perf_bank, waveseq = self._load_source(unit)
+        extra = bytes((index * 11) % 256 for index in range(64))
+        bank_byte = banks.bank("RAM1").sysex
+        unit.dumps[(bank_byte, m.Function.ALL_WAVESEQ_DUMP)] = waveseq + extra
+
+        result = unit.bridge.copy_bank("RAM1", "CARD", backup_dir=str(tmp_path))
+
+        assert result["verified"] is True
+        assert result["written"]["waveseq"] == waveseq
+        stored = unit.dumps[(CARD_SYSEX, m.Function.ALL_WAVESEQ_DUMP)]
+        assert stored == waveseq
+
+    @pytest.mark.parametrize(
+        "kind",
+        ["waveseq", "patches", "performances"],
+    )
+    def test_a_short_dump_of_any_kind_still_raises(self, tmp_path, kind):
+        unit = Unit()
+        self._load_source(unit)
+        functions = {
+            "waveseq": m.Function.ALL_WAVESEQ_DUMP,
+            "patches": m.Function.ALL_PATCH_DUMP,
+            "performances": m.Function.ALL_PERFORMANCE_DUMP,
+        }
+        bank_byte = banks.bank("RAM1").sysex
+        held = unit.dumps[(bank_byte, functions[kind])]
+        unit.dumps[(bank_byte, functions[kind])] = bytes(held[:-1])
+
+        with pytest.raises(DeviceError, match=r"decoded to .* bytes; a whole"):
+            unit.bridge.copy_bank("RAM1", "CARD", backup_dir=str(tmp_path))
+
 
 class TestBankCopyViaDevice:
     """``copy_bank(method="device")``: the unit's move inside kwsed's fence."""

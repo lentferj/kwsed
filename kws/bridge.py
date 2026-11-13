@@ -1869,6 +1869,10 @@ class WavestationBridge:
                 )
             data = packet.data()
             expected = _BUNDLE_SIZES[kind]
+            if kind == "waveseq" and len(data) > expected:
+                # A wave-sequence dump may carry more than the bank the
+                # model uses; the verify path and the assembler truncate it.
+                data = data[:expected]
             if len(data) != expected:
                 raise DeviceError(
                     f"{entry.label} {kind} decoded to {len(data)} bytes; a whole "
