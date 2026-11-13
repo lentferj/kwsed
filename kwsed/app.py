@@ -9282,7 +9282,7 @@ class KwsedApp(App[None]):
                 multisets=sets,
                 selected=index,
                 device=self.device,
-                backup_dir=None,
+                backup_dir=getattr(self, "_backup_dir", None),
                 catalog=getattr(self, "catalog", None),
                 sources=getattr(self, "_sources", None),
                 archive=getattr(self, "_archive", None),

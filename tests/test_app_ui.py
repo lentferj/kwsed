@@ -1312,6 +1312,31 @@ class TestTheMultisetEditor:
             # The browser keeps what the write put there.
             assert app._multisets[3].parts[0].level == 42
 
+    async def test_the_multi_write_honors_the_backup_dir_override(self, app, tmp_path):
+        from dataclasses import replace
+        from pathlib import Path
+
+        where = str(tmp_path / "backups")
+        app._backup_dir = where
+        seen: dict[str, object] = {}
+        real_write_multi = app.device.write_multi
+
+        def fake(data, **kwargs):
+            seen.update(kwargs)
+            return real_write_multi(data, **kwargs)
+
+        app.device.write_multi = fake
+        async with app.run_test() as pilot:
+            screen = await self._open(app, pilot)
+            assert screen._backup_dir == where
+            part = screen._ms().parts[0]
+            screen._set_part(0, replace(part, level=42))
+            screen.action_arm()
+            screen.action_fire()
+            await settle(pilot, 30)
+            assert seen.get("backup_dir") == where
+            assert list(Path(where).rglob("*")) != []
+
     async def test_unverified_write_keeps_editor_open(self, app):
         from dataclasses import replace
 
