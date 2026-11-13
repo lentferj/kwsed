@@ -221,3 +221,35 @@ def test_empty_roundtrips_and_types_zero():
     assert FxBlock.from_bytes(fb.to_bytes()) == fb
     assert FxBlock.from_bytes(fb.to_bytes()).fx1.type == 0
     assert FxBlock.from_bytes(fb.to_bytes()).fx2.type == 0
+
+
+def test_with_type_normal_to_extended_clears_stale_nibble():
+    from kws.fx import FxBlock
+
+    eff = Effect(type=1, raw=bytes([0x0C] + [0] * 7), stored_type_bits=3)
+    b = FxBlock(
+        series=False,
+        fx1=eff.with_type(48),
+        fx2=Effect(type=0, raw=bytes(8), stored_type_bits=2),
+        mix=(0, 0),
+        mod_source=(0, 0),
+        mod_amount=(0, 0),
+    ).to_bytes()
+    assert FxBlock.from_bytes(b).fx1.type == 48
+
+
+def test_with_type_extended_to_normal_clears_ext_nibble():
+    from kws.fx import FxBlock
+
+    eff = Effect(type=48, raw=bytes([0x81] + [0] * 7))
+    switched = eff.with_type(1)
+    assert switched.raw[0] & 0x0F == 0
+    b = FxBlock(
+        series=False,
+        fx1=switched,
+        fx2=Effect(type=0, raw=bytes(8), stored_type_bits=2),
+        mix=(0, 0),
+        mod_source=(0, 0),
+        mod_amount=(0, 0),
+    ).to_bytes()
+    assert b[5] & 0x0F == 0

@@ -340,6 +340,9 @@ class Effect:
         ``stored_type_bits`` is cleared so :meth:`FxBlock.to_bytes` re-encodes
         the type from the logical value.
         """
+        if self.type >= 48 and new_type < 48:
+            raw = bytes([self.raw[0] & 0xF0]) + self.raw[1:]
+            return Effect(type=new_type, raw=raw, stored_type_bits=None)
         return Effect(type=new_type, raw=self.raw, stored_type_bits=None)
 
 
@@ -438,7 +441,7 @@ class FxBlock:
             type_bits1 = 2
             ext1 = self.fx1.type - 47
             raw1 = bytearray(self.fx1.raw)
-            raw1[0] = raw1[0] | (ext1 & 0x0F)
+            raw1[0] = (raw1[0] & 0xF0) | (ext1 & 0x0F)
         else:
             type_bits1 = self.fx1.type + 2
             raw1 = bytearray(self.fx1.raw)
@@ -450,7 +453,7 @@ class FxBlock:
             type_bits2 = 2
             ext2 = self.fx2.type - 47
             raw2 = bytearray(self.fx2.raw)
-            raw2[0] = raw2[0] | (ext2 & 0x0F)
+            raw2[0] = (raw2[0] & 0xF0) | (ext2 & 0x0F)
         else:
             type_bits2 = self.fx2.type + 2
             raw2 = bytearray(self.fx2.raw)
