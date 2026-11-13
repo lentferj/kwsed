@@ -203,9 +203,14 @@ class _RecordingDemo(DemoDevice):
         backup_dir: str,
         verify: bool = True,
         timeout: float | None = None,
+        annotations: Any = None,
     ) -> dict[str, object]:
         result = super().write_multi(
-            data, backup_dir=backup_dir, verify=verify, timeout=timeout
+            data,
+            backup_dir=backup_dir,
+            verify=verify,
+            timeout=timeout,
+            annotations=annotations,
         )
         result["backup"] = backup.save(
             self._directory,

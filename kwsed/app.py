@@ -81,6 +81,7 @@ from kws import relations
 from kws import perfcopy
 from kws import records as rec
 from kws.multi import MULTISETS
+from kws import multisets as _multisets_mod
 from kws.fx import EFFECT_TYPES, FxBlock
 from kws import cards as _cards
 from kws import physical as _physical
@@ -465,6 +466,7 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
         Binding("s", "stage", "Stage to RAM", show=False),
         Binding("n", "rename", "Rename", show=False),
         Binding("x", "edit_fx", "FX", show=False),
+        Binding("r", "record", "Record", show=False),
     ]
 
     def __init__(
@@ -484,6 +486,8 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
         on_edit_fx: Optional[Callable[[Any], None]] = None,
         favorites: Any = None,
         card_scope: Optional[str] = None,
+        snapshots: Any = None,
+        mismatches: Any = None,
     ) -> None:
         super().__init__()
         # A copy: the original list and its entries are not mutated.
@@ -507,11 +511,52 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
         self._on_edit_fx = on_edit_fx
         self._favorites = favorites
         self._card_scope = card_scope
+        self._snapshots = snapshots
+        self._mismatches = mismatches
 
     # --- helpers ----------------------------------------------------------
 
     def _ms(self) -> Any:
         return self._multisets_copy[self._selected]
+
+    def _snapshot(self) -> Any:
+        """What this Multiset points at now, for the live multi catalog."""
+        from kws import multi as _multi_mod
+
+        ms = self._ms()
+        encoded = _multi_mod.encode(self._multisets_copy)
+        at = self._selected * _multi_mod.MULTISET_SIZE
+        record = encoded[at : at + _multi_mod.MULTISET_SIZE]
+
+        def card_scope_for(channel: int) -> Optional[str]:
+            scope = self._desired_scopes.get(channel) or self._card_scope
+            return scope if scope and scope != "CARD" else None
+
+        def name_for(bank: int, number: int, scope: Optional[str]) -> str:
+            if scope:
+                return self._scope_name(scope, number)
+            part = _multi_mod.Part(
+                channel=1, bank=bank, performance=number, level=0, flag=0
+            )
+            return self._name_for_part(part)
+
+        def card_digest_for(scope: Optional[str]) -> str:
+            if not scope or not scope.startswith("CARD/"):
+                return ""
+            key = scope[5:]
+            if key.isdigit():
+                captured = self._archive.get(int(key))
+                return getattr(captured, "digest", "") or ""
+            card = self._physical.get(key.lower())
+            return getattr(card, "digest", "") or ""
+
+        return _multisets_mod.build_snapshot(
+            ms,
+            record,
+            card_scope_for=card_scope_for,
+            name_for=name_for,
+            card_digest_for=card_digest_for,
+        )
 
     def _title(self) -> str:
         ms = self._ms()
@@ -629,7 +674,7 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
             yield Static(
                 "⏎ chooses the performance (favourites/ratings) · + / - nudge · "
                 "space on/off · b bank · s stage · n rename · x FX · "
-                "a arm, w write · esc cancels",
+                "r record · a arm, w write · esc cancels",
                 classes="hint",
             )
             table: DataTable[Any] = DataTable(id="multi-edit-table", cursor_type="cell")
@@ -674,19 +719,45 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
             row = max(0, min(row, table.row_count - 1))
             column = max(0, min(column, len(table.columns) - 1))
             table.move_cursor(row=row, column=column)
+        found = (self._mismatches or {}).get(self._selected, [])
+        if found:
+            self._status(
+                "recorded: "
+                + "; ".join(
+                    f"ch {mismatch.channel + 1:02d} {mismatch.text}"
+                    for mismatch in found[:2]
+                )
+            )
 
     def _row_cells(self, i: int, part: Any) -> tuple[Any, ...]:
         if part is None:
             return (f"{i + 1:02d}", "--", "", "--", "--")
         if getattr(part, "used", False):
+            from kws import banks as _banks
+
+            snapshot = (self._snapshots or {}).get(self._selected)
+            binding = snapshot.channels.get(i) if snapshot is not None else None
             scope = self._desired_scopes.get(i)
-            if scope is not None and str(scope).startswith("CARD"):
+            if (
+                binding is not None
+                and binding.card_scope
+                and part.bank == _banks.bank("CARD").sysex
+            ):
+                perf = f"{binding.card_scope} {part.performance:02d}"
+                name = binding.name
+            elif scope is not None and str(scope).startswith("CARD"):
                 perf = f"{self._scope_label(scope)} {part.performance:02d}"
                 name = self._scope_name(scope, part.performance)
             else:
                 perf = f"{_bank_label(part.bank)} {part.performance:02d}"
                 name = self._name_for_part(part)
-            used = "used"
+            if binding is not None and not name:
+                name = binding.name
+            marks = {
+                mismatch.channel
+                for mismatch in (self._mismatches or {}).get(self._selected, [])
+            }
+            used = "used !" if i in marks else "used"
         else:
             perf = "--"
             name = ""
@@ -816,7 +887,11 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
         part = self._ms().parts[index]
         new_part = _replace(part, bank=bank_sysex, performance=number)
         if bank_sysex == _banks.bank("CARD").sysex:
-            self._desired_scopes[index] = "CARD"
+            # The slot alone says nothing about which HCard bank was meant;
+            # keep the active/viewed bank so the multi catalog can warn
+            # after a swap. Bare "CARD" is the honest unknown.
+            scope = self._card_scope
+            self._desired_scopes[index] = scope if scope and scope != "CARD" else "CARD"
         else:
             self._desired_scopes.pop(index, None)
         self._set_part(index, new_part)
@@ -1094,10 +1169,15 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
                     self._backup_dir,
                     self,
                     self._staged_plan,
+                    snapshot=self._snapshot(),
                 )
             else:
                 app._multi_edit_write_worker(
-                    list(self._multisets_copy), self._device, self._backup_dir, self
+                    list(self._multisets_copy),
+                    self._device,
+                    self._backup_dir,
+                    self,
+                    snapshot=self._snapshot(),
                 )
             return
         # Fallback (no app): direct, for unit contexts.
@@ -1134,6 +1214,25 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
         except Exception:  # noqa: S110
             pass
         self.dismiss(result if isinstance(result, dict) else {"result": result})
+
+    def action_record(self) -> None:
+        """Record what this Multiset points at, without writing anything.
+
+        The live multi catalog is what lets a later load say "this expects
+        Card 39, not the card that is in the slot". A Multiset written by
+        kwsed is recorded automatically; this covers the ones that already
+        exist on the unit, and records exactly the state on screen.
+        """
+        app = self.app
+        if not hasattr(app, "_record_multi_snapshot"):
+            self._status("this context cannot record the multi catalog")
+            return
+        snapshot = self._snapshot()
+        app._record_multi_snapshot(snapshot)
+        self._status(
+            f"recorded Multi {snapshot.number:02d}: "
+            f"{len(snapshot.channels)} channel(s), nothing sent"
+        )
 
     def action_edit_fx(self) -> None:
         """Open the FX block of the selected Multiset."""
@@ -2629,6 +2728,8 @@ class KwsedApp(App[None]):
         show_card_defaults: bool = False,
         physical_path: Optional[str] = None,
         bankstore_dir: Optional[str] = None,
+        multisets_path: Optional[str] = None,
+        auto_read_multi: bool = False,
     ) -> None:
         super().__init__()
         self.device = device
@@ -2666,6 +2767,17 @@ class KwsedApp(App[None]):
         self._physical_path = physical_path
         self._physical = _physical.load(physical_path) if physical_path else {}
         self._bankstore_dir = bankstore_dir
+        #: The live multi catalog: what each Multiset pointed at when it was
+        #: written, so a later load can say "this expects Card 39 / RAM1 05
+        #: 'Warm Pad'". Separate from the static name catalog.
+        self._multisets_path = multisets_path
+        self._multi_catalog: Dict[int, Any] = (
+            _multisets_mod.load(multisets_path) if multisets_path is not None else {}
+        )
+        self._multi_mismatches: Dict[int, List[Any]] = {}
+        #: Read the 32 Multisets once at launch so the browser shows them
+        #: without pressing m. Off in tests/embedders; main() turns it on.
+        self._auto_read_multi_enabled = auto_read_multi
         #: Where write envelopes are saved. ``None`` means the platform's
         #: backup directory; tests and embedders point it at a temporary one
         #: so a run never drops envelopes into the user's real archive.
@@ -4313,6 +4425,9 @@ class KwsedApp(App[None]):
         # silent and changes nothing on the unit.
         if self._auto_capture and self._cards_path is not None:
             self.set_timer(1.4, self._auto_capture_card)
+        if self._auto_read_multi_enabled:
+            # After the launch card probe; if it is still busy, retry.
+            self.set_timer(2.2, self._auto_multi_read)
 
     # --- filling ------------------------------------------------------------
 
@@ -7757,6 +7872,19 @@ class KwsedApp(App[None]):
             return
         self._read_worker(*self._current_pair)
 
+    def _auto_multi_read(self) -> None:
+        """Read the Multisets once at launch, off the UI thread, quietly."""
+        if not self._auto_read_multi_enabled:
+            return
+        if (
+            self._busy
+            or self._scanning
+            or isinstance(self.screen, _scan.ScanOfferScreen)
+        ):
+            self.set_timer(1.0, self._auto_multi_read)
+            return
+        self.action_multi()
+
     def _auto_capture_card(self) -> None:
         """Startup probe: file or confirm the active card bank.
 
@@ -8656,6 +8784,8 @@ class KwsedApp(App[None]):
         for number in range(len(self._multisets)):
             try:
                 name = getattr(self._multisets[number], "name", "") or ""
+                if number in self._multi_mismatches:
+                    name = (name or "?") + " !"
                 table.update_cell(
                     f"multi:{number:02d}", "name", name or "[dim]--[/dim]"
                 )
@@ -8668,6 +8798,50 @@ class KwsedApp(App[None]):
         if self._current_multi is not None:
             self._fill_multiset(self._current_multi)
         self._refresh_deps_pane()
+
+    def _card_digest_for_scope(self, scope: Optional[str]) -> str:
+        """The archive digest of a card scope, or "" when it is unknown."""
+        if not scope or not scope.startswith("CARD/"):
+            return ""
+        key = scope[5:]
+        if key.isdigit():
+            captured = self._archive.get(int(key))
+            return getattr(captured, "digest", "") or ""
+        card = self._physical.get(key.lower())
+        return getattr(card, "digest", "") or ""
+
+    def _check_multi_snapshots(self, sets: Sequence[Any]) -> Dict[int, List[Any]]:
+        """Compare the live multi catalog with the setup just read."""
+        if not self._multi_catalog:
+            return {}
+        active_scope = self._active_card_scope()
+        active_digest = self._card_digest_for_scope(active_scope)
+        merged = self._sources_with_store()
+
+        def name_at(bank_byte: int, number: int) -> Optional[str]:
+            try:
+                entry = banks.by_sysex(bank_byte)
+            except LookupError:
+                return None
+            if entry.id == "CARD":
+                return None
+            if entry.id not in merged:
+                return None  # not read: no evidence either way
+            return self._scope_slot_name(entry.id, banks.Kind.PERFORMANCE, number) or ""
+
+        out: Dict[int, List[Any]] = {}
+        for number, snapshot in self._multi_catalog.items():
+            if not (0 <= number < len(sets)):
+                continue
+            found = _multisets_mod.check(
+                snapshot,
+                active_card_scope=active_scope if active_scope != "CARD" else None,
+                active_card_digest=active_digest,
+                name_at=name_at,
+            )
+            if found:
+                out[number] = found
+        return out
 
     def _show_multi(self, raw: bytes) -> None:
         from kws import multi as multi_mod
@@ -8685,9 +8859,17 @@ class KwsedApp(App[None]):
             return
         self._multi_sets = list(sets)
         self._multisets = list(sets)
+        self._multi_mismatches = self._check_multi_snapshots(sets)
         # Refresh the Multi rows in the bank table so their name cells
         # show the freshly read Multiset names.
         self._refresh_multi_rows()
+        if self._multi_mismatches:
+            total = sum(len(items) for items in self._multi_mismatches.values())
+            self.notify_status(
+                f"loaded {len(sets)} Multisets — {total} channel(s) no longer "
+                "match their recording; e inspects the named Multiset",
+                warn=True,
+            )
         table = self.query_one("#bank-table", DataTable)
         number = self._current_multi if self._current_multi is not None else 0
         if not (0 <= number < len(sets)):
@@ -8730,8 +8912,19 @@ class KwsedApp(App[None]):
                 on_edit_fx=self._edit_multiset_fx,
                 favorites=getattr(self, "favorites", None),
                 card_scope=self._picker_card_scope(),
+                snapshots=self._multi_catalog,
+                mismatches=self._multi_mismatches,
             )
         )
+
+    def _record_multi_snapshot(self, snapshot: Any) -> None:
+        """Put one snapshot in the live multi catalog and save it."""
+        self._multi_catalog[snapshot.number] = snapshot
+        self._multi_mismatches.pop(snapshot.number, None)
+        if self._multisets_path is not None:
+            _multisets_mod.save(self._multi_catalog, self._multisets_path)
+        if getattr(self, "_screen_stack", None) and self._multisets:
+            self._refresh_multi_rows()
 
     def _picker_card_scope(self) -> str:
         """The card scope whose favourites the performance picker should use.
@@ -8910,10 +9103,13 @@ class KwsedApp(App[None]):
         backup_dir: Optional[str],
         screen: Any,
         staged: Optional[Any] = None,
+        snapshot: Any = None,
     ) -> None:
         """**MIDI only** -- state, undo and the screen update on the main thread."""
         if staged is None:
-            self._multi_write_plain(multisets, device, backup_dir, screen)
+            self._multi_write_plain(
+                multisets, device, backup_dir, screen, snapshot=snapshot
+            )
         else:
             self._multi_write_staged(multisets, device, backup_dir, screen, staged)
 
@@ -8942,6 +9138,7 @@ class KwsedApp(App[None]):
         device: Any,
         backup_dir: Optional[str],
         screen: Any,
+        snapshot: Any = None,
     ) -> None:
         from kws import multi as multi_mod
 
@@ -8949,8 +9146,14 @@ class KwsedApp(App[None]):
         try:
             encoded = multi_mod.encode(multisets)
             with self._busy_gate, self._lock:
+                annotations = (
+                    _multisets_mod.to_dict(snapshot) if snapshot is not None else None
+                )
                 result = device.write_multi(
-                    encoded, backup_dir=self._multi_where(backup_dir), verify=True
+                    encoded,
+                    backup_dir=self._multi_where(backup_dir),
+                    verify=True,
+                    annotations=annotations,
                 )
         except BaseException as exc:
             self._multi_release()
@@ -8965,10 +9168,16 @@ class KwsedApp(App[None]):
             )
             self._multi_report_failure(screen, mismatch)
             return
-        self.call_from_thread(self._multi_plain_finish, multisets, result, screen)
+        self.call_from_thread(
+            self._multi_plain_finish, multisets, result, screen, snapshot
+        )
 
     def _multi_plain_finish(
-        self, multisets: Sequence[Any], result: Any, screen: Any
+        self,
+        multisets: Sequence[Any],
+        result: Any,
+        screen: Any,
+        snapshot: Any = None,
     ) -> None:
         """Main thread: remember the written setup and its one undo step."""
         try:
@@ -8976,6 +9185,15 @@ class KwsedApp(App[None]):
                 self._record_write(result)
             self._multi_sets = list(multisets)
             self._multisets = list(multisets)
+            if snapshot is not None:
+                self._multi_catalog[snapshot.number] = snapshot
+                self._multi_mismatches.pop(snapshot.number, None)
+                if self._multisets_path is not None:
+                    _multisets_mod.save(self._multi_catalog, self._multisets_path)
+                if self._multisets:
+                    self._multi_mismatches = self._check_multi_snapshots(
+                        self._multisets
+                    )
         except Exception:  # noqa: S110
             pass
         try:
@@ -9377,6 +9595,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     card_mode = cfg.load_card_mode(config_path)
     show_card_defaults = cfg.load_show_card_defaults(config_path)
     physical_path = None if getattr(args, "demo", False) else _physical.default_path()
+    multisets_path = (
+        None if getattr(args, "demo", False) else _multisets_mod.default_path()
+    )
     app = KwsedApp(
         device,
         catalog=cat.load(args.catalog),
@@ -9392,6 +9613,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         show_card_defaults=show_card_defaults,
         physical_path=physical_path,
         bankstore_dir=None if args.demo else bankstore.default_dir(),
+        multisets_path=multisets_path,
+        auto_read_multi=True,
     )
     try:
         app.run()

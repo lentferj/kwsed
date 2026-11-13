@@ -1957,7 +1957,39 @@ def _cmd_backup(device: Any, args: argparse.Namespace) -> int:
         return _cmd_backup_save(device, args)
     if which == "restore":
         return _cmd_backup_restore(device, args)
+    if which == "show":
+        return _cmd_backup_show(args)
     raise ValueError(f"no backup command {which!r}")
+
+
+def _cmd_backup_show(args: argparse.Namespace) -> int:
+    """Print one envelope: metadata, block names, and the multi annotations."""
+    import json
+
+    from kws import backup as _backup
+
+    try:
+        saved = _backup.load(args.file)
+    except Exception as exc:
+        print(f"backup: {exc}")
+        return spec.EXIT_ERROR
+    print(f"kind        {saved.kind}")
+    print(f"slot        {saved.slot}")
+    print(f"name        {saved.name}")
+    print(f"saved       {saved.saved}")
+    print(f"device      {saved.device_id}")
+    print(f"source      {saved.source}")
+    print("blocks:")
+    for name, data in saved.blocks.items():
+        print(f"  {name}: {len(data)} bytes")
+    raw = saved.blocks.get("annotations")
+    if raw:
+        print("annotations:")
+        try:
+            print(json.dumps(json.loads(raw), indent=2, sort_keys=True))
+        except ValueError:
+            print(f"  (not JSON: {raw[:80]!r})")
+    return spec.EXIT_OK
 
 
 def _print_fx_block(block: Any) -> None:
@@ -2461,6 +2493,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="where to write the envelopes (default: the per-platform data dir)",
     )
+    sp_show = backup_sub.add_parser(
+        "show",
+        help="print an envelope's metadata, blocks and annotations",
+    )
+    sp_show.add_argument("file", help="an envelope written by `backup save`")
     sp_restore = backup_sub.add_parser(
         "restore",
         help="WRITE a saved bank back into the unit",

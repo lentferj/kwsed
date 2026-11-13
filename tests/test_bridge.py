@@ -802,3 +802,23 @@ def test_write_multi_reports_backup_write_and_check(tmp_path):
     assert any("writing the Multi Mode Setup" in label for label in labels)
     assert any("checking" in label for label in labels)
     assert events[-1][1] is None
+
+
+def test_write_multi_stores_the_annotations_block(tmp_path):
+    import json
+
+    unit = Unit()
+    packet = m.parse(unit.multi_message)
+    assert packet is not None
+    encoded = multi_mod.encode(multi_mod.parse(packet.data()))
+    annotations = {"version": 1, "channels": {"0": {"card_scope": "CARD/39"}}}
+    result = unit.bridge.write_multi(
+        encoded, backup_dir=str(tmp_path), annotations=annotations
+    )
+    from kws import backup as _backup
+
+    blocks = _backup.load(result["backup"]).blocks
+    assert json.loads(blocks["annotations"])["channels"]["0"]["card_scope"] == (
+        "CARD/39"
+    )
+    assert "dump" in blocks, "the SysEx dump is unchanged"

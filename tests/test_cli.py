@@ -1832,3 +1832,28 @@ class TestFx:
         assert run(["fx", "RAM5", "0"]) == 2
         assert run(["fx", "RAM1", "50"]) == 2
         assert run(["fx", "--multi", "32"]) == 2
+
+
+class TestBackupShow:
+    def test_it_prints_the_blocks_and_the_multi_annotations(self, tmp_path, capsys):
+        from kwsed.demo import DemoDevice
+
+        device = DemoDevice()
+        result = device.write_multi(
+            b"x" * 3264,
+            backup_dir=str(tmp_path),
+            annotations={
+                "version": 1,
+                "channels": {"0": {"card_scope": "CARD/39", "name": "Warm Pad"}},
+            },
+        )
+        assert run(["backup", "show", result["backup"]]) == 0
+        out = capsys.readouterr().out
+        assert "annotations:" in out
+        assert "CARD/39" in out
+        assert "Warm Pad" in out
+        assert "dump: 3264 bytes" in out
+
+    def test_an_unreadable_file_is_an_error(self, tmp_path, capsys):
+        assert run(["backup", "show", str(tmp_path / "missing.json")]) == 1
+        assert "backup:" in capsys.readouterr().out

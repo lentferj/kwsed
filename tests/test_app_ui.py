@@ -82,6 +82,38 @@ def panel_text(app, selector):
     return str(app.query_one(selector, Static).content)
 
 
+def _card_multi() -> Any:
+    from kws import multi as _multi
+
+    parts = [
+        _multi.Part(channel=i + 1, bank=0, performance=50, level=100, flag=0)
+        for i in range(16)
+    ]
+    parts[0] = _multi.Part(
+        channel=1,
+        bank=banks.bank("CARD").sysex,
+        performance=5,
+        level=100,
+        flag=0,
+    )
+    return _multi.Multiset(number=0, name="M", parts=tuple(parts))
+
+
+def _multi_snapshot(ms: Any, *, scope: Any = "CARD/39") -> Any:
+    from kws import multi as _multi
+    from kws import multisets as mc
+
+    record = _multi.encode([ms])[: _multi.MULTISET_SIZE]
+    return mc.build_snapshot(
+        ms,
+        record,
+        card_scope_for=lambda channel: scope if channel == 0 else None,
+        name_for=lambda bank, number, s: "Warm Pad",
+        card_digest_for=lambda s: "d39" if s else "",
+        recorded_at="2026-11-13T00:00:00+00:00",
+    )
+
+
 async def settle(pilot, times=6):
     for _ in range(times):
         await pilot.pause()
@@ -2840,7 +2872,13 @@ class TestMultisetFx:
     ) -> None:
         calls: list[bytes] = []
 
-        def fake(data: bytes, *, backup_dir: str, verify: bool = True) -> Any:
+        def fake(
+            data: bytes,
+            *,
+            backup_dir: str,
+            verify: bool = True,
+            annotations: Any = None,
+        ) -> Any:
             calls.append(bytes(data))
             return {
                 "verified": True,
@@ -3025,3 +3063,152 @@ class TestPerformancePicker:
             table = picker.query_one("#perf-picker", DataTable)
             names = [str(table.get_row_at(row)[2]) for row in range(table.row_count)]
             assert "CardPerf" in names, "the active card's favourites are included"
+
+    def test_a_card_mismatch_is_detected(self, app: Any) -> None:
+        from kws import cards as _cards
+
+        ms = _card_multi()
+        app._multi_catalog[0] = _multi_snapshot(ms)
+        app._active_card = 20
+        app._archive[20] = _cards.capture(
+            20, "", {0: "Other"}, {0: "P"}, digest="other"
+        )
+        found = app._check_multi_snapshots([ms])
+        assert 0 in found
+        mismatch = found[0][0]
+        assert mismatch.kind == "card"
+        assert "CARD/39" in mismatch.text
+        assert "CARD/20" in mismatch.text
+
+    def test_a_ram_name_mismatch_is_detected(self, app: Any) -> None:
+        from kws import deps
+        from kws import multi as _multi
+
+        parts = [
+            _multi.Part(channel=i + 1, bank=0, performance=50, level=100, flag=0)
+            for i in range(16)
+        ]
+        parts[1] = _multi.Part(channel=2, bank=0, performance=0, level=100, flag=0)
+        ms = _multi.Multiset(number=0, name="M", parts=tuple(parts))
+        app._sources["RAM1"] = deps.Source(
+            scope_id="RAM1",
+            performances=[bytes(181)] * 50,
+            patches=[],
+            waveseq=None,
+        )
+        app._multi_catalog[0] = _multi_snapshot(ms, scope=None)
+        found = app._check_multi_snapshots([ms])
+        assert 0 in found
+        mismatch = found[0][0]
+        assert mismatch.kind == "ram"
+        assert "Book Name" in mismatch.text
+        assert "Warm Pad" in mismatch.text
+
+    async def test_the_snapshot_records_the_card_scope(self, app: Any) -> None:
+        from dataclasses import replace as _replace
+
+        from kws import cards as _cards
+
+        app._active_card = 39
+        app._archive[39] = _cards.capture(
+            39, "", {5: "Warm Pad"}, {0: "P"}, digest="d39"
+        )
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.action_multi()
+            await settle(pilot, 30)
+            app.action_edit_multi()
+            await settle(pilot, 5)
+            editor = app.screen
+            ms = editor._ms()
+            parts = list(ms.parts)
+            parts[0] = _replace(
+                parts[0],
+                bank=banks.bank("CARD").sysex,
+                performance=5,
+            )
+            editor._multisets_copy[editor._selected] = _replace(ms, parts=tuple(parts))
+            editor._desired_scopes[0] = "CARD/39"
+            snap = editor._snapshot()
+            assert snap.channels[0].card_scope == "CARD/39"
+            assert snap.channels[0].name == "Warm Pad"
+            assert snap.channels[0].card_digest == "d39"
+
+    def test_the_catalog_is_saved_after_a_write(self, app: Any, tmp_path: Any) -> None:
+        from types import SimpleNamespace
+
+        from kws import multisets as mc
+
+        ms = _card_multi()
+        snap = _multi_snapshot(ms)
+        app._multisets_path = str(tmp_path / "multisets.json")
+        screen = SimpleNamespace(_write_succeeded=lambda result: None)
+        app._multi_plain_finish(
+            [ms],
+            {"verified": True, "backup": "x", "kind": "multi"},
+            screen,
+            snap,
+        )
+        assert app._multi_catalog[0] is snap
+        assert mc.load(app._multisets_path)[0] == snap
+
+    async def test_r_records_without_writing(self, app: Any, tmp_path: Any) -> None:
+        from dataclasses import replace as _replace
+
+        from kws import cards as _cards
+
+        app._active_card = 39
+        app._archive[39] = _cards.capture(
+            39, "", {5: "Warm Pad"}, {0: "P"}, digest="d39"
+        )
+        app._multisets_path = str(tmp_path / "multisets.json")
+        writes: list[Any] = []
+        app.device.write_multi = lambda *a, **k: writes.append(1)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.action_multi()
+            await settle(pilot, 30)
+            app.action_edit_multi()
+            await settle(pilot, 5)
+            editor = app.screen
+            ms = editor._ms()
+            parts = list(ms.parts)
+            parts[0] = _replace(parts[0], bank=banks.bank("CARD").sysex, performance=5)
+            editor._multisets_copy[editor._selected] = _replace(ms, parts=tuple(parts))
+            editor._desired_scopes[0] = "CARD/39"
+            editor.action_record()
+            await settle(pilot, 2)
+            assert writes == [], "recording is not a write"
+            assert app._multi_catalog[0].channels[0].card_scope == "CARD/39"
+            assert (tmp_path / "multisets.json").exists()
+
+    def test_the_picker_records_the_active_card_scope(self) -> None:
+        from kwsed.app import MultiEditScreen
+
+        screen = MultiEditScreen(multisets=[_card_multi()], card_scope="CARD/24")
+        screen._perf_chosen(0, (banks.bank("CARD").sysex, 5))
+        assert screen._desired_scopes[0] == "CARD/24", "not the bare slot"
+
+    async def test_startup_reads_the_multisets_when_enabled(self) -> None:
+        from kwsed.app import KwsedApp
+
+        app = KwsedApp(DemoDevice(), auto_read_multi=True)
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._auto_multi_read()
+            await settle(pilot, 30)
+            assert len(app._multisets) == 32
+
+    async def test_startup_reading_is_off_by_default(self, app: Any) -> None:
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._auto_multi_read()
+            await settle(pilot, 5)
+            assert app._multisets == []
+
+    def test_recording_clears_the_stale_marker(self, app: Any) -> None:
+        from types import SimpleNamespace
+
+        app._multi_mismatches[0] = [SimpleNamespace(channel=0, text="old")]
+        app._record_multi_snapshot(_multi_snapshot(_card_multi()))
+        assert 0 not in app._multi_mismatches

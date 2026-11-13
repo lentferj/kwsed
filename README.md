@@ -80,6 +80,11 @@ unit or emulator **before** connecting irreplaceable equipment.
   performances together from RAM to Card, Card to RAM or RAM to RAM. It
   rewrites the performances' references to the source bank so the copy is
   self-contained, backs up the destination first and verifies every kind.
+- **Remembers what a Multiset pointed at.** A snapshot per Multiset warns on
+  load when the Card bank or a RAM performance it was built against has
+  changed; `r` in the Multi editor records existing setups without sending
+  anything, and the same record rides in the backup envelope so a rebuild
+  after a reset knows which card to insert.
 - **Shows what a sound depends on.** `d`, the `D` pane and `kwscli deps` walk
   Performance → Patch → WaveSeq, with structural deduplication.
 - **Builds favourites banks offline.** `tools/build_bank.py` writes `.syx`
@@ -464,6 +469,7 @@ means the command works from the local archives/cache.
 | `copy-bank SRC DST` | copy a whole bank, all three kinds | yes | with `--yes` |
 | `send FILE --to BANK` | write one bank dump | yes | with `--yes` |
 | `backup list` | list backup envelopes | no | no |
+| `backup show FILE` | print an envelope's metadata, blocks and annotations | no | no |
 | `backup save` | read banks into backup envelopes with `--yes` | yes | no |
 | `backup restore FILE` | write an envelope back | yes | with `--yes` |
 

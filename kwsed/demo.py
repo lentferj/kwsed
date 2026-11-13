@@ -401,6 +401,7 @@ class DemoDevice:
         backup_dir: str,
         verify: bool = True,
         timeout: Optional[float] = None,
+        annotations: Any = None,
     ) -> Dict[str, Any]:
         """Accept a Multi Mode Setup write; a fake has nothing to verify."""
         self._tick()
@@ -411,6 +412,13 @@ class DemoDevice:
         )
         self.multi_written = bytes(data)
         self.multi_write_count += 1
+        blocks: Dict[str, Any] = {"dump": bytes(before)}
+        if annotations is not None:
+            import json
+
+            blocks["annotations"] = json.dumps(
+                dict(annotations), sort_keys=True, ensure_ascii=False
+            ).encode("utf-8")
         path = backup.save(
             backup_dir,
             kind="multi",
@@ -418,7 +426,7 @@ class DemoDevice:
             name="Multi Mode Setup",
             device_id=str(self.channel),
             source="kwsed",
-            blocks={"dump": bytes(before)},
+            blocks=blocks,
         )
         return {"backup": path, "verified": True, "mismatch": None}
 

@@ -66,6 +66,7 @@ before-blocks. Normal callers should leave both at their defaults.
 from __future__ import annotations
 
 import contextlib
+import json
 import signal
 import sys
 import threading
@@ -1267,8 +1268,14 @@ class WavestationBridge:
         backup_dir: str,
         verify: bool = True,
         timeout: Optional[float] = None,
+        annotations: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Replace the Multi Mode Setup (0x06). **Destructive.**
+
+        ``annotations`` is user-state metadata for the backup envelope --
+        the multi catalog's card/name bindings. It is stored as a second
+        block beside the dump and never sent to the unit; the SysEx dump is
+        unchanged. The undo path reads ``blocks["dump"]`` and ignores it.
 
         Mirrors :meth:`write_bank`'s fence: the destination is read in full
         and backed up first, the dump is sent, and (when ``verify``) it is
@@ -1301,6 +1308,11 @@ class WavestationBridge:
                 f"nothing was sent ({exc}). kwsed does not overwrite a dump "
                 "it has not backed up."
             ) from exc
+        blocks: Dict[str, bytes] = {"dump": before}
+        if annotations is not None:
+            blocks["annotations"] = json.dumps(
+                dict(annotations), sort_keys=True, ensure_ascii=False
+            ).encode("utf-8")
         saved = backup.save(
             backup_dir,
             kind="multi",
@@ -1308,7 +1320,7 @@ class WavestationBridge:
             name="Multi Mode Setup",
             device_id=str(self.channel),
             source="kwsed",
-            blocks={"dump": before},
+            blocks=blocks,
         )
 
         # The 0x62 structure is longer than the part kwsed models: the
