@@ -52,17 +52,14 @@ __all__ = [
     "read_syx_data",
     "read_sqs_file",
     "read_lib_file",
-    "read_bnk_file",
     "read_img_file",
     "read_zip_file",
     "looks_like_syx",
     "looks_like_midi",
     "looks_like_sqs",
     "looks_like_lib",
-    "looks_like_bnk",
     "looks_like_img",
     "looks_like_zip",
-    "detect_format",
 ]
 
 
@@ -80,35 +77,6 @@ def _sniff_format(raw: bytes) -> str:
     if raw.startswith(b"\xf0"):
         return "sysex"
     raise UnsupportedFormat("could not determine file format")
-
-
-def detect_format(path: str) -> str:
-    """Detect the format of a file by extension and content sniffing."""
-    ext = os.path.splitext(path)[1].lower()
-    with open(path, "rb") as handle:
-        raw = handle.read()
-    if ext == ".lib" or raw.startswith(b"MROF"):
-        return "lib"
-    if ext == ".img" or looks_like_img(raw):
-        return "img"
-    if ext == ".zip" or looks_like_zip(raw):
-        return "zip"
-    if ext == ".7z" or looks_like_flux(raw):
-        return "flux"
-    if ext == ".sqs" or looks_like_sqs(raw):
-        return "sqs"
-    if ext in (".syx", ".sysex") or looks_like_syx(raw):
-        return "sysex"
-    if ext in (".mid", ".midi") or looks_like_midi(raw):
-        return "midi"
-    if ext == ".bnk" or (b"\xf0\x42" in raw):
-        return "sysex"
-    return _sniff_format(raw)
-
-
-def looks_like_bnk(data: bytes) -> bool:
-    """Quick check if data looks like a .bnk bundle (has F0 42 prefix)."""
-    return b"\xf0\x42" in data
 
 
 # --- Public API ---
@@ -183,16 +151,6 @@ def read_file(path: str) -> List[ImportedBank]:  # noqa: C901
             raise UnsupportedFormat("no Wavestation messages found")
         return assemble(packets, path, "sysex")
     raise UnsupportedFormat(f"unsupported format {sniffed}")
-
-
-def read_bnk_file(path: str) -> List[ImportedBank]:
-    """Read a .bnk file (SysEx bundle with optional prefix)."""
-    with open(path, "rb") as handle:
-        raw = handle.read()
-    packets = read_syx_data(raw)
-    if not packets:
-        raise UnsupportedFormat("no Wavestation messages found")
-    return assemble(packets, path, "sysex")
 
 
 def describe_file(path: str) -> str:
