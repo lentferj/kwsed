@@ -375,13 +375,16 @@ class FxBlock:
         raw1 = data[5:13]
         raw2 = data[13:21]
 
-        def resolve_type(bits: int, raw: bytes) -> int:
-            # bits 2-49: normal type = bits - 2 (extended when bits==2
-            # and the low nibble of the first parameter byte is nonzero).
+        def resolve_type(bits: int, raw: bytes, extended: bool) -> int:
+            # Bits 2-49: normal type = bits - 2. Extended types need the
+            # single extended-effects flag (byte 1 bit 7, gated for both
+            # processors per Edisyn's KorgWavestationPerformance.java;
+            # see also docs/FX_PLAN.md): only when the flag is set and
+            # bits == 2 with a nonzero low nibble is the type 47 + nibble.
             if 2 <= bits <= 49:
                 if bits == 2:
                     ext = raw[0] & 0x0F
-                    if ext:
+                    if extended and ext:
                         return 47 + ext
                 return bits - 2
             # Anything else: logical Off; raw bits preserved separately.
@@ -389,8 +392,9 @@ class FxBlock:
 
         bits1 = data[0] & 0x3F
         bits2 = data[1] & 0x3F
-        type1 = resolve_type(bits1, raw1)
-        type2 = resolve_type(bits2, raw2)
+        extended_enable = bool(data[1] & 0x80)
+        type1 = resolve_type(bits1, raw1, extended_enable)
+        type2 = resolve_type(bits2, raw2, extended_enable)
 
         mix = (data[2] & 0x0F, (data[2] >> 4) & 0x0F)
         mod_source = (data[3] & 0x0F, (data[3] >> 4) & 0x0F)
@@ -414,7 +418,7 @@ class FxBlock:
             mod_source=mod_source,
             mod_amount=mod_amount,
             mod_sign=mod_sign,
-            extended_enable=bool(data[1] & 0x80),
+            extended_enable=extended_enable,
         )
 
     @classmethod

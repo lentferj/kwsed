@@ -253,3 +253,36 @@ def test_with_type_extended_to_normal_clears_ext_nibble():
         mod_amount=(0, 0),
     ).to_bytes()
     assert b[5] & 0x0F == 0
+
+
+def test_standard_mode_fx1_nonzero_nibble_is_off():
+    data = bytes(bytearray([2, 2, 0, 0, 0, 0x83, 0, 0, 0, 0, 0, 0, 0] + [0] * 8))
+    fb = FxBlock.from_bytes(data)
+    assert fb.extended_enable is False
+    assert fb.fx1.type == 0
+    assert fb.to_bytes() == data
+
+
+def test_standard_mode_fx2_nonzero_nibble_is_off():
+    data = bytes(bytearray([2, 2, 0, 0, 0] + [0] * 8 + [0x85, 0, 0, 0, 0, 0, 0, 0]))
+    fb = FxBlock.from_bytes(data)
+    assert fb.extended_enable is False
+    assert fb.fx2.type == 0
+    assert fb.to_bytes() == data
+
+
+def test_extended_mode_resolves_both_processors():
+    for nibble in (1, 5, 8):
+        raw1 = bytes([nibble] + [0] * 7)
+        raw2 = bytes([nibble] + [0] * 7)
+        block = bytearray(FX_SIZE)
+        block[0] = 2
+        block[1] = 2 | 0x80
+        block[5:13] = raw1
+        block[13:21] = raw2
+        data = bytes(block)
+        fb = FxBlock.from_bytes(data)
+        assert fb.extended_enable is True
+        assert fb.fx1.type == 47 + nibble
+        assert fb.fx2.type == 47 + nibble
+        assert fb.to_bytes() == data
