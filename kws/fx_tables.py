@@ -376,7 +376,10 @@ FX_PCL_LIST: Tuple[Tuple[FxPclEntry, ...], ...] = (
         FxPclEntry(3, 0, -8, 2, 0),
         FxPclEntry(4, 0, 7, 3, 0),
         FxPclEntry(5, 0, 8, 4, 0),
-        FxPclEntry(2, 2, 2, 4, 0),
+        # The pre-delay high bits sit above the 8-bit low field; the
+        # transcribed source has parambit 0, which collides with the low
+        # field and corrupts decode/encode.
+        FxPclEntry(2, 2, 2, 4, 8),
         FxPclEntry(6, 0, 7, 5, 0),
         FxPclEntry(7, 0, 7, 6, 0),
     ),
@@ -387,7 +390,7 @@ FX_PCL_LIST: Tuple[Tuple[FxPclEntry, ...], ...] = (
         FxPclEntry(3, 0, -8, 2, 0),
         FxPclEntry(4, 0, 7, 3, 0),
         FxPclEntry(5, 0, 8, 4, 0),
-        FxPclEntry(2, 2, 2, 4, 0),
+        FxPclEntry(2, 2, 2, 4, 8),
         FxPclEntry(6, 0, 7, 5, 0),
         FxPclEntry(7, 0, 7, 6, 0),
     ),

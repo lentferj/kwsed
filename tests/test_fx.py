@@ -19,6 +19,7 @@ from kws.fx_tables import (
     FX_PARAM_LABELS,
     FX_PCL_LIST,
     FX_PRESETS,
+    FxPclEntry,
 )
 
 
@@ -42,22 +43,47 @@ def test_every_group_referenced():
     assert groups == set(range(31))
 
 
+def _assert_byte_bits_disjoint(group: int, entries: tuple[FxPclEntry, ...]) -> None:
+    for entry in entries:
+        assert 0 <= entry.bytenum <= 7
+    by_byte: dict[int, list[Any]] = {}
+    for entry in entries:
+        by_byte.setdefault(entry.bytenum, []).append(entry)
+    for byte, es in by_byte.items():
+        for i, a in enumerate(es):
+            mag_a = abs(a.bitlen)
+            mask_a = ((1 << mag_a) - 1) << a.bit
+            for b in es[i + 1 :]:
+                mag_b = abs(b.bitlen)
+                mask_b = ((1 << mag_b) - 1) << b.bit
+                assert mask_a & mask_b == 0, (group, byte)
+
+
+def _assert_parambit_ranges_disjoint(
+    group: int, entries: tuple[FxPclEntry, ...]
+) -> None:
+    # Fields of one logical parameter must occupy disjoint parambit
+    # ranges; otherwise decode ORs storage bits into the wrong bit
+    # positions of the value.
+    by_param: dict[int, list[Any]] = {}
+    for entry in entries:
+        by_param.setdefault(entry.paramnum, []).append(entry)
+    for paramnum, pes in by_param.items():
+        for i, a in enumerate(pes):
+            a_lo, a_hi = a.parambit, a.parambit + abs(a.bitlen)
+            for b in pes[i + 1 :]:
+                b_lo, b_hi = b.parambit, b.parambit + abs(b.bitlen)
+                assert max(a_lo, b_lo) >= min(a_hi, b_hi), (
+                    group,
+                    paramnum,
+                )
+
+
 def test_pcl_bytes_and_no_overlap():
     for group in range(31):
         entries = FX_PCL_LIST[group]
-        for entry in entries:
-            assert 0 <= entry.bytenum <= 7
-        by_byte: dict[int, list[Any]] = {}
-        for entry in entries:
-            by_byte.setdefault(entry.bytenum, []).append(entry)
-        for byte, es in by_byte.items():
-            for i, a in enumerate(es):
-                mag_a = abs(a.bitlen)
-                mask_a = ((1 << mag_a) - 1) << a.bit
-                for b in es[i + 1 :]:
-                    mag_b = abs(b.bitlen)
-                    mask_b = ((1 << mag_b) - 1) << b.bit
-                    assert mask_a & mask_b == 0, (group, byte)
+        _assert_byte_bits_disjoint(group, entries)
+        _assert_parambit_ranges_disjoint(group, entries)
 
 
 def test_rows_non_empty_and_unique_keys():
@@ -211,6 +237,41 @@ class TestPclFieldAssembly:
         for row in rows:
             if row.key != target.key:
                 assert changed.display(row) == base.display(row)
+
+
+def _reverb_rows(effect: Effect) -> tuple[EffectParam, EffectParam]:
+    rows = effect.rows()
+    pre_delay = next(row for row in rows if row.label == "Reverb Pre-Delay")
+    decay = next(row for row in rows if row.label == "Reverb Decay Time")
+    return pre_delay, decay
+
+
+def test_hall_room_predelay_high_bits_decode() -> None:
+    # Groups 19/20 (types 39/40): the pre-delay high field sits at
+    # parambit 8 above the 8-bit low field in byte 5.
+    for type_num in (39, 40):
+        effect = Effect(type=type_num, raw=bytes([0, 0, 0x04, 0, 0, 0x2C, 0, 0]))
+        pre_delay, decay = _reverb_rows(effect)
+        # NOTE: Effect.display range-checks against the 0..150/250 UI
+        # label, so the raw 10-bit decode (44 + (1 << 8) == 300) is read
+        # via _assemble; display would raise for this out-of-range value.
+        assert effect._assemble(pre_delay) == 300
+        assert effect.display(decay) == 0
+
+
+def test_hall_room_predelay_high_bits_encode() -> None:
+    # The pre-delay high field must land in byte 2 bits 2-3, leaving the
+    # Delay Time bits 0-1 of the same byte untouched.
+    for type_num in (39, 40):
+        base = Effect(type=type_num, raw=bytes(8))
+        pre_delay, _ = _reverb_rows(base)
+        updated = base.with_value(pre_delay, 101)
+        assert updated.raw[5] == 101
+        assert updated.raw[2] == 0x00
+        assert updated.display(pre_delay) == 101
+        other = Effect(type=type_num, raw=bytes([0, 0, 0x03, 0, 0, 0, 0, 0]))
+        other_pre, _ = _reverb_rows(other)
+        assert other.with_value(other_pre, 101).raw[2] == 0x03
 
 
 def test_empty_roundtrips_and_types_zero():
