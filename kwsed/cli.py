@@ -2053,11 +2053,7 @@ def _cmd_fx(device: Any, args: argparse.Namespace) -> int:
         if number >= len(sets):
             raise ValueError(f"Multiset {number} not present in the dump")
         ms = sets[number]
-        print(
-            f"control channel: {ms.control_channel + 1} "
-            f"(stored {ms.control_channel}; stored convention to be "
-            f"confirmed on hardware)"
-        )
+        print(f"control channel: {multi_mod.control_channel_text(ms.control_channel)}")
         _print_fx_block(ms.fx)
         return spec.EXIT_OK
 

@@ -1826,8 +1826,35 @@ class TestFx:
     def test_multi_demo_prints_control_channel_and_off(self, capsys):
         assert run(["fx", "--multi", "0"]) == 0
         out = capsys.readouterr().out
-        assert "control channel" in out
+        assert "control channel: 1" in out
+        assert "stored convention to be" not in out
         assert "Off" in out
+
+    def test_multi_control_channel_uses_shared_kb_naming(self, capsys):
+        """Raw 16 is KB on the panel; a +1 hand-roll would print 17."""
+        from kws import multi as multi_mod
+
+        data = bytearray(
+            multi_mod.NAME_BASE + multi_mod.MULTISETS * multi_mod.NAME_SIZE
+        )
+        number = 3
+        data[number * multi_mod.MULTISET_SIZE + multi_mod.MULTISET_SIZE - 1] = (
+            multi_mod.CONTROL_CHANNEL_KB
+        )
+        frame = m.frame(
+            m.Function.MULTISET_DUMP, [0, 1] + list(m.to_nibbles(bytes(data)))
+        )
+
+        class Device:
+            def read_multi(self):
+                return frame
+
+            def close(self):
+                pass
+
+        args = argparse.Namespace(bank=None, number=None, multi=number)
+        assert cli._cmd_fx(Device(), args) == 0
+        assert "control channel: KB" in capsys.readouterr().out
 
     def test_usage_errors(self):
         assert run(["fx", "RAM5", "0"]) == 2
