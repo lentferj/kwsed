@@ -2968,3 +2968,34 @@ class TestPerformancePicker:
             part = editor._ms().parts[0]
             assert part.bank == banks.bank("RAM2").sysex
             assert part.performance == 4
+
+    async def test_a_startup_probe_never_files_unknown_content(
+        self, tmp_path: Any
+    ) -> None:
+        """The old probe filed #39's content under the remembered #24 and
+        made #24 look active; a launch probe must leave the archive alone."""
+        from kws import cards as _cards
+
+        app = KwsedApp(
+            DemoDevice(),
+            catalog=cat.Catalog(),
+            cards_path=str(tmp_path / "cards.json"),
+        )
+        app._archive[24] = _cards.capture(
+            24, "Old", {0: "Old"}, {0: "Old"}, digest="old-digest"
+        )
+        app._active_card = 24
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            payload: Any = (
+                "",
+                {0: "Unknown"},
+                {0: "Unknown"},
+                "unknown-digest",
+                {},
+            )
+            filed = app._file_capture(payload, 24, startup=True)
+            assert filed is False
+            assert app._archive[24].digest == "old-digest"
+            assert app._active_card is None, "the stale hint is not evidence"
+            assert "not in the archive" in panel_text(app, "#status")

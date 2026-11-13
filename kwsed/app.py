@@ -8065,7 +8065,13 @@ class KwsedApp(App[None]):
         number: Optional[int] = None
         message_suffix = ""
         if expected_given:
-            if evidence_bank is not None and evidence_bank != expected:
+            if startup and evidence_bank is None:
+                # A launch probe has no user to ask. Filing unknown content
+                # under the last remembered bank is how #39's content once
+                # overwrote #24 and made #24 look active: leave the archive
+                # alone and say the bank could not be identified.
+                number = None
+            elif evidence_bank is not None and evidence_bank != expected:
                 # different bank
                 number = evidence_bank
                 verified = True
@@ -8073,14 +8079,14 @@ class KwsedApp(App[None]):
                     f" — the card is Card {number:02d}, not "
                     f"{expected:02d} — filed under {number:02d}. "
                     f"Switch the HCard to {expected:02d} if that is the "
-                    f"bank you meant."
+                    "bank you meant."
                 )
             elif evidence_bank == expected:
                 number = expected
                 verified = True
                 message_suffix = " — confirmed"
             else:
-                # no evidence
+                # no evidence, explicit capture: file on the user's say-so
                 number = expected
                 verified = False
                 message_suffix = (
@@ -8098,9 +8104,19 @@ class KwsedApp(App[None]):
 
         if number is None:
             if startup:
+                # The card was read but its content is not in the archive,
+                # so this session cannot confirm which bank is in front of
+                # the unit. The persisted hint (the last confirmed bank) is
+                # not evidence: stop marking it active rather than showing
+                # #24 while #39 is the bank actually selected.
+                previous = self._active_card
+                if previous is not None:
+                    self._active_card = None
+                    self._refresh_card_row(previous)
                 self.notify_status(
-                    "the active card bank is not in the archive yet; select "
-                    "it on the HCard and press C to file it"
+                    "the active Card bank is not in the archive yet; select "
+                    "its row and press C to file it (the last remembered "
+                    "bank is no longer marked active)"
                 )
             else:
                 self.notify_status(
