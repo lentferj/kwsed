@@ -955,7 +955,7 @@ class WavestationBridge:
             else:
                 try:
                     before_bytes = bytes(
-                        self.read_patch(entry.sysex, number, timeout=timeout)
+                        self.read_patch(entry.number, number, timeout=timeout)
                     )
                 except Exception as exc:
                     raise DeviceError(
@@ -1024,7 +1024,7 @@ class WavestationBridge:
                 # the unit never performed.
                 time.sleep(0.25)
             try:
-                after = self.read_patch(entry.sysex, number, timeout=timeout)
+                after = self.read_patch(entry.number, number, timeout=timeout)
             except Exception as exc:
                 result["verified"] = False
                 result["mismatch"] = f"could not read it back ({exc})"
@@ -1145,7 +1145,7 @@ class WavestationBridge:
             )
 
         try:
-            before = self.read_performance(entry.sysex, number, timeout=timeout)
+            before = self.read_performance(entry.number, number, timeout=timeout)
         except Exception as exc:
             raise DeviceError(
                 f"could not read {entry.label} performance {number} before "
@@ -1203,7 +1203,7 @@ class WavestationBridge:
         if not verify:
             return result
         try:
-            after = self.read_performance(entry.sysex, number, timeout=timeout)
+            after = self.read_performance(entry.number, number, timeout=timeout)
         except Exception as exc:
             result["verified"] = False
             result["mismatch"] = f"could not read it back ({exc})"

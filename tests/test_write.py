@@ -1339,3 +1339,117 @@ def test_a_demo_write_multi_returns_a_multi_envelope(tmp_path):
     loaded = _backup.load(result["backup"])
     assert loaded.kind == "multi"
     assert "dump" in loaded.blocks
+
+
+class TestFencedSingleWritesNameBankByNumber:
+    """RAM 3 and the Card: the wire byte is not the position.
+
+    RAM 3 is position 2 but wire byte 4; the Card is position 11 but
+    wire byte 3. The fenced single writes used to pass the wire byte
+    back into ``read_patch``/``read_performance``, which resolve an int
+    by position -- so the backup saved the wrong bank and the verify
+    compared against it. The double below stores one record per
+    (wire byte, slot); a shared single store would hide the mix-up.
+    """
+
+    NUMBER = 7
+
+    def _unit(self):
+        midi_in = FakeIn()
+        midi_out = FakeOut()
+        patches: Dict[Tuple[int, int], bytes] = {}
+        perfs: Dict[Tuple[int, int], bytes] = {}
+        seeds = (
+            (banks.bank("RAM3").sysex, b"RAM3BEFORE"),
+            (banks.bank("ROM4").sysex, b"ROM4BEFORE"),
+            (banks.bank("ROM5").sysex, b"ROM5BEFORE"),
+            (banks.bank("CARD").sysex, b"CARDBEFORE"),
+        )
+        for byte, marker in seeds:
+            patch = bytearray(r.PATCH_SIZE)
+            patch[: len(marker)] = marker
+            patches[(byte, self.NUMBER)] = bytes(patch)
+            perf = bytearray(r.PERFORMANCE_SIZE)
+            perf[: len(marker)] = marker
+            perfs[(byte, self.NUMBER)] = bytes(perf)
+        bridge = WavestationBridge(midi_in, midi_out, channel=0)
+
+        def on_send(data: List[int]) -> None:
+            raw = bytes(data)
+            midi_out.sent.append(raw)
+            if len(raw) < 5:
+                return
+            function = raw[4]
+            if function == m.Function.SINGLE_PATCH_REQUEST and len(raw) > 6:
+                key = (raw[5], raw[6])
+                stored = patches.get(key, bytes(r.PATCH_SIZE))
+                reply = m.single_patch_dump(raw[5], raw[6], stored, channel=0)
+                midi_in.queue.append((list(reply), 0.0))
+            elif function == m.Function.SINGLE_PERFORMANCE_REQUEST and len(raw) > 6:
+                key = (raw[5], raw[6])
+                stored = perfs.get(key, bytes(r.PERFORMANCE_SIZE))
+                reply = m.single_performance_dump(raw[5], raw[6], stored, channel=0)
+                midi_in.queue.append((list(reply), 0.0))
+            elif function == m.Function.SINGLE_PATCH_DUMP and len(raw) > 6:
+                packet = m.parse(raw)
+                assert packet is not None
+                patches[(raw[5], raw[6])] = bytes(packet.data()[: r.PATCH_SIZE])
+            elif function == m.Function.PERFORMANCE_DUMP and len(raw) > 6:
+                packet = m.parse(raw)
+                assert packet is not None
+                perfs[(raw[5], raw[6])] = bytes(packet.data()[: r.PERFORMANCE_SIZE])
+            elif function == m.Function.PARAMETER_CHANGE_SR:
+                midi_in.queue.append(
+                    (list(m.frame(m.Function.WRITE_COMPLETED, channel=0)), 0.0)
+                )
+
+        midi_out.send_message = on_send  # type: ignore[method-assign]
+        return bridge, patches, perfs
+
+    def test_patch_to_ram3_backs_up_ram3_and_verifies(self, tmp_path):
+        bridge, patches, _perfs = self._unit()
+        fresh = bytearray(r.PATCH_SIZE)
+        fresh[: len(b"RAM3AFTER")] = b"RAM3AFTER"
+        result = bridge.write_patch(
+            "RAM3", self.NUMBER, bytes(fresh), backup_dir=str(tmp_path)
+        )
+        assert result["verified"] is True
+        assert result["mismatch"] is None
+        saved = backup.load(result["backup"]).blocks["dump"]
+        packet = m.parse(saved)
+        assert packet is not None
+        assert packet.data()[: len(b"RAM3BEFORE")] == b"RAM3BEFORE"
+        assert saved[5] == banks.bank("RAM3").sysex
+        assert patches[(banks.bank("RAM3").sysex, self.NUMBER)] == bytes(fresh)
+
+    def test_performance_to_ram3_backs_up_ram3_and_verifies(self, tmp_path):
+        bridge, _patches, perfs = self._unit()
+        fresh = bytearray(r.PERFORMANCE_SIZE)
+        fresh[: len(b"RAM3AFTER")] = b"RAM3AFTER"
+        result = bridge.write_performance(
+            "RAM3", self.NUMBER, bytes(fresh), backup_dir=str(tmp_path)
+        )
+        assert result["verified"] is True
+        assert result["mismatch"] is None
+        saved = backup.load(result["backup"]).blocks["dump"]
+        packet = m.parse(saved)
+        assert packet is not None
+        assert packet.data()[: len(b"RAM3BEFORE")] == b"RAM3BEFORE"
+        assert saved[5] == banks.bank("RAM3").sysex
+        assert perfs[(banks.bank("RAM3").sysex, self.NUMBER)] == bytes(fresh)
+
+    def test_patch_to_card_backs_up_card_and_verifies(self, tmp_path):
+        bridge, patches, _perfs = self._unit()
+        fresh = bytearray(r.PATCH_SIZE)
+        fresh[: len(b"CARDAFTER")] = b"CARDAFTER"
+        result = bridge.write_patch(
+            "CARD", self.NUMBER, bytes(fresh), backup_dir=str(tmp_path)
+        )
+        assert result["verified"] is True
+        assert result["mismatch"] is None
+        saved = backup.load(result["backup"]).blocks["dump"]
+        packet = m.parse(saved)
+        assert packet is not None
+        assert packet.data()[: len(b"CARDBEFORE")] == b"CARDBEFORE"
+        assert saved[5] == banks.bank("CARD").sysex
+        assert patches[(banks.bank("CARD").sysex, self.NUMBER)] == bytes(fresh)

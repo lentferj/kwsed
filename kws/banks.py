@@ -180,7 +180,13 @@ class Slot:
 
 
 def bank(which: int | str) -> Bank:
-    """A bank by its System Exclusive number or its short id."""
+    """A bank by its position (0-11) or its short id.
+
+    An int is the bank's position in display order (0-11), **not** the
+    System Exclusive wire byte: RAM 3 is position 2 but wire byte 4, and
+    the Card is position 11 but wire byte 3. To resolve a wire byte --
+    the bank byte a dump carries -- use :func:`by_sysex` instead.
+    """
     # `isinstance(True, int)` is True, and `bank(True)` would return RAM 2 --
     # the same shape of mistake config.load_channel guards against at the
     # TOML boundary. A bool is not a bank id here.
