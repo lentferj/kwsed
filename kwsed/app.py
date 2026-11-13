@@ -1129,16 +1129,20 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
         return f"staged {n} card perf(s) into {banks_text}; press a then w to write"
 
     def action_arm(self) -> None:
-        if (
-            any(i in self._desired_scopes for i in range(16))
-            and self._staged_plan is None
-        ):
-            self.action_stage()
+        # Staging is a separate, explicit step (`s`). Arming must not write
+        # a RAM bank as a side effect: the picker now records card scopes,
+        # and auto-staging on arm silently rewrote Multi channels into RAM3.
         self._armed = True
-        self._status(
-            "ARMED - w writes the staged bank(s) and the Multi Mode Setup. "
-            "Nothing sent yet."
-        )
+        if self._staged_plan is not None:
+            self._status(
+                "ARMED - w writes the staged bank(s) and the Multi Mode Setup. "
+                "Nothing sent yet."
+            )
+        else:
+            self._status(
+                "ARMED - w writes the Multi Mode Setup only; s stages its "
+                "card performances into RAM first. Nothing sent yet."
+            )
 
     def action_fire(self) -> None:  # noqa: C901
         if not self._armed:
@@ -1254,6 +1258,10 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
     def _write_succeeded(self, result: Any) -> None:
         try:
             app = self.app
+            if hasattr(app, "_record_multi_snapshot"):
+                # The screen holds the state that was written (after staging,
+                # if any), so the catalog cannot go stale on this path.
+                app._record_multi_snapshot(self._snapshot())
             if hasattr(app, "_multi_sets"):
                 app._multi_sets = list(self._multisets_copy)
             if hasattr(app, "_multisets"):
@@ -8784,8 +8792,10 @@ class KwsedApp(App[None]):
         for number in range(len(self._multisets)):
             try:
                 name = getattr(self._multisets[number], "name", "") or ""
-                if number in self._multi_mismatches:
-                    name = (name or "?") + " !"
+                found = self._multi_mismatches.get(number, [])
+                if found:
+                    kinds = sorted({mismatch.kind for mismatch in found})
+                    name = (name or "(unnamed)") + " ! " + "/".join(kinds)
                 table.update_cell(
                     f"multi:{number:02d}", "name", name or "[dim]--[/dim]"
                 )
@@ -8838,6 +8848,7 @@ class KwsedApp(App[None]):
                 active_card_scope=active_scope if active_scope != "CARD" else None,
                 active_card_digest=active_digest,
                 name_at=name_at,
+                multiset=sets[number],
             )
             if found:
                 out[number] = found

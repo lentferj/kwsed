@@ -329,6 +329,8 @@ async def test_multi_edit_stage_write(tmp_path: Path) -> None:
         await pilot.pause()
         screen._desired_scopes[0] = "CARD/07"
         screen._desired_scopes[1] = "CARD/13"
+        screen.action_stage()
+        await pilot.pause()
         screen.action_arm()
         await pilot.pause()
         screen.action_fire()

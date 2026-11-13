@@ -156,12 +156,102 @@ def build_snapshot(
     )
 
 
+def _stale_mismatch(
+    snapshot: MultiSnapshot, channel: int, binding: ChannelBinding, part: Any
+) -> Optional[Mismatch]:
+    """A channel whose current part no longer matches what was recorded."""
+    if (
+        part is not None
+        and getattr(part, "used", False)
+        and part.bank == binding.bank
+        and part.performance == binding.performance
+    ):
+        return None
+    current = "unused"
+    if part is not None and getattr(part, "used", False):
+        current = f"{_bank_label(part.bank)} {part.performance:02d}"
+    recorded = f"{_bank_label(binding.bank)} {binding.performance:02d}"
+    return Mismatch(
+        multi=snapshot.number,
+        channel=channel,
+        kind="stale",
+        text=(
+            f"was recorded as {recorded} {binding.name!r}; the Multi now "
+            f"points at {current} — press r to re-record it"
+        ),
+    )
+
+
+def _card_mismatch(
+    snapshot: MultiSnapshot,
+    channel: int,
+    binding: ChannelBinding,
+    active_card_scope: Optional[str],
+    active_card_digest: str,
+) -> Optional[Mismatch]:
+    if not binding.card_scope:
+        return Mismatch(
+            multi=snapshot.number,
+            channel=channel,
+            kind="card",
+            text=(
+                "points to the Card slot but no bank was recorded; "
+                f"the active card is {active_card_scope or 'unknown'}"
+                " — switch to the right bank and record it with r"
+            ),
+        )
+    if active_card_scope == binding.card_scope:
+        return None
+    if binding.card_digest and binding.card_digest == active_card_digest:
+        # The same card content under another bank: the dependency data is
+        # there, so this is not a break.
+        return None
+    return Mismatch(
+        multi=snapshot.number,
+        channel=channel,
+        kind="card",
+        text=(
+            f"expects {binding.card_scope} ({binding.name or 'unnamed'}); "
+            f"the active card is {active_card_scope or 'unknown'}"
+        ),
+    )
+
+
+def _ram_mismatch(
+    snapshot: MultiSnapshot,
+    channel: int,
+    binding: ChannelBinding,
+    name_at: Callable[[int, int], Optional[str]],
+) -> Optional[Mismatch]:
+    try:
+        entry = banks.by_sysex(binding.bank)
+    except LookupError:
+        return None
+    if not entry.writable or entry.id == "CARD":
+        # ROM is factory state; the Card is handled by _card_mismatch.
+        return None
+    current = name_at(binding.bank, binding.performance)
+    if current is None or current == binding.name:
+        return None
+    return Mismatch(
+        multi=snapshot.number,
+        channel=channel,
+        kind="ram",
+        text=(
+            f"expects {_bank_label(binding.bank)} "
+            f"{binding.performance:02d} {binding.name!r}; it now holds "
+            f"{current!r}"
+        ),
+    )
+
+
 def check(
     snapshot: MultiSnapshot,
     *,
     active_card_scope: Optional[str],
     active_card_digest: str,
     name_at: Callable[[int, int], Optional[str]],
+    multiset: Any = None,
 ) -> List[Mismatch]:
     """Compare a snapshot with the device as it is now.
 
@@ -169,68 +259,28 @@ def check(
     (``CARD/39``, ``CARD/c1`` or ``None``), ``active_card_digest`` its
     archive digest, and ``name_at(bank, performance)`` the current name at
     a RAM slot -- ``None`` when that bank has not been read, which is not
-    evidence of a change.
+    evidence of a change. When ``multiset`` is given, a channel whose part
+    no longer matches the recording is reported as ``stale`` instead of
+    being compared as if the Multi still pointed there.
     """
     card_byte = banks.bank("CARD").sysex
+    parts = list(getattr(multiset, "parts", ()) or ())
     out: List[Mismatch] = []
     for channel, binding in snapshot.channels.items():
+        part = parts[channel] if 0 <= channel < len(parts) else None
+        if parts:
+            stale = _stale_mismatch(snapshot, channel, binding, part)
+            if stale is not None:
+                out.append(stale)
+                continue
         if binding.bank == card_byte:
-            if not binding.card_scope:
-                out.append(
-                    Mismatch(
-                        multi=snapshot.number,
-                        channel=channel,
-                        kind="card",
-                        text=(
-                            "points to the Card slot but no bank was recorded; "
-                            f"the active card is {active_card_scope or 'unknown'}"
-                            " — switch to the right bank and record it with r"
-                        ),
-                    )
-                )
-                continue
-            if active_card_scope == binding.card_scope:
-                continue
-            if binding.card_digest and binding.card_digest == active_card_digest:
-                # The same card content under another bank: the dependency
-                # data is there, so this is not a break.
-                continue
-            out.append(
-                Mismatch(
-                    multi=snapshot.number,
-                    channel=channel,
-                    kind="card",
-                    text=(
-                        f"expects {binding.card_scope} "
-                        f"({binding.name or 'unnamed'}); the active card is "
-                        f"{active_card_scope or 'unknown'}"
-                    ),
-                )
+            found = _card_mismatch(
+                snapshot, channel, binding, active_card_scope, active_card_digest
             )
-            continue
-        try:
-            entry = banks.by_sysex(binding.bank)
-        except LookupError:
-            continue
-        if not entry.writable or entry.id == "CARD":
-            # ROM is factory state; the Card is handled above.
-            continue
-        current = name_at(binding.bank, binding.performance)
-        if current is None:
-            continue  # not cached: no evidence either way
-        if current != binding.name:
-            out.append(
-                Mismatch(
-                    multi=snapshot.number,
-                    channel=channel,
-                    kind="ram",
-                    text=(
-                        f"expects {_bank_label(binding.bank)} "
-                        f"{binding.performance:02d} {binding.name!r}; it now "
-                        f"holds {current!r}"
-                    ),
-                )
-            )
+        else:
+            found = _ram_mismatch(snapshot, channel, binding, name_at)
+        if found is not None:
+            out.append(found)
     return out
 
 

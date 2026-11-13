@@ -197,3 +197,23 @@ def test_an_unrecorded_card_bank_is_a_visible_warning() -> None:
     assert found[0].kind == "card"
     assert "no bank was recorded" in found[0].text
     assert "CARD/25" in found[0].text
+
+
+def test_a_changed_channel_is_stale_not_a_card_warning() -> None:
+    """A staged Multiset no longer points at the card; say that, not 'wrong
+    card'."""
+    card = banks.bank("CARD").sysex
+    recorded = _multiset(**{"0": (card, 5)})
+    snap = _snapshot(recorded)
+    current = _multiset(**{"0": (banks.bank("RAM3").sysex, 0)})
+    found = mc.check(
+        snap,
+        active_card_scope="CARD/25",
+        active_card_digest="other",
+        name_at=lambda bank, number: None,
+        multiset=current,
+    )
+    assert len(found) == 1
+    assert found[0].kind == "stale"
+    assert "RAM 3 00" in found[0].text
+    assert "re-record" in found[0].text
