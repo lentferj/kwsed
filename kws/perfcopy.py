@@ -1181,8 +1181,6 @@ def _compute_patch_dest_bytes(
 def _determine_patch_slots(
     patch_dest_bytes: List[Tuple[relations.PatchId, bytes]],
     patch_bytes_to_slot: Dict[bytes, int],
-    free_patch_slots: List[int],
-    used_new_patch_slots: Set[int],
 ) -> Tuple[
     Dict[relations.PatchId, int], List[int], int, List[Tuple[relations.PatchId, bytes]]
 ]:
@@ -1382,8 +1380,6 @@ def _plan_one_slot_import(
         _determine_patch_slots(
             patch_dest_bytes,
             state["patch_bytes_to_slot"],
-            free_patch_slots,
-            state["used_new_patch_slots"],
         )
     )
 
@@ -1516,7 +1512,7 @@ def plan_slot_import(
 
     free_patch_slots, free_seq_slots = _compute_free_slots(pinned_patches, pinned_seqs)
 
-    state = {
+    state: Dict[str, Any] = {
         "used_new_seq_slots": set(),
         "used_new_patch_slots": set(),
         "new_steps_count": 0,
@@ -1541,10 +1537,7 @@ def plan_slot_import(
             state,
         )
 
-    new_steps_count_raw = state["new_steps_count"]
-    if not isinstance(new_steps_count_raw, int):
-        raise TypeError("new_steps_count must be int")
-    new_steps_count = new_steps_count_raw
+    new_steps_count = state["new_steps_count"]
     _compute_totals(
         plan,
         pinned_patches,
