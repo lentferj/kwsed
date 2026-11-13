@@ -1286,6 +1286,12 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
             return
         snapshot = self._snapshot()
         app._record_multi_snapshot(snapshot)
+        # A plain `r` records the screen, not the device. Re-run the check
+        # against what was last read so a mixed-card record shows its warning
+        # immediately rather than only after the next m/C.
+        if hasattr(app, "_refresh_multi_checks"):
+            app._refresh_multi_checks()
+        self._populate()
         self._status(
             f"recorded Multi {snapshot.number:02d}: "
             f"{len(snapshot.channels)} channel(s), nothing sent"
@@ -4126,6 +4132,7 @@ class KwsedApp(App[None]):
             self._build_row_model()
             self._apply_row_model()
             self._show_physical_row(updated.id)
+            self._refresh_multi_checks()
 
     async def action_quit(self) -> None:
         """Confirm before leaving with an audition's staging still applied."""
@@ -8404,6 +8411,7 @@ class KwsedApp(App[None]):
                 if previous is not None:
                     self._active_card = None
                     self._refresh_card_row(previous)
+                self._refresh_multi_checks()
                 self.notify_status(
                     "the active Card bank is not in the archive yet; select "
                     "its row and press C to file it (the last remembered "
@@ -8450,6 +8458,13 @@ class KwsedApp(App[None]):
         message += " (the card name is not readable over MIDI; press L to label it)"
         message += message_suffix
         self._remember_bank(_cards.scope_id(number), **bundle)
+        self._refresh_multi_checks()
+        stale = sum(len(items) for items in self._multi_mismatches.values())
+        if stale:
+            message += (
+                f" — {stale} Multiset channel(s) no longer match their "
+                "records; the affected Multi rows are red"
+            )
         self.notify_status(message)
         if next_index is not None:
             self._card_sweep_next(next_index, filed + 1)
@@ -8553,6 +8568,7 @@ class KwsedApp(App[None]):
             self._apply_row_model()
             self._show_physical_row(updated.id)
             self._fill_physical(updated.id, banks.Kind.PERFORMANCE)
+            self._refresh_multi_checks()
             self.notify_status(
                 f"captured Card {updated.label or updated.id} (confirmed)"
             )
@@ -8581,6 +8597,7 @@ class KwsedApp(App[None]):
                 self._apply_row_model()
                 self._show_physical_row(card.id)
                 self._fill_physical(card.id, banks.Kind.PERFORMANCE)
+                self._refresh_multi_checks()
                 self.notify_status(f"new card {card.label or card.id}")
 
             self.push_screen(
@@ -8622,6 +8639,7 @@ class KwsedApp(App[None]):
                     self._apply_row_model()
                     self._show_physical_row(card.id)
                     self._fill_physical(card.id, banks.Kind.PERFORMANCE)
+                    self._refresh_multi_checks()
                     self.notify_status(f"new card {card.label or card.id}")
 
                 self.push_screen(
@@ -8650,6 +8668,7 @@ class KwsedApp(App[None]):
             self._apply_row_model()
             self._show_physical_row(updated.id)
             self._fill_physical(updated.id, banks.Kind.PERFORMANCE)
+            self._refresh_multi_checks()
             self.notify_status(
                 f"captured Card {updated.label or updated.id} (unverified — adopted)"
             )
@@ -9025,6 +9044,27 @@ class KwsedApp(App[None]):
             if found:
                 out[number] = found
         return out
+
+    def _refresh_multi_checks(self) -> None:
+        """Re-run the live-catalog check after the card in the slot changes.
+
+        The Multiset records name the card they were written against, so a
+        different bank in the slot makes them stale even though the RAM
+        setup itself has not moved. No MIDI: only the check and the views.
+        """
+        if not self._multisets:
+            return
+        fresh = self._check_multi_snapshots(self._multisets)
+        self._multi_mismatches.clear()
+        self._multi_mismatches.update(fresh)
+        if not getattr(self, "_screen_stack", None):
+            return
+        self._build_row_model()
+        self._apply_row_model()
+        self._refresh_multi_rows()
+        if self._current_multi is not None:
+            self._fill_multiset(self._current_multi)
+        self._refresh_deps_pane()
 
     def _show_multi(self, raw: bytes) -> None:
         from kws import multi as multi_mod
