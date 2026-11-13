@@ -91,3 +91,9 @@ def test_a_real_control_byte_is_accepted_and_roundtrips():
     assert ms.control_channel == 25
     with pytest.raises(ValueError):
         multi.Multiset(number=0, name="X", parts=_make_parts(), control_channel=128)
+
+
+def test_the_kb_control_byte_is_named():
+    """The bench showed KB stored as 0x19; other values stay raw."""
+    assert multi.control_channel_text(0x19) == "KB"
+    assert multi.control_channel_text(3) == "3"

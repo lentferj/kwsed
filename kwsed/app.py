@@ -1181,7 +1181,9 @@ class FxScreen(ModalScreen[None]):
         fx_index = desc[1]
         block = self._block
         if kind == "control":
-            return f"{self._control_channel or 0} (raw)"
+            from kws.multi import control_channel_text
+
+            return control_channel_text(self._control_channel or 0)
         if kind == "routing":
             return "series" if block.series else "parallel"
         if kind == "type":

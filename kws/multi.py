@@ -69,6 +69,20 @@ MULTISETS = 32
 MULTISET_SIZE = 86
 CHANNELS = 16
 
+#: The stored byte for an FX control channel set to **KB** (the keyboard),
+#: measured on the bench 2026-11-13: the panel showed KB and the dump read
+#: 0x19. Other values (channels 1-16, OFF) are still to be mapped, so the
+#: raw byte is preserved and only KB is named.
+CONTROL_CHANNEL_KB = 0x19
+
+
+def control_channel_text(raw: int) -> str:
+    """How the panel names a stored FX control byte, as far as measured."""
+    if raw == CONTROL_CHANNEL_KB:
+        return "KB"
+    return str(raw)
+
+
 #: Settings first, then one four-byte part per MIDI channel.
 PART_BASE = 22
 PART_SIZE = 4
