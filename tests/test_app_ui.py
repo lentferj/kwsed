@@ -3212,3 +3212,30 @@ class TestPerformancePicker:
         app._multi_mismatches[0] = [SimpleNamespace(channel=0, text="old")]
         app._record_multi_snapshot(_multi_snapshot(_card_multi()))
         assert 0 not in app._multi_mismatches
+
+    async def test_a_mismatched_multi_row_is_tinted(self, app: Any) -> None:
+        from types import SimpleNamespace
+
+        from rich.text import Text
+
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.action_multi()
+            await settle(pilot, 30)
+            app._multi_mismatches = {
+                0: [SimpleNamespace(channel=0, kind="stale", text="changed")]
+            }
+            app._build_row_model()
+            app._apply_row_model()
+            app._refresh_multi_rows()
+            table = app.query_one("#bank-table", DataTable)
+            cells = list(table.get_row("multi:00"))
+            assert any(
+                isinstance(cell, Text) and "5c2626" in str(cell.style).lower()
+                for cell in cells
+            ), "the stale row has the warning background"
+            other = list(table.get_row("multi:01"))
+            assert not any(
+                isinstance(cell, Text) and "5c2626" in str(cell.style).lower()
+                for cell in other
+            ), "a clean row is not tinted"

@@ -55,6 +55,7 @@ from typing import (
     List,
     Mapping,
     Optional,
+    Iterable,
     Sequence,
     Set,
     Tuple,
@@ -70,6 +71,9 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.screen import ModalScreen
+from rich.segment import Segment
+from rich.style import Style
+from textual.strip import Strip
 from textual.widgets import DataTable, Header, Input, Label, Static
 
 from kws import bankstore
@@ -252,6 +256,52 @@ KEY_HINTS = (
     "? help",
     "q quit",
 )
+
+#: A muted red background for a Multiset row/channel whose recording no
+#: longer matches the device. Used as a Rich background, not CSS: DataTable
+#: rows have no style hook of their own.
+MULTI_WARNING_COLOR = "#5c2626"
+MULTI_WARNING_STYLE = f"on {MULTI_WARNING_COLOR}"
+
+
+class WarningTable(DataTable[Any]):
+    """A DataTable that can paint whole rows with the warning background.
+
+    A cell's Rich background stops at the cell's content; the table's own
+    cell padding and the unused width to the right stay in the theme
+    background. Overlaying the rendered strip makes the warning a single
+    continuous line, including the gaps and the empty tail.
+    """
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._warning_rows: Set[Any] = set()
+        self._warning_style = Style(bgcolor=MULTI_WARNING_COLOR)
+
+    def set_warning_rows(self, rows: Iterable[Any]) -> None:
+        fresh = set(rows)
+        if fresh != self._warning_rows:
+            self._warning_rows = fresh
+            self.refresh()
+
+    def _render_line(self, y: int, x1: int, x2: int, base_style: Style) -> Strip:
+        strip = super()._render_line(y, x1, x2, base_style)
+        try:
+            row_key, _ = self._get_offsets(y)
+        except (LookupError, IndexError):
+            return strip
+        if row_key not in self._warning_rows:
+            return strip
+        return Strip(
+            [
+                Segment(
+                    segment.text,
+                    (segment.style or Style()) + self._warning_style,
+                )
+                for segment in strip._segments
+            ]
+        )
+
 
 # The family caps the legend and lets an app pick the cap. The default of
 # two lines is right for the canonical list, but kwsed's is longer: at a
@@ -677,7 +727,9 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
                 "r record · a arm, w write · esc cancels",
                 classes="hint",
             )
-            table: DataTable[Any] = DataTable(id="multi-edit-table", cursor_type="cell")
+            table: DataTable[Any] = WarningTable(
+                id="multi-edit-table", cursor_type="cell"
+            )
             table.add_column("ch", key="ch")
             table.add_column("perf", key="perf")
             table.add_column("name", key="name")
@@ -738,21 +790,22 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
             snapshot = (self._snapshots or {}).get(self._selected)
             binding = snapshot.channels.get(i) if snapshot is not None else None
             scope = self._desired_scopes.get(i)
-            if (
+            if scope is not None and str(scope).startswith("CARD"):
+                # A pending choice (the picker, or b) is the current truth;
+                # the snapshot may record a different bank.
+                perf = f"{self._scope_label(scope)} {part.performance:02d}"
+                name = self._scope_name(scope, part.performance)
+            elif (
                 binding is not None
                 and binding.card_scope
                 and part.bank == _banks.bank("CARD").sysex
+                and part.performance == binding.performance
             ):
-                perf = f"{binding.card_scope} {part.performance:02d}"
+                perf = f"{self._scope_label(binding.card_scope)} {part.performance:02d}"
                 name = binding.name
-            elif scope is not None and str(scope).startswith("CARD"):
-                perf = f"{self._scope_label(scope)} {part.performance:02d}"
-                name = self._scope_name(scope, part.performance)
             else:
                 perf = f"{_bank_label(part.bank)} {part.performance:02d}"
                 name = self._name_for_part(part)
-            if binding is not None and not name:
-                name = binding.name
             marks = {
                 mismatch.channel
                 for mismatch in (self._mismatches or {}).get(self._selected, [])
@@ -2660,6 +2713,9 @@ class KwsedApp(App[None]):
         width: auto; min-width: 20; max-width: 64;
         border-right: solid $panel;
     }
+    #bank-table.stale-cursor > .datatable--cursor {
+        background: #5c2626;
+    }
     #slot-table { width: 1fr; }
     /* The dependency pane is a third column, hidden with `D`. It scrolls
        rather than truncates: the report can be longer than the screen. */
@@ -4146,8 +4202,8 @@ class KwsedApp(App[None]):
     def compose(self) -> ComposeResult:
         yield Header()
         with Horizontal(id="panes"):
-            yield DataTable(id="bank-table", cursor_type="row")
-            yield DataTable(id="slot-table", cursor_type="row")
+            yield WarningTable(id="bank-table", cursor_type="row")
+            yield WarningTable(id="slot-table", cursor_type="row")
             with VerticalScroll(id="deps-pane", can_focus=False):
                 yield Static("", id="deps-pane-body")
         yield Static("", id="detail")
@@ -4248,8 +4304,11 @@ class KwsedApp(App[None]):
             for pair, card, multi, physical in zip(
                 self._pairs, self._row_cards, self._row_multis, self._row_physical
             ):
+                cells = self._bank_row(pair, card, multi, physical)
+                if multi is not None and multi in self._multi_mismatches:
+                    cells = self._tint_cells(cells)
                 table.add_row(
-                    *self._bank_row(pair, card, multi, physical),
+                    *cells,
                     key=self._row_key(pair, card, multi, physical),
                 )
             if self._pairs:
@@ -4257,6 +4316,28 @@ class KwsedApp(App[None]):
                     table.move_cursor(row=min(cursor_row or 0, len(self._pairs) - 1))
         finally:
             self._filling = prior_filling
+        if isinstance(table, WarningTable):
+            table.set_warning_rows(
+                {f"multi:{number:02d}" for number in self._multi_mismatches}
+            )
+
+    def _update_stale_cursor(self) -> None:
+        """Redden the selected row when its Multiset is mismatched.
+
+        A cell's own background wins over the cursor style, but the cursor
+        style covers the rest of the selected row; without this the blue
+        selection hides most of the warning on exactly the row in view.
+        """
+        try:
+            table = self.query_one("#bank-table", DataTable)
+        except Exception:
+            return
+        row = table.cursor_row
+        multi = self._row_multis[row] if 0 <= row < len(self._row_multis) else None
+        if multi is not None and multi in self._multi_mismatches:
+            table.add_class("stale-cursor")
+        else:
+            table.remove_class("stale-cursor")
 
     def _show_physical_row(self, card_id: str) -> None:
         """Put the bank cursor on a captured card's performance row.
@@ -4330,6 +4411,17 @@ class KwsedApp(App[None]):
         if inactive:
             return f"[dim][i]{body}[/i][/dim]"
         return body
+
+    #: A muted red for a Multiset row whose recording no longer matches.
+    MULTI_WARNING_STYLE = MULTI_WARNING_STYLE
+
+    def _tint_cells(self, cells: Sequence[Any]) -> List[Any]:
+        from rich.text import Text
+
+        return [
+            Text.from_markup(str(cell), style=self.MULTI_WARNING_STYLE)
+            for cell in cells
+        ]
 
     def _bank_row(
         self,
@@ -7123,6 +7215,8 @@ class KwsedApp(App[None]):
             return
         table = self.query_one("#slot-table", DataTable)
         table.clear(columns=True)
+        if isinstance(table, WarningTable):
+            table.set_warning_rows(())
         if mode == "slots":
             for label, key in (("♥", "fav"), ("#", "num"), ("name", "name")):
                 table.add_column(label, key=key)
@@ -7175,6 +7269,53 @@ class KwsedApp(App[None]):
         self._detail(0)
         self._refresh_deps_pane()
 
+    def _multi_part_display(self, binding: Any, part: Any) -> tuple[str, str]:
+        """The bank and name a Multiset channel points at, card scope included.
+
+        The part stores only the wire byte ``3`` for the card, which names
+        the slot rather than the card in it. The live catalog knows which
+        card the Multiset was recorded against; fall back to the bank in the
+        slot, then to the static catalog, when there is no record.
+        """
+        card_bank = banks.bank("CARD").sysex
+        if part.bank == card_bank:
+            if binding is not None and binding.card_scope:
+                perf = f"{self._scope_label(binding.card_scope)} {part.performance:02d}"
+                if binding.performance == part.performance and binding.name:
+                    return perf, binding.name
+                return perf, self._scope_slot_name(
+                    binding.card_scope,
+                    banks.Kind.PERFORMANCE,
+                    part.performance,
+                )
+            scope = self._active_card_scope()
+            if scope != "CARD":
+                return (
+                    f"{self._scope_label(scope)} {part.performance:02d}",
+                    self._scope_slot_name(
+                        scope, banks.Kind.PERFORMANCE, part.performance
+                    ),
+                )
+        perf = f"{_bank_label(part.bank)} {part.performance:02d}"
+        try:
+            bank_entry = banks.by_sysex(part.bank)
+            name = self.catalog.display_name(
+                bank_entry.id, part.performance, banks.Kind.PERFORMANCE
+            )
+        except Exception:
+            name = ""
+        return perf, name
+
+    def _multi_detail_text(self, number: int, name: str) -> str:
+        """The detail line under the panes for one Multiset."""
+        found = self._multi_mismatches.get(number, [])
+        detail = f"[b]Multi {number:02d} {name}[/b]"
+        if found:
+            detail += f"\n[#f0a0a0]{found[0].text}[/#f0a0a0]"
+            if len(found) > 1:
+                detail += f"  [dim](+{len(found) - 1} more)[/dim]"
+        return detail + "\n[dim]m reads the setup and e edits it[/dim]"
+
     def _fill_multiset(self, number: int) -> None:
         self._current_multi = number
         self._current_card = None
@@ -7189,17 +7330,17 @@ class KwsedApp(App[None]):
             multisets = getattr(self, "_multi_sets", []) or []
         if 0 <= number < len(multisets):
             ms = multisets[number]
+            marks = {
+                mismatch.channel for mismatch in self._multi_mismatches.get(number, [])
+            }
+            recorded = self._multi_catalog.get(number)
+            bindings = recorded.channels if recorded is not None else {}
             for part in ms.parts:
                 if part.used:
-                    perf = f"{_bank_label(part.bank)} {part.performance:02d}"
-                    try:
-                        bank_entry = banks.by_sysex(part.bank)
-                        name = self.catalog.display_name(
-                            bank_entry.id, part.performance, banks.Kind.PERFORMANCE
-                        )
-                    except Exception:
-                        name = ""
-                    used = "used"
+                    perf, name = self._multi_part_display(
+                        bindings.get(part.channel - 1), part
+                    )
+                    used = "used !" if (part.channel - 1) in marks else "used"
                 else:
                     perf = "--"
                     name = ""
@@ -7212,7 +7353,13 @@ class KwsedApp(App[None]):
                     used,
                     key=f"multi:{number:02d}:{part.channel:02d}",
                 )
+            if isinstance(table, WarningTable):
+                table.set_warning_rows(
+                    {f"multi:{number:02d}:{mark + 1:02d}" for mark in marks}
+                )
         else:
+            if isinstance(table, WarningTable):
+                table.set_warning_rows(())
             for i in range(16):
                 table.add_row(
                     f"{i + 1:02d}",
@@ -7227,8 +7374,7 @@ class KwsedApp(App[None]):
             ms_name = getattr(multisets[number], "name", "") or ""
         with contextlib.suppress(NoMatches):
             self.query_one("#detail", Static).update(
-                f"[b]Multi {number:02d} {ms_name}[/b]\n"
-                "[dim]m reads the setup and e edits it[/dim]"
+                self._multi_detail_text(number, ms_name)
             )
         self._refresh_deps_pane()
 
@@ -7696,6 +7842,10 @@ class KwsedApp(App[None]):
                     self._row_physical[row] if row < len(self._row_physical) else None
                 )
                 multi = self._row_multis[row]
+                if multi is not None and multi in self._multi_mismatches:
+                    event.data_table.add_class("stale-cursor")
+                else:
+                    event.data_table.remove_class("stale-cursor")
                 if physical is not None:
                     self._fill_physical(physical, self._pairs[row][1])
                 elif multi is not None:
@@ -8791,19 +8941,41 @@ class KwsedApp(App[None]):
         table = self.query_one("#bank-table", DataTable)
         for number in range(len(self._multisets)):
             try:
+                from rich.text import Text
+
+                row_key = f"multi:{number:02d}"
                 name = getattr(self._multisets[number], "name", "") or ""
                 found = self._multi_mismatches.get(number, [])
                 if found:
                     kinds = sorted({mismatch.kind for mismatch in found})
                     name = (name or "(unnamed)") + " ! " + "/".join(kinds)
-                table.update_cell(
-                    f"multi:{number:02d}", "name", name or "[dim]--[/dim]"
-                )
+                    try:
+                        cells = list(table.get_row(row_key))
+                    except Exception:
+                        cells = []
+                    for column, cell in zip(table.ordered_columns, cells):
+                        table.update_cell(
+                            row_key,
+                            column.key,
+                            Text.from_markup(
+                                name if column.key == "name" else str(cell),
+                                style=self.MULTI_WARNING_STYLE,
+                            ),
+                        )
+                    continue
+                table.update_cell(row_key, "name", name or "[dim]--[/dim]")
             except Exception:  # noqa: S110
                 pass
+        if isinstance(table, WarningTable):
+            table.set_warning_rows(
+                {f"multi:{number:02d}" for number in self._multi_mismatches}
+            )
+        self._update_stale_cursor()
 
     def _after_multi_write(self) -> None:
         """The editor stored a new setup: show what it wrote."""
+        self._build_row_model()
+        self._apply_row_model()
         self._refresh_multi_rows()
         if self._current_multi is not None:
             self._fill_multiset(self._current_multi)
@@ -8871,8 +9043,9 @@ class KwsedApp(App[None]):
         self._multi_sets = list(sets)
         self._multisets = list(sets)
         self._multi_mismatches = self._check_multi_snapshots(sets)
-        # Refresh the Multi rows in the bank table so their name cells
-        # show the freshly read Multiset names.
+        # Rebuild the Multi rows so the warning tint follows the check.
+        self._build_row_model()
+        self._apply_row_model()
         self._refresh_multi_rows()
         if self._multi_mismatches:
             total = sum(len(items) for items in self._multi_mismatches.values())
@@ -8892,6 +9065,7 @@ class KwsedApp(App[None]):
         except Exception:  # noqa: S110
             pass
         table.focus()
+        self._update_stale_cursor()
         self._fill_multiset(number)
         self._refresh_deps_pane()
         self.notify_status(
