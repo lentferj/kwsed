@@ -83,8 +83,11 @@ def test_default_construction():
     assert ms.fx == FxBlock.empty()
 
 
-def test_control_channel_16_raises():
+def test_a_real_control_byte_is_accepted_and_roundtrips():
+    """Real dumps carry 0x19 (25), so the byte is not a plain 0-15 channel."""
     import pytest
 
+    ms = multi.Multiset(number=0, name="X", parts=_make_parts(), control_channel=25)
+    assert ms.control_channel == 25
     with pytest.raises(ValueError):
-        multi.Multiset(number=0, name="X", parts=_make_parts(), control_channel=16)
+        multi.Multiset(number=0, name="X", parts=_make_parts(), control_channel=128)

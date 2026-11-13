@@ -1181,7 +1181,7 @@ class FxScreen(ModalScreen[None]):
         fx_index = desc[1]
         block = self._block
         if kind == "control":
-            return str((self._control_channel or 0) + 1)
+            return f"{self._control_channel or 0} (raw)"
         if kind == "routing":
             return "series" if block.series else "parallel"
         if kind == "type":

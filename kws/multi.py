@@ -36,12 +36,13 @@ The layout was derived rather than read, and the arithmetic is the evidence:
 2752`` is exactly where the names begin.
 
 Record layout (86 bytes):
-    byte 0        FX control channel (stored raw 0-15; panel shows 1-16)
+    byte 0        FX control byte (raw; low bits channel, high bits flags)
     bytes 1-21    the 21-byte FX block (kws.fx.FxBlock)
     bytes 22-85   16 channels x 4 bytes
 
-The control channel's stored convention (0-15) is to be confirmed on
-hardware; the FX block is the same codec as a performance's.
+The control byte's stored convention (a value such as 0x19 is seen) is
+to be confirmed on hardware; the FX block is the same codec as a
+performance's.
 """
 
 from __future__ import annotations
@@ -96,15 +97,17 @@ class Multiset:
     number: int
     name: str
     parts: tuple[Part, ...]
-    #: FX control channel (stored raw 0-15; panel shows 1-16).
+    #: Stored byte 0 of the record. Real dumps carry values such as 0x19
+    #: (25), so it is not a plain 0-15 channel: the low bits look like the
+    #: channel and the high bits carry flags. Kept raw until measured.
     control_channel: int = 0
     #: The Multiset's own 21-byte FX block.
     fx: FxBlock = field(default_factory=FxBlock.empty)
 
     def __post_init__(self) -> None:
-        if not (0 <= self.control_channel <= 15):
+        if not (0 <= self.control_channel <= 127):
             raise ValueError(
-                f"control channel must be 0-15, not {self.control_channel}"
+                f"control channel must be a 7-bit byte, not {self.control_channel}"
             )
 
     @property
