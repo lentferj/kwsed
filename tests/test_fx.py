@@ -16,6 +16,7 @@ from kws.fx import (
 from kws.fx_tables import (
     FX_GROUP,
     FX_INDICES,
+    FX_PARAM_LABELS,
     FX_PCL_LIST,
     FX_PRESETS,
 )
@@ -286,3 +287,28 @@ def test_extended_mode_resolves_both_processors():
         assert fb.fx1.type == 47 + nibble
         assert fb.fx2.type == 47 + nibble
         assert fb.to_bytes() == data
+
+
+def test_footswitch_labels_present():
+    expected = {
+        (8, 7): ("Footswitch", 0, 1, None),
+        (9, 9): ("Footswitch", 0, 1, None),
+        (10, 7): ("Footswitch", 0, 1, None),
+        (12, 9): ("Footswitch", 0, 1, None),
+        (13, 9): ("Footswitch", 0, 1, None),
+        (14, 6): ("Footswitch", 0, 1, None),
+    }
+    for key, want in expected.items():
+        assert FX_PARAM_LABELS.get(key) == want, key
+
+
+def test_footswitch_does_not_disturb_neighbours():
+    assert FX_PARAM_LABELS[(8, 6)] == ("Delay Right", 0, 500, None)
+    assert FX_PARAM_LABELS[(8, 8)] == ("EQ Low", -12, 12, None)
+    assert FX_PARAM_LABELS[(9, 8)] == ("Delay Right", 0, 500, None)
+    assert FX_PARAM_LABELS[(10, 6)] == ("Output Mix", -10, 10, None)
+    assert FX_PARAM_LABELS[(10, 8)] == ("EQ Low", -12, 12, None)
+    assert FX_PARAM_LABELS[(12, 8)] == ("Output Level", -15, 15, None)
+    assert FX_PARAM_LABELS[(12, 10)] == ("EQ Low", -12, 12, None)
+    assert FX_PARAM_LABELS[(13, 8)] == ("Feedback", -100, 100, None)
+    assert FX_PARAM_LABELS[(14, 5)] == ("Acceleration", 1, 15, None)
