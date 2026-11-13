@@ -2326,17 +2326,20 @@ class BankCopyScreen(ModalScreen[Optional[Dict[str, Any]]]):
         # bury the names that actually matter. Performances and patches are
         # numbered in their own banks, so they get their own lines rather
         # than one run-on list where patch 0 would read as performance 50.
-        perfs = [record for record in source.performances if any(record)]
-        patches = [record for record in source.patches if any(record)]
+        perfs = [
+            (i, record) for i, record in enumerate(source.performances) if any(record)
+        ]
+        patches = [
+            (i, record) for i, record in enumerate(source.patches) if any(record)
+        ]
         if perfs:
             shown = ", ".join(
-                f"{n:03d} {m.decode_name(record)}" for n, record in enumerate(perfs[:5])
+                f"{i:03d} {m.decode_name(record)}" for i, record in perfs[:5]
             )
             lines.append(f"replacing   perf  {shown}{' ...' if len(perfs) > 5 else ''}")
         if patches:
             shown = ", ".join(
-                f"{n:03d} {m.decode_name(record)}"
-                for n, record in enumerate(patches[:3])
+                f"{i:03d} {m.decode_name(record)}" for i, record in patches[:3]
             )
             lines.append(
                 f"            patch {shown}{' ...' if len(patches) > 3 else ''}"

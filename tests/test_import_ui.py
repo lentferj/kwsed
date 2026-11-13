@@ -1193,6 +1193,39 @@ class TestBankCopyUi:
             assert "disarmed" in state
             assert "method changed" in state
 
+    def test_describe_shows_real_slot_numbers_with_holes(self, tmp_path: Any) -> None:
+        """Holes in the destination must not renumber the listed slots.
+
+        The dialog names what will be replaced, so ``001`` must mean slot
+        1 even when slot 0 is empty.
+        """
+        app = _make_app(tmp_path)
+        source = banks.bank("RAM1")
+        destination = banks.bank("CARD")
+
+        def _named(size: int, name: str) -> bytes:
+            return bytes(m.encode_name(name)) + bytes(size - m.NAME_LEN)
+
+        perfs = [bytes(r.PERFORMANCE_SIZE) for _ in range(50)]
+        perfs[1] = _named(r.PERFORMANCE_SIZE, "PerfOne")
+        perfs[3] = _named(r.PERFORMANCE_SIZE, "PerfThree")
+        patches = [bytes(r.PATCH_SIZE) for _ in range(35)]
+        patches[2] = _named(r.PATCH_SIZE, "PatchTwo")
+        patches[5] = _named(r.PATCH_SIZE, "PatchFive")
+        app._sources[destination.id] = deps.Source(
+            scope_id=destination.id,
+            performances=perfs,
+            patches=patches,
+            waveseq=None,
+        )
+        text = BankCopyScreen(app, source, destination)._describe()
+        assert "001 PerfOne" in text
+        assert "003 PerfThree" in text
+        assert "000 PerfOne" not in text
+        assert "002 PatchTwo" in text
+        assert "005 PatchFive" in text
+        assert "000 PatchTwo" not in text
+
     @pytest.mark.asyncio
     async def test_fire_with_the_device_method(self, tmp_path: Any) -> None:
         app = _make_app(tmp_path)
