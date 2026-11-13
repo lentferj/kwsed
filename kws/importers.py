@@ -169,15 +169,19 @@ def read_file(path: str) -> List[ImportedBank]:  # noqa: C901
     sniffed = _sniff_format(raw)
     if sniffed == "sqs":
         packets = read_sqs_file(path)
+        if not packets:
+            raise UnsupportedFormat("no Wavestation messages found")
         return assemble(packets, path, "sqs")
     if sniffed == "midi":
         packets = read_midi_file(path)
+        if not packets:
+            raise UnsupportedFormat("no Wavestation messages found")
         return assemble(packets, path, "midi")
     if sniffed == "sysex":
         packets = read_syx_file(path)
+        if not packets:
+            raise UnsupportedFormat("no Wavestation messages found")
         return assemble(packets, path, "sysex")
-    if sniffed == "lib":
-        return read_lib_file(path)
     raise UnsupportedFormat(f"unsupported format {sniffed}")
 
 

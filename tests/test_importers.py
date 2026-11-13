@@ -734,3 +734,36 @@ def test_fat12_image_without_banks_is_refused(tmp_path):
     path.write_bytes(make_fat12_image({"README.TXT": b"nothing"}))
     with pytest.raises(importers.UnsupportedFormat, match="no Wavestation"):
         importers.read_file(str(path))
+
+
+def test_sniff_fallback_refuses_foreign_korg_sysex(tmp_path):
+    # Extension-less file holding only foreign Korg SysEx (X5 family:
+    # F0 42 3n 30 ...) — no Wavestation messages.
+    path = tmp_path / "mystery"
+    path.write_bytes(bytes([0xF0, 0x42, 0x30, 0x30, 0x41, 0x00, 0x01, 0xF7]))
+    with pytest.raises(
+        importers.UnsupportedFormat, match="no Wavestation messages found"
+    ):
+        importers.read_file(str(path))
+
+
+def test_sniff_fallback_refuses_midi_without_dumps(tmp_path):
+    header = b"MThd" + struct.pack(">IHHH", 6, 0, 1, 480)
+    track = b"MTrk" + struct.pack(">I", 4) + bytes([0, 0xFF, 0x2F, 0])
+    path = tmp_path / "mystery"
+    path.write_bytes(header + track)
+    with pytest.raises(
+        importers.UnsupportedFormat, match="no Wavestation messages found"
+    ):
+        importers.read_file(str(path))
+
+
+def test_sniff_fallback_imports_extensionless_wavestation_bank(tmp_path):
+    perfs = b"".join(_bulk_perf_bytes() for _ in range(50))
+    frame = m.frame_bulk(m.Function.ALL_PERFORMANCE_DUMP, 0, perfs)
+    path = tmp_path / "mystery"
+    path.write_bytes(frame)
+    out = importers.read_file(str(path))
+    assert len(out) == 1
+    assert out[0].scope == "RAM1"
+    assert m.decode_name(out[0].source.performances[0]) == "Glass Meridian"
