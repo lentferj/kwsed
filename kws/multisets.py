@@ -69,6 +69,9 @@ def default_path() -> str:
     return os.path.join(favorites.data_dir(), FILE_NAME)
 
 
+# The record digest is archival metadata for forensics, deliberately NOT
+# compared by check(): the check compares what the Multiset points at
+# (bank/performance/name per channel), not its full content.
 def record_digest(record: bytes) -> str:
     """The digest of one 86-byte Multiset record."""
     return sha256(bytes(record)).hexdigest()
@@ -96,6 +99,9 @@ class MultiSnapshot:
     number: int
     name: str
     recorded_at: str
+    #: Archival metadata for forensics, deliberately NOT compared by
+    #: check(): the check compares what the Multiset points at
+    #: (bank/performance/name per channel), not its full content.
     digest: str
     channels: Dict[int, ChannelBinding] = field(default_factory=dict)
 
@@ -106,7 +112,7 @@ class Mismatch:
 
     multi: int
     channel: int  #: 0-15
-    kind: str  #: "card" or "ram"
+    kind: str  #: "stale", "card" or "ram" here; "mixed" is added by kwsed/app.py
     text: str
 
 
