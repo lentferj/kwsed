@@ -296,6 +296,150 @@ def _clip(text: str, limit: int = 26) -> str:
     return text[: limit - 1] + "…"
 
 
+@dataclass(frozen=True)
+class PerformanceRow:
+    """One row of the performance picker."""
+
+    bank: int  #: the Multiset part's bank, as a System Exclusive byte
+    number: int
+    name: str
+    favourite: bool
+    rating: int
+
+
+class PerformancePickerScreen(ModalScreen[Optional[Tuple[int, int]]]):
+    """Choose a Performance for a Multiset channel, with the browser's filters.
+
+    Rows are every Performance in every bank. ``F`` cycles all performances
+    and the favourites, ``V`` applies the star-rating filter, and Enter
+    returns ``(bank sysex byte, performance number)``. Favourites are shown
+    with a star and their rating; toggling one is the browser's job.
+    """
+
+    DEFAULT_CSS = """
+    PerformancePickerScreen { align: center middle; }
+    PerformancePickerScreen > Vertical {
+        width: 84; height: 80%; border: thick $accent;
+        background: $surface; padding: 1 2;
+    }
+    PerformancePickerScreen DataTable { height: 1fr; }
+    PerformancePickerScreen .hint { color: $text-muted; }
+    """
+
+    BINDINGS = [
+        Binding("escape", "close", "Cancel"),
+        Binding("q", "close", "Cancel"),
+        Binding("enter", "select", "Select", priority=True),
+        Binding("F", "cycle_view", "Favourites view"),
+        Binding("V", "rating_filter", "Rating filter"),
+    ]
+
+    def __init__(
+        self,
+        rows: Sequence[Any],
+        *,
+        title: str = "Choose a Performance",
+        current: Optional[Tuple[int, int]] = None,
+    ) -> None:
+        super().__init__()
+        self._rows = list(rows)
+        self._title = title
+        self._current = current
+        self._favourites_only = False
+        self._rating: Optional[RatingFilter] = None
+        self._visible: List[Any] = []
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Label(self._title, id="perf-picker-title")
+            yield DataTable(id="perf-picker", cursor_type="row", zebra_stripes=True)
+            yield Static("", id="perf-picker-state")
+            yield Static(
+                "[dim]↑/↓ move · enter chooses · F favourites · "
+                "V rating filter · esc cancels[/dim]",
+                classes="hint",
+            )
+
+    def on_mount(self) -> None:
+        table = self.query_one("#perf-picker", DataTable)
+        table.add_column("bank", key="bank")
+        table.add_column("perf", key="perf")
+        table.add_column("name", key="name")
+        table.add_column("fav", key="fav")
+        table.add_column("rating", key="rating")
+        self._populate()
+        table.focus()
+
+    def _filtered(self) -> List[Any]:
+        rows = self._rows
+        if self._favourites_only:
+            rows = [row for row in rows if row.favourite]
+        if self._rating is not None and self._rating.stars:
+            if self._rating.at_least:
+                rows = [row for row in rows if row.rating >= self._rating.stars]
+            else:
+                rows = [row for row in rows if row.rating == self._rating.stars]
+        return list(rows)
+
+    def _populate(self) -> None:
+        table = self.query_one("#perf-picker", DataTable)
+        where = table.cursor_row
+        table.clear()
+        self._visible = self._filtered()
+        for row in self._visible:
+            table.add_row(
+                _bank_label(row.bank),
+                f"{row.number:02d}",
+                row.name,
+                "★" if row.favourite else "",
+                str(row.rating) if row.rating else "",
+                key=f"{row.bank}:{row.number}",
+            )
+        if self._current is not None:
+            try:
+                table.move_cursor(
+                    row=self._visible.index(
+                        next(
+                            row
+                            for row in self._visible
+                            if (row.bank, row.number) == self._current
+                        )
+                    )
+                )
+            except (StopIteration, ValueError):
+                pass
+        elif where is not None and self._visible:
+            table.move_cursor(row=max(0, min(where, len(self._visible) - 1)))
+        state = self.query_one("#perf-picker-state", Static)
+        state.update(f"{len(self._visible)} performances")
+
+    def action_cycle_view(self) -> None:
+        self._favourites_only = not self._favourites_only
+        self._populate()
+
+    def action_rating_filter(self) -> None:
+        current = self._rating or RatingFilter(stars=0, at_least=False)
+
+        def apply(value: Optional[RatingFilter]) -> None:
+            if value is None:
+                return
+            self._rating = None if not value.stars else value
+            self._populate()
+
+        self.app.push_screen(RatingFilterScreen(current), apply)
+
+    def action_select(self) -> None:
+        table = self.query_one("#perf-picker", DataTable)
+        row = table.cursor_row
+        if row is None or not (0 <= row < len(self._visible)):
+            return
+        chosen = self._visible[row]
+        self.dismiss((chosen.bank, chosen.number))
+
+    def action_close(self) -> None:
+        self.dismiss(None)
+
+
 class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
     """Edit one Multiset inside the 32-record Multi Mode Setup. **Destructive.**"""
 
@@ -338,6 +482,7 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
         physical: Optional[Dict[str, Any]] = None,
         resident_scope: Optional[str] = None,
         on_edit_fx: Optional[Callable[[Any], None]] = None,
+        favorites: Any = None,
     ) -> None:
         super().__init__()
         # A copy: the original list and its entries are not mutated.
@@ -359,6 +504,7 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
         self._armed = False
         self._table: Optional[DataTable[Any]] = None
         self._on_edit_fx = on_edit_fx
+        self._favorites = favorites
 
     # --- helpers ----------------------------------------------------------
 
@@ -479,8 +625,9 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
         with Vertical():
             yield Label(self._title(), id="multi-edit-title")
             yield Static(
-                "⏎ edits the cell · + / - nudge · space on/off · "
-                "b bank · s stage · n rename · a arm, w write · esc cancels",
+                "⏎ chooses the performance (favourites/ratings) · + / - nudge · "
+                "space on/off · b bank · s stage · n rename · x FX · "
+                "a arm, w write · esc cancels",
                 classes="hint",
             )
             table: DataTable[Any] = DataTable(id="multi-edit-table", cursor_type="cell")
@@ -620,37 +767,65 @@ class MultiEditScreen(ModalScreen[Optional[Dict[str, Any]]]):
         elif col == "on":
             self.action_toggle()
 
+    def _performance_rows(self) -> List[PerformanceRow]:
+        from kws import banks as _banks
+
+        rows: List[PerformanceRow] = []
+        for bank in _banks.BANKS:
+            scope = bank.id
+            for number in range(_banks.PERFORMANCES_PER_BANK):
+                name = ""
+                if self._catalog is not None:
+                    try:
+                        name = str(
+                            self._catalog.display_name(
+                                scope, number, _banks.Kind.PERFORMANCE
+                            )
+                            or ""
+                        )
+                    except Exception:
+                        name = ""
+                favourite = False
+                rating = 0
+                if self._favorites is not None:
+                    try:
+                        fav = self._favorites.get(
+                            favorite_bank_id(scope, _banks.Kind.PERFORMANCE),
+                            number,
+                        )
+                    except Exception:
+                        fav = None
+                    if fav is not None:
+                        favourite = True
+                        rating = int(fav.rating or 0)
+                rows.append(PerformanceRow(bank.sysex, number, name, favourite, rating))
+        return rows
+
+    def _perf_chosen(self, index: int, choice: Optional[Tuple[int, int]]) -> None:
+        if choice is None:
+            return
+        from dataclasses import replace as _replace
+        from kws import banks as _banks
+
+        bank_sysex, number = choice
+        part = self._ms().parts[index]
+        new_part = _replace(part, bank=bank_sysex, performance=number)
+        if bank_sysex == _banks.bank("CARD").sysex:
+            self._desired_scopes[index] = "CARD"
+        else:
+            self._desired_scopes.pop(index, None)
+        self._set_part(index, new_part)
+        self._status(f"channel {index + 1:02d}: {_bank_label(bank_sysex)} {number:02d}")
+
     def _edit_perf(self, index: int) -> None:
-        ms = self._ms()
-        part = ms.parts[index]
-        current = str(part.performance) if part.used else "off"
-
-        def done(text: Optional[str]) -> None:
-            if text is None:
-                return
-            raw = text.strip().lower()
-            if raw in ("", "off", "unused", "no"):
-                from dataclasses import replace as _replace
-
-                new_part = _replace(part, performance=50)
-                self._set_part(index, new_part)
-                return
-            try:
-                value = int(raw)
-            except ValueError:
-                self._status(f"performance must be 0-49 or off, not {text!r}")
-                return
-            if value < 0 or value > 49:
-                self._status("performance must be 0-49 or off")
-                return
-            from dataclasses import replace as _replace
-
-            new_part = _replace(part, performance=value)
-            self._set_part(index, new_part)
-
+        part = self._ms().parts[index]
         self.app.push_screen(
-            PromptScreen("performance (0-49, off/empty unused):", current),
-            done,
+            PerformancePickerScreen(
+                self._performance_rows(),
+                title=f"Performance for channel {index + 1:02d}",
+                current=(part.bank, part.performance) if part.used else None,
+            ),
+            lambda choice: self._perf_chosen(index, choice),
         )
 
     def _edit_level(self, index: int) -> None:
@@ -8532,6 +8707,7 @@ class KwsedApp(App[None]):
                 archive=getattr(self, "_archive", None),
                 physical=getattr(self, "_physical", None),
                 on_edit_fx=self._edit_multiset_fx,
+                favorites=getattr(self, "favorites", None),
             )
         )
 
@@ -8987,7 +9163,10 @@ switch the HCard.
       the card; a Multiset refers to performances, including card ones.
       ⏎ on a Multiset row makes it current on the unit and switches the unit
       to MULTI mode; ⏎ on a Performance switches it back to performance
-      (POLY) mode. e edits the setup as a 16-channel table.
+      (POLY) mode. e edits the setup as a 16-channel table; in that editor
+      ⏎ on a channel's performance opens the performance picker (favourites
+      with F, rating filter with V), and x opens the Multiset's own FX
+      block. Both writes are one fenced Multi Mode Setup write.
   f   favourite this slot; F steps all -> this bank's -> every favourite
   t   tags; n   note (both hang off a favourite, so press f first)
   V   filter the list by favourite rating

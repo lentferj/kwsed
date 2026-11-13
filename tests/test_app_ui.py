@@ -2893,3 +2893,78 @@ class TestMultisetFx:
         assert all(len(line) <= 56 for line in lines)
         assert "factory package" in FX_TYPE_WARNING
         assert "reinterprets" in FX_TYPE_WARNING
+
+
+class TestPerformancePicker:
+    @staticmethod
+    def _rows() -> Any:
+        from kwsed.app import PerformanceRow
+
+        return [
+            PerformanceRow(banks.bank("RAM1").sysex, 0, "P0", True, 5),
+            PerformanceRow(banks.bank("RAM1").sysex, 1, "P1", False, 0),
+            PerformanceRow(banks.bank("RAM2").sysex, 2, "P2", True, 3),
+        ]
+
+    async def test_it_lists_and_filters_favourites(self, app: Any) -> None:
+        from kwsed.app import PerformancePickerScreen
+
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            screen = PerformancePickerScreen(self._rows())
+            app.push_screen(screen)
+            await settle(pilot, 3)
+            table = screen.query_one("#perf-picker", DataTable)
+            assert table.row_count == 3
+            await pilot.press("F")
+            await settle(pilot, 2)
+            assert table.row_count == 2
+            assert "2 performances" in str(
+                screen.query_one("#perf-picker-state", Static).content
+            )
+
+    async def test_the_rating_filter_narrows_the_rows(self, app: Any) -> None:
+        from kwsed.app import PerformancePickerScreen
+        from vinsynlib.ui.modals import RatingFilter
+
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            screen = PerformancePickerScreen(self._rows())
+            app.push_screen(screen)
+            await settle(pilot, 3)
+            screen._rating = RatingFilter(stars=4, at_least=True)
+            screen._populate()
+            table = screen.query_one("#perf-picker", DataTable)
+            assert table.row_count == 1, "only P0 is rated 5"
+
+    async def test_enter_returns_the_chosen_bank_and_number(self, app: Any) -> None:
+        from kwsed.app import PerformancePickerScreen
+
+        results: list[Any] = []
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.push_screen(PerformancePickerScreen(self._rows()), results.append)
+            await settle(pilot, 3)
+            await pilot.press("enter")
+            await settle(pilot, 3)
+        assert results == [(banks.bank("RAM1").sysex, 0)]
+
+    async def test_the_multi_editor_opens_the_picker_and_applies_it(
+        self, app: Any
+    ) -> None:
+        from kwsed.app import PerformancePickerScreen
+
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.action_multi()
+            await settle(pilot, 30)
+            app.action_edit_multi()
+            await settle(pilot, 5)
+            editor = app.screen
+            editor._edit_perf(0)
+            await settle(pilot, 5)
+            assert isinstance(app.screen, PerformancePickerScreen)
+            editor._perf_chosen(0, (banks.bank("RAM2").sysex, 4))
+            part = editor._ms().parts[0]
+            assert part.bank == banks.bank("RAM2").sysex
+            assert part.performance == 4
