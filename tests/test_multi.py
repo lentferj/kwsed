@@ -97,3 +97,15 @@ def test_the_head_byte_is_not_the_control_channel():
     """Parameter 29 is global-addressed but edits the current Multiset."""
     ms = multi.Multiset(number=0, name="X", parts=_make_parts(), header_byte=25)
     assert ms.header_byte == 25
+
+
+def test_the_control_channel_is_the_last_record_byte():
+    """Measured 2026-11-13: MULTI:2 set to 7 stored 6 at offset 85."""
+    data = bytearray(_synthetic_dump())
+    data[1 * multi.MULTISET_SIZE + 85] = 6
+    sets = multi.parse(bytes(data))
+    assert sets[1].control_channel == 6
+    assert sets[1].header_byte == data[1 * multi.MULTISET_SIZE]
+    assert sets[1].parts[15].flag == 0, "channel 16 has no flag slot"
+    encoded = multi.encode(sets)
+    assert encoded[1 * multi.MULTISET_SIZE + 85] == 6

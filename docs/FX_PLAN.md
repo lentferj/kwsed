@@ -43,15 +43,18 @@ A **Multiset has its own FX block, and it is the same 21 bytes.** Korg's
 Multi Mode Setup structure is documented as:
 
 ```
-byte 0        FX control channel
+byte 0        FX head byte (raw; meaning still open)
 bytes 1-21    the effects block (21 bytes)
-bytes 22-85   16 channels x 4 bytes
+bytes 22-85   16 parts x 4 bytes; the 16th part's fourth byte is the
+              FX control channel (channel - 1)
 ```
 
 which is exactly the arithmetic `kws/multi.py` already uses
-(`PART_BASE = 22`, `MULTISET_SIZE = 86`, names at 2752). kwsed currently
-keeps those 22 bytes opaque (`Multiset.settings`): the data survives a
-round trip, but it cannot be read or edited.
+(`PART_BASE = 22`, `MULTISET_SIZE = 86`, names at 2752). Measured on the
+bench 2026-11-13: the control channel is the **last byte of the record**,
+stored as channel - 1; the panel's parameter-change echo is parameter 29
+(`MULTISET_FX_CONTROL_CHAN`), a global address that edits the current
+Multiset's value. Byte 0 of the head is not the control channel.
 
 **Which pair is heard depends on the MIDI mode.** In OMNI/POLY the
 performance's effects are heard; in MULTI/MONO the Multiset's own effects

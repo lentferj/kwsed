@@ -1021,6 +1021,7 @@ class FxScreen(ModalScreen[None]):
         gate_armed: Optional[bool] = None,
         gate: Any = None,
         subject: str = "performance",
+        control_channel: Optional[int] = None,
     ) -> None:
         super().__init__()
         self._block = block
@@ -1030,6 +1031,7 @@ class FxScreen(ModalScreen[None]):
         self._gate_armed = gate_armed
         self._gate = gate
         self._subject = subject
+        self._control_channel = control_channel
         self._pending_type: Optional[Tuple[int, int]] = None
         self._rows: list[tuple[Any, ...]] = self._descriptors(block)
         self.rows = self._rows
@@ -1038,6 +1040,8 @@ class FxScreen(ModalScreen[None]):
 
     def _descriptors(self, block: FxBlock) -> list[tuple[Any, ...]]:
         rows: list[tuple[Any, ...]] = []
+        if self._control_channel is not None:
+            rows.append(("control", None, "control"))
         rows.append(("routing", None, "series"))
         rows.append(("type", 0, "type"))
         for param in block.fx1.rows():
@@ -1155,6 +1159,8 @@ class FxScreen(ModalScreen[None]):
     def _label(self, desc: Any) -> str:
         kind = desc[0]
         fx_index = desc[1]
+        if kind == "control":
+            return "FX control channel"
         if kind == "routing":
             return "routing"
         if kind == "type":
@@ -1174,6 +1180,9 @@ class FxScreen(ModalScreen[None]):
         kind = desc[0]
         fx_index = desc[1]
         block = self._block
+        if kind == "control":
+            value = self._control_channel or 0
+            return str(value + 1) if 0 <= value < 16 else f"{value} (raw)"
         if kind == "routing":
             return "series" if block.series else "parallel"
         if kind == "type":
@@ -8541,6 +8550,7 @@ class KwsedApp(App[None]):
                 on_write,
                 gate_armed=self._write_gate.armed,
                 subject=f"Multiset {multiset.number:02d}",
+                control_channel=multiset.control_channel,
             )
         )
 

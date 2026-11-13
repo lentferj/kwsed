@@ -36,13 +36,17 @@ The layout was derived rather than read, and the arithmetic is the evidence:
 2752`` is exactly where the names begin.
 
 Record layout (86 bytes):
-    byte 0        first byte of the FX head (raw; not the control channel)
+    byte 0        first byte of the FX head (raw; meaning still open)
     bytes 1-21    the 21-byte FX block (kws.fx.FxBlock)
-    bytes 22-85   16 channels x 4 bytes
+    bytes 22-85   16 parts x 4 bytes, except that the 16th part's fourth
+                  byte is the FX control channel, not a flag
 
-Byte 0 is not the FX control channel: that is global parameter 29,
-measured on the bench 2026-11-13. Byte 0 is part of the copied FX head;
-its meaning is still open.
+The FX control channel is **the last byte of the record**, stored as
+channel - 1 (0 = channel 1, 15 = channel 16). Measured on the bench
+2026-11-13: MULTI:2 set to 7 stored 6, set to 16 stored 15; the panel's
+parameter-change echo is parameter 29 (``MULTISET_FX_CONTROL_CHAN``), a
+global *address* that edits the current Multiset's value. KB's stored
+value is still to be measured.
 """
 
 from __future__ import annotations
@@ -106,11 +110,21 @@ class Multiset:
     header_byte: int = 0
     #: The Multiset's own 21-byte FX block.
     fx: FxBlock = field(default_factory=FxBlock.empty)
+    #: The FX control channel, stored in the **last byte** of the record
+    #: (offset 85) as channel - 1. Measured on the bench 2026-11-13:
+    #: MULTI:2 set to 7 stored 6, set to 16 stored 15. The 16th part's
+    #: fourth byte is this field, not a flag. KB's stored value is still
+    #: to be measured; the raw byte is preserved.
+    control_channel: int = 0
 
     def __post_init__(self) -> None:
         if not (0 <= self.header_byte <= 127):
             raise ValueError(
                 f"header byte must be a 7-bit byte, not {self.header_byte}"
+            )
+        if not (0 <= self.control_channel <= 127):
+            raise ValueError(
+                f"control channel must be a 7-bit byte, not {self.control_channel}"
             )
 
     @property
@@ -153,7 +167,9 @@ def parse(data: Sequence[int]) -> List[Multiset]:
                     bank=data[at],
                     performance=data[at + 1],
                     level=data[at + 2],
-                    flag=data[at + 3],
+                    # The 16th part's fourth byte is the Multiset's FX
+                    # control channel, not a flag.
+                    flag=data[at + 3] if channel < CHANNELS - 1 else 0,
                 )
             )
         at = NAME_BASE + number * NAME_SIZE
@@ -164,17 +180,20 @@ def parse(data: Sequence[int]) -> List[Multiset]:
                 parts=tuple(parts),
                 header_byte=data[base],
                 fx=FxBlock.from_bytes(bytes(data[base + 1 : base + 22])),
+                control_channel=int(data[base + MULTISET_SIZE - 1]),
             )
         )
     return out
 
 
-def encode(multisets: Sequence[Multiset]) -> bytes:
+def encode(multisets: Sequence[Multiset]) -> bytes:  # noqa: C901
     """Encode 32 Multisets back into the plain data of a 0x62 dump.
 
-    The first :data:`PART_BASE` bytes of each Multiset's record are not
-    modelled but are preserved from the parsed dump (see
-    :attr:`Multiset.settings`); the four bytes of each of the 16 channels
+    Byte 0 is preserved raw, bytes 1-21 are the FX block, and the last
+    byte is the FX control channel (channel - 1); the 16th part's flag
+    slot is that control channel. (The first :data:`PART_BASE` bytes of
+    each Multiset's record are otherwise preserved from the parsed dump; see
+    :attr:`Multiset.header_byte`); the four bytes of each of the 16 channels
     and the name slot are written from the Multiset. Round-trips through
     :func:`parse` byte-identically when nothing is edited.
     """
@@ -194,7 +213,9 @@ def encode(multisets: Sequence[Multiset]) -> bytes:
             data[at] = part.bank & 0x7F
             data[at + 1] = part.performance & 0x7F
             data[at + 2] = part.level & 0x7F
-            data[at + 3] = part.flag & 0x7F
+            if part.channel < CHANNELS:
+                data[at + 3] = part.flag & 0x7F
+        data[base + MULTISET_SIZE - 1] = entry.control_channel & 0x7F
         at = NAME_BASE + number * NAME_SIZE
         encoded_name = []
         for char in entry.name:
