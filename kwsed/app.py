@@ -4138,6 +4138,7 @@ class KwsedApp(App[None]):
                 waveseq=written["waveseq"],
             )
             self._refresh_written_bank(destination.id, built)
+            self._refresh_multi_checks()
             if destination.id == "CARD":
                 self._adopt_copied_card(written)
         try:
@@ -4219,6 +4220,7 @@ class KwsedApp(App[None]):
                 pass
         if getattr(self, "_screen_stack", None):
             self._refresh_card_row(number)
+            self._refresh_multi_checks()
 
     def _adopt_copied_physical(
         self,

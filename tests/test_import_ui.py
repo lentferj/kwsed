@@ -1409,3 +1409,91 @@ class TestBankCopyUi:
             _decoded_bank(device, "CARD", m.Function.ALL_WAVESEQ_DUMP)
             == before["waveseq"]
         )
+
+    @pytest.mark.asyncio
+    async def test_a_ram_copy_rechecks_the_multiset_catalog(
+        self, tmp_path: Any
+    ) -> None:
+        """Copying over RAM 1 re-runs the Multiset check at once.
+
+        A Multiset recorded against RAM 1 must show its new mismatch as
+        soon as the copy lands, with no fresh device read: the written
+        bytes already are the post-write state.
+        """
+        from kws import multi as multi_mod
+        from kws import multisets as multi_snap
+
+        app = _make_app(tmp_path)
+        source = banks.bank("RAM2")
+        destination = banks.bank("RAM1")
+        parts = tuple(
+            multi_mod.Part(
+                channel=index + 1,
+                bank=destination.sysex,
+                performance=0 if index == 0 else 50,
+                level=100,
+                flag=0,
+            )
+            for index in range(16)
+        )
+        ms = multi_mod.Multiset(number=0, name="M", parts=parts)
+        record = multi_mod.encode([ms])[: multi_mod.MULTISET_SIZE]
+        app._multisets = [ms]
+        app._multi_catalog[0] = multi_snap.build_snapshot(
+            ms,
+            record,
+            card_scope_for=lambda channel: None,
+            name_for=lambda bank, number, scope: "Warm Pad",
+            card_digest_for=lambda scope: "",
+            recorded_at="2026-11-13T00:00:00+00:00",
+        )
+        app.catalog.set_live_name("RAM1", 0, "Warm Pad", banks.Kind.PERFORMANCE)
+        app._sources["RAM1"] = deps.Source(
+            scope_id="RAM1",
+            performances=[bytes(r.PERFORMANCE_SIZE)] * 50,
+            patches=[],
+            waveseq=None,
+        )
+        assert app._check_multi_snapshots([ms]) == {}
+        perfs = bytearray(50 * r.PERFORMANCE_SIZE)
+        perfs[0:16] = bytes(m.encode_name("Something Else"))
+        written = {
+            "performances": bytes(perfs),
+            "patches": bytes(35 * r.PATCH_SIZE),
+            "waveseq": bytes(r.WAVESEQ_BANK_SIZE),
+        }
+        reads: list[Any] = []
+        failures: list[Any] = []
+        done: list[Any] = []
+        screen = SimpleNamespace(
+            _write_done=done.append,
+            _write_failed=failures.append,
+        )
+        original_read_raw = app.device.read_raw
+
+        def _no_read(*args: Any, **kwargs: Any) -> Any:
+            reads.append((args, kwargs))
+            raise AssertionError("a bank copy must not re-read the device")
+
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app.device.read_raw = _no_read
+            try:
+                app._copy_bank_done(
+                    {"verified": True, "method": "fence", "written": written},
+                    None,
+                    source,
+                    destination,
+                    screen,
+                )
+                await pilot.pause()
+            finally:
+                app.device.read_raw = original_read_raw
+        assert failures == []
+        assert reads == [], "the check re-runs from the written bytes, not MIDI"
+        assert done and done[0]["ok"] is True
+        assert 0 in app._multi_mismatches
+        mismatch = app._multi_mismatches[0][0]
+        assert mismatch.kind == "ram"
+        assert "Warm Pad" in mismatch.text
+        assert "Something Else" in mismatch.text
