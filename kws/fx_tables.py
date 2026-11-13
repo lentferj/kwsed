@@ -378,7 +378,11 @@ FX_PCL_LIST: Tuple[Tuple[FxPclEntry, ...], ...] = (
         FxPclEntry(5, 0, 8, 4, 0),
         # The pre-delay high bits sit above the 8-bit low field; the
         # transcribed source has parambit 0, which collides with the low
-        # field and corrupts decode/encode.
+        # field and corrupts decode/encode. The typo is Korg's own (the
+        # 1992 "Effects Parameters SYSEX" document, youngmonkey.ca mirror,
+        # pcl_39/40), but the unit's firmware packs at bit 8: ROM 9 32
+        # stores pre-delay 257 as byte5=0x01 + byte2 bits 2-3=01, and the
+        # same document's epm_39 default (150) needs the field above bit 7.
         FxPclEntry(2, 2, 2, 4, 8),
         FxPclEntry(6, 0, 7, 5, 0),
         FxPclEntry(7, 0, 7, 6, 0),
