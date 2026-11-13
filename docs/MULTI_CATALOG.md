@@ -82,6 +82,29 @@ longer match, and the editor's status line names the first mismatches. An
 uncached RAM bank or an unknown card is **not** evidence of a change and is
 silent; read the bank (`r`/`S`) if you want the RAM check.
 
+The check also re-runs by itself after `C` captures a different Card bank,
+without a fresh Multi read: the RAM setup has not moved, but the card the
+Multiset expects is no longer the one in the slot. The affected rows turn
+red immediately and the status after the capture says how many channels
+changed.
+
+## One slot, several cards
+
+A Multiset can record channels that mean different card banks (for example
+channel 4 from Card 24 and channels 5-6 from Card 25). This is archive
+metadata: the Wavestation has one CARD slot and stores only performance
+numbers, so at play time every card channel uses whichever bank is active.
+The editor says `MIXED CARDS`, the row is marked `mixed`, and `w` asks for
+confirmation before writing such a Multiset. It does **not** collapse the
+recorded scopes onto the active card: an untouched channel keeps the card
+it was recorded against.
+
+To make a mixed Multiset play as intended, press `s` first. Staging copies
+each channel's performance from its recorded card into RAM, rewrites the
+Multiset to point at those RAM slots, and then `w` is safe. Writing without
+staging keeps the intent in the catalog but the unit will play the active
+card; the channels that no longer match stay red.
+
 ## Using the backup to rebuild
 
 ```sh
