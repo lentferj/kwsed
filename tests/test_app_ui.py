@@ -2880,3 +2880,12 @@ class TestMultisetFx:
             await settle(pilot, 10)
             assert calls == []
             assert isinstance(app.screen, FxScreen)
+
+    def test_the_type_warning_fits_the_confirm_dialog(self) -> None:
+        from kwsed.app import FX_TYPE_WARNING
+
+        lines = FX_TYPE_WARNING.splitlines()
+        assert len(lines) > 1, "a single long line is truncated by the dialog"
+        assert all(len(line) <= 56 for line in lines)
+        assert "factory package" in FX_TYPE_WARNING
+        assert "reinterprets" in FX_TYPE_WARNING

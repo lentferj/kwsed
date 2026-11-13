@@ -259,6 +259,17 @@ KEY_HINTS = (
 # whole list at that width and still caps it on a narrow terminal.
 KeyHints.MAX_LINES = 4
 
+#: The confirmation before an effect-type change. The number and the
+#: parameter bytes belong together, and the unit reinterprets the old
+#: bytes, so this is a decision, not a refresh. Wrapped to the shared
+#: ConfirmScreen's 60-column dialog; a single long line was truncated.
+FX_TYPE_WARNING = (
+    "Changing the effect type loads a factory package\n"
+    "on the unit. The other parameter bytes keep\n"
+    "their stored values until the unit reinterprets\n"
+    "them."
+)
+
 
 def _bank_label(sysex_byte: int) -> str:
     """A part's bank number as a person reads it.
@@ -1269,11 +1280,7 @@ class FxScreen(ModalScreen[None]):
                 return
             self._pending_type = (fx_index, index)
             self.app.push_screen(
-                ConfirmScreen(
-                    "changing the effect type loads a factory package on the unit; "
-                    "the other parameter bytes keep their stored values until "
-                    "the unit reinterprets them"
-                ),
+                ConfirmScreen(FX_TYPE_WARNING),
                 self._type_confirmed,
             )
 
