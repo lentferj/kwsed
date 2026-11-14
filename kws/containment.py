@@ -35,7 +35,7 @@ talks to the instrument.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, FrozenSet, List, Mapping, Optional, Set, Tuple
+from typing import Dict, FrozenSet, Iterable, List, Mapping, Optional, Set, Tuple
 
 from kws import banks, deps
 from kws import records as rec
@@ -45,6 +45,9 @@ __all__ = [
     "PerformanceAudit",
     "ContainmentAudit",
     "audit_containment",
+    "Pass",
+    "remaining_performances",
+    "partition_self_contained",
 ]
 
 
@@ -217,3 +220,140 @@ def audit_containment(
         bank: tuple(sorted(slots)) for bank, slots in patch_slots.items()
     }
     return audit
+
+
+@dataclass
+class Pass:
+    """One pass of a multi-pass self-contained import.
+
+    ``slots`` holds the source performance slots chosen for this pass, in
+    source order. ``perf_slot_map`` maps each source slot to its target
+    slot within the pass bank (packed placement: 0..n-1).
+    """
+
+    slots: Tuple[int, ...] = ()
+    perf_slot_map: Dict[int, int] = field(default_factory=dict)
+
+
+def remaining_performances(
+    audit: ContainmentAudit, written_slots: Iterable[int]
+) -> List[int]:
+    """Contained source slots not already in ``written_slots``, in slot order."""
+    written = set(written_slots)
+    return [
+        entry.slot
+        for entry in audit.performances
+        if entry.contained and entry.slot not in written
+    ]
+
+
+def _bank_number_for_scope(scope: str) -> Optional[int]:
+    if scope.startswith("CARD/"):
+        return banks.bank("CARD").number
+    try:
+        return banks.bank(scope).number
+    except LookupError:
+        return None
+
+
+def _source_bank_from_source(source: object) -> Optional[int]:
+    bank_number = getattr(source, "bank_number", None)
+    if bank_number is not None:
+        return int(bank_number)
+    if isinstance(source, Mapping):
+        return None
+    return None
+
+
+def _resolve_source_bank_number(
+    source: object, audit: ContainmentAudit
+) -> Optional[int]:
+    """Best-effort source bank number for patch-group selection."""
+    if audit.source_bank_number is not None:
+        return audit.source_bank_number
+    if isinstance(source, str):
+        return _bank_number_for_scope(source)
+    bn = _source_bank_from_source(source)
+    if bn is not None:
+        return bn
+    if isinstance(source, Mapping):
+        src = source.get(audit.source_scope)
+        if src is not None:
+            bn2 = getattr(src, "bank_number", None)
+            if bn2 is not None:
+                return int(bn2)
+            if isinstance(src, str):
+                return _bank_number_for_scope(src)
+    return _bank_number_for_scope(audit.source_scope)
+
+
+def partition_self_contained(
+    source: object,
+    audit: ContainmentAudit,
+    *,
+    perfs_per_bank: int = 50,
+    patches_per_bank: int = 35,
+) -> List[Pass]:
+    """Greedy multi-pass partition of the contained performances.
+
+    Walks the contained performances in source slot order, accumulating
+    them into the current pass until adding the next one would exceed
+    either the performance budget or the distinct-patch budget. Patch
+    costs are the distinct self-bank patch slots of each performance,
+    accumulated with de-duplication within a pass (packed placement).
+
+    A performance that alone exceeds the patch budget still receives its
+    own pass; nothing is dropped.
+    """
+    source_bank_number = _resolve_source_bank_number(source, audit)
+    source_group: FrozenSet[int]
+    if source_bank_number is not None and source_bank_number in audit.patch_records:
+        source_group = frozenset(audit.patch_records[source_bank_number])
+    else:
+        source_group = frozenset()
+
+    passes: List[Pass] = []
+    current_slots: List[int] = []
+    current_patches: Set[int] = set()
+
+    for entry in audit.performances:
+        if not entry.contained:
+            continue
+        self_patches: Set[int] = {
+            part.patch
+            for part in entry.parts
+            if (not part.is_rom)
+            and (source_bank_number is None or part.bank_number == source_bank_number)
+        }
+        if source_group:
+            perf_patches = self_patches & set(source_group)
+        else:
+            perf_patches = self_patches
+
+        if current_slots and (
+            len(current_slots) + 1 > perfs_per_bank
+            or len(current_patches | perf_patches) > patches_per_bank
+        ):
+            passes.append(
+                Pass(
+                    slots=tuple(current_slots),
+                    perf_slot_map={
+                        slot: index for index, slot in enumerate(current_slots)
+                    },
+                )
+            )
+            current_slots = []
+            current_patches = set()
+
+        current_slots.append(entry.slot)
+        current_patches |= perf_patches
+
+    if current_slots:
+        passes.append(
+            Pass(
+                slots=tuple(current_slots),
+                perf_slot_map={slot: index for index, slot in enumerate(current_slots)},
+            )
+        )
+
+    return passes

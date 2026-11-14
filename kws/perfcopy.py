@@ -48,6 +48,9 @@ __all__ = [
     "build_atomic_bank",
     "ImportMode",
     "contained_slots",
+    "Pass",
+    "remaining_performances",
+    "partition_self_contained",
     "plan_self_contained",
     "build_self_contained",
     "active_performances",
@@ -767,6 +770,12 @@ def contained_slots(audit: containment.ContainmentAudit) -> List[int]:
     bank. ROM references are contained by plan D1.
     """
     return [entry.slot for entry in audit.performances if entry.contained]
+
+
+# Re-exported from containment for callers that reach this module first.
+Pass = containment.Pass
+remaining_performances = containment.remaining_performances
+partition_self_contained = containment.partition_self_contained
 
 
 def _target_perf_slots(
