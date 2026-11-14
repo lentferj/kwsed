@@ -32,6 +32,16 @@ def _performance(name, parts):
     return bytes(record)
 
 
+def _patch(name, waves):
+    """A patch record with ``waves`` as (bank number, wave number) per
+    oscillator; oscillators beyond the list stay switched off."""
+    record = bytearray(r.PATCH_SIZE)
+    record[0 : len(name)] = name.encode()
+    for i, (bank, wave) in enumerate(waves):
+        r.set_patch_wave(record, i, bank=bank, wave=wave)
+    return bytes(record)
+
+
 def _source(scope_id="RAM1", bank_number=None, performances=()):
     return deps.Source(
         scope_id=scope_id,
@@ -209,3 +219,96 @@ def test_nothing_is_loaded_beyond_the_named_source():
     src = _source(performances=[_performance("Audit Noloan", ((0, 3),))])
     audit = containment.audit_containment({"RAM1": src}, "RAM1")
     assert audit.contained == 1
+
+
+# --- repoint_external_refs (plan D2, opt-in) ---------------------------------
+
+
+def test_repoint_moves_used_parts_in_from_bank():
+    # Bank 2 needs the high half of the split bank field (Bank_Exp 6), so a
+    # round-trip through performance_parts proves both halves were written.
+    assert banks.bank(2).writable
+    perf = _performance("Repoint Farway", ((0, 3), (0, 7)))
+    out = r.repoint_external_refs(perf + perf, 0, 2)
+    assert len(out) == 2 * r.PERFORMANCE_SIZE
+    for at in (0, r.PERFORMANCE_SIZE):
+        parts = r.performance_parts(out[at : at + r.PERFORMANCE_SIZE])
+        assert [(p.bank, p.patch) for p in parts[:2]] == [(2, 3), (2, 7)]
+
+
+def test_repoint_leaves_to_bank_and_rom_parts_alone():
+    # Bank 5 is one of the ROM banks; bank 2 is the destination itself.
+    assert not banks.bank(5).writable
+    perf = _performance("Repoint Mixed", ((2, 1), (5, 4), (1, 6)))
+    out = r.repoint_external_refs(perf, 0, 2)
+    parts = r.performance_parts(out)
+    assert [(p.bank, p.patch) for p in parts[:3]] == [(2, 1), (5, 4), (1, 6)]
+
+
+def test_repoint_leaves_unused_parts_alone():
+    # _performance leaves the parts after the named ones switched off but
+    # still naming bank 0, the bank being repointed.
+    perf = _performance("Repoint Quiet", ((0, 3),))
+    out = r.repoint_external_refs(perf, 0, 2)
+    parts = r.performance_parts(out)
+    assert (parts[0].bank, parts[0].patch) == (2, 3)
+    for part in parts[1:]:
+        assert (part.bank, part.patch) == (0, r.UNUSED_PATCH)
+
+
+def test_repoint_preserves_size_and_leaves_input_alone():
+    perf = _performance("Repoint Steady", ((0, 3),))
+    other = _performance("Repoint Serene", ((1, 2),))
+    bank = perf + other
+    out = r.repoint_external_refs(bank, 0, 2)
+    assert len(out) == len(bank)
+    assert out[: len(perf)] != bank[: len(perf)]  # the changed record changed
+    assert out[len(perf) :] == other  # an untouched record is byte-identical
+    assert out[:16] == perf[:16]  # names survive
+    assert bank == perf + other  # the input is not modified
+
+
+def test_repoint_patch_waves_moves_sequences_only():
+    # Oscillator waves: sequence 4 in bank 1, sequence 6 in bank 2, a PCM ROM
+    # wave, and sequence 9 in bank 1 again. Only the bank-1 sequences move.
+    patch = _patch("Repoint Waveseq", ((1, 4), (2, 6), (0, 40), (1, 9)))
+    out = r.repoint_patch_wave_banks(patch + patch, 1, 3)
+    assert len(out) == 2 * r.PATCH_SIZE
+    for at in (0, r.PATCH_SIZE):
+        waves = r.patch_waves(out[at : at + r.PATCH_SIZE])
+        assert [(w.bank, w.wave) for w in waves] == [
+            (3, 4),
+            (2, 6),
+            (0, 40),
+            (3, 9),
+        ]
+        assert out[at : at + 16] == patch[:16]  # names survive
+    assert patch + patch != out  # the input is not modified
+
+
+def test_repoint_patch_waves_leaves_blank_patches_alone():
+    blank = bytes(r.PATCH_SIZE)
+    out = r.repoint_patch_wave_banks(blank + blank, 1, 3)
+    assert out == blank + blank
+
+
+@pytest.mark.parametrize(
+    "repoint",
+    [r.repoint_external_refs, r.repoint_patch_wave_banks],
+)
+def test_repoint_rejects_bad_banks(repoint):
+    with pytest.raises(ValueError):
+        repoint(b"\x00" * r.PERFORMANCE_SIZE, 12, 0)
+    with pytest.raises(ValueError):
+        repoint(b"\x00" * r.PERFORMANCE_SIZE, -1, 0)
+    with pytest.raises(ValueError):
+        repoint(b"\x00" * r.PERFORMANCE_SIZE, 0, 12)
+    with pytest.raises(ValueError):
+        repoint(b"\x00" * r.PERFORMANCE_SIZE, 3, 3)
+
+
+def test_repoint_rejects_a_ragged_bank():
+    with pytest.raises(ValueError):
+        r.repoint_external_refs(b"\x00" * (r.PERFORMANCE_SIZE - 1), 0, 2)
+    with pytest.raises(ValueError):
+        r.repoint_patch_wave_banks(b"\x00" * (r.PATCH_SIZE - 1), 0, 2)

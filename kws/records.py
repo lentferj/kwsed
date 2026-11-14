@@ -68,6 +68,8 @@ __all__ = [
     "performance_parts",
     "set_performance_part",
     "remap_performance_banks",
+    "repoint_external_refs",
+    "repoint_patch_wave_banks",
     "patch_waves",
     "set_patch_wave",
     "sequence_names",
@@ -237,6 +239,101 @@ def remap_performance_banks(perf_bank: bytes, source: int, destination: int) -> 
                 changed = True
         if changed:
             out[base : base + PERFORMANCE_SIZE] = record
+    return bytes(out)
+
+
+def _validate_repoint(from_bank: int, to_bank: int) -> None:
+    """The bank-range checks shared by the two repoint helpers."""
+    if not 0 <= from_bank <= 11:
+        raise ValueError(f"bank {from_bank} is outside 0-11")
+    if not 0 <= to_bank <= 11:
+        raise ValueError(f"bank {to_bank} is outside 0-11")
+    if from_bank == to_bank:
+        raise ValueError("from_bank and to_bank are the same bank")
+
+
+def repoint_external_refs(perf_bank: bytes, from_bank: int, to_bank: int) -> bytes:
+    """Point every **used** part naming ``from_bank`` at ``to_bank``.
+
+    This is :func:`remap_performance_banks` generalized for the spill-over
+    repoint (import plan D2): instead of moving a bank's self-references
+    along with a copy, it rewrites one bank's references to *another* bank
+    after that other bank has been filled from elsewhere. It is opt-in only
+    -- nothing here decides to call it -- and unlike the bank move it touches
+    **used** parts only: an unused part keeps whatever bank it names, because
+    it plays nothing and a later edit to it is the editor's business.
+
+    A part naming a third bank, or one of the ROM banks, stays where it
+    points: only ``from_bank`` is rewritten. Both halves of the split bank
+    field are rewritten, because rewriting ``bankNum`` alone yields a bank
+    that loads cleanly and plays sounds from somewhere else.
+
+    Patch wave-sequence bank references are a separate half of the same
+    operation: they live in patch records, which this function does not
+    receive. :func:`repoint_patch_wave_banks` is the companion that rewrites
+    them through the same ``from_bank``/``to_bank`` pair.
+
+    Banks are positions 0-11 as :class:`kws.banks.Bank` numbers them (RAM 1
+    is 0, the Card is 11), the same numbering :class:`PartRef` reports and
+    :func:`set_performance_part` takes.
+
+    Returns a new ``bytes``; the input is not modified.
+    """
+    _validate_repoint(from_bank, to_bank)
+    if len(perf_bank) == 0 or len(perf_bank) % PERFORMANCE_SIZE:
+        raise ValueError(
+            f"a performance bank is {PERFORMANCE_SIZE} bytes per record; got "
+            f"{len(perf_bank)}"
+        )
+    out = bytearray(perf_bank)
+    for base in range(0, len(out), PERFORMANCE_SIZE):
+        record = bytearray(out[base : base + PERFORMANCE_SIZE])
+        changed = False
+        for part in performance_parts(record):
+            if part.bank == from_bank and part.used:
+                set_performance_part(record, part.index, bank=to_bank, patch=part.patch)
+                changed = True
+        if changed:
+            out[base : base + PERFORMANCE_SIZE] = record
+    return bytes(out)
+
+
+def repoint_patch_wave_banks(patch_bank: bytes, from_bank: int, to_bank: int) -> bytes:
+    """Point every wave-sequence reference naming ``from_bank`` at ``to_bank``.
+
+    The patch-side companion to :func:`repoint_external_refs`, for the same
+    spill-over repoint: when the bank whose patches a performance bank plays
+    from is refilled from elsewhere, the patch records that quoted its wave
+    sequences have to follow. A patch's oscillators carry a wave bank of
+    their own, and a wave below :data:`ROM_WAVE_BASE` in that bank is a wave
+    sequence -- :class:`WaveRef` reports which bank each oscillator names
+    and :func:`set_patch_wave` rewrites it, so the accessor exists and is
+    used here, with no special-casing beyond the bank test.
+
+    Waves at or above :data:`ROM_WAVE_BASE` are PCM ROM samples, which do
+    not move, so those references are left alone -- the same rule
+    :func:`kws.perfcopy.relocate_bank` applies. Inactive oscillators are
+    left alone too: :class:`WaveRef.is_sequence` already requires one.
+
+    Banks are positions 0-11 as :class:`kws.banks.Bank` numbers them.
+
+    Returns a new ``bytes``; the input is not modified.
+    """
+    _validate_repoint(from_bank, to_bank)
+    if len(patch_bank) == 0 or len(patch_bank) % PATCH_SIZE:
+        raise ValueError(
+            f"a patch bank is {PATCH_SIZE} bytes per record; got {len(patch_bank)}"
+        )
+    out = bytearray(patch_bank)
+    for base in range(0, len(out), PATCH_SIZE):
+        record = bytearray(out[base : base + PATCH_SIZE])
+        changed = False
+        for wave in patch_waves(record):
+            if wave.is_sequence and wave.bank == from_bank:
+                set_patch_wave(record, wave.index, bank=to_bank, wave=wave.wave)
+                changed = True
+        if changed:
+            out[base : base + PATCH_SIZE] = record
     return bytes(out)
 
 
