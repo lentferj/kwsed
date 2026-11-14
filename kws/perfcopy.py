@@ -29,9 +29,10 @@ It writes bytes, never the instrument.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
-from kws import bankbuild, banks, deps, dumps, relations
+from kws import bankbuild, banks, containment, deps, dumps, relations
 from kws import records as rec
 
 _DEFAULT_DESTINATION = banks.bank("CARD")
@@ -45,6 +46,10 @@ __all__ = [
     "AtomicBuilt",
     "plan_atomic_bank",
     "build_atomic_bank",
+    "ImportMode",
+    "contained_slots",
+    "plan_self_contained",
+    "build_self_contained",
     "active_performances",
     "copy_into_bank",
     "SlotImportPlan",
@@ -262,6 +267,32 @@ def _check_sequence_budget(
     return False
 
 
+def _assign_patch_slots(
+    plan: AtomicPlan,
+    unique_patches: List[relations.PatchId],
+    shared: Optional[Dict[relations.PatchId, int]],
+) -> Tuple[Dict[relations.PatchId, int], List[Tuple[relations.PatchId, int]]]:
+    """Give each patch a slot, reusing one when ``shared`` holds it.
+
+    ``shared`` is the plan-wide map of source patch to target slot that the
+    packed mode fills as it goes. ``None`` means each performance gets its
+    own copies, which is the isolation this module exists for. Either way
+    the slots come out in first-use order with no gaps.
+    """
+    pid_to_slot: Dict[relations.PatchId, int] = {}
+    allocated: List[Tuple[relations.PatchId, int]] = []
+    for pid in unique_patches:
+        slot = shared.get(pid) if shared is not None else None
+        if slot is None:
+            slot = plan.patch_count
+            plan.patch_count += 1
+            if shared is not None:
+                shared[pid] = slot
+        pid_to_slot[pid] = slot
+        allocated.append((pid, slot))
+    return pid_to_slot, allocated
+
+
 def _commit_allocation(
     plan: AtomicPlan,
     used: Set[Tuple[str, int, int]],
@@ -272,16 +303,11 @@ def _commit_allocation(
     unique_patches: List[relations.PatchId],
     new_seqs: List[deps.SequenceKey],
     chains: Mapping[deps.SequenceKey, Any],
+    shared_patches: Optional[Dict[relations.PatchId, int]] = None,
 ) -> None:
     """Commit the allocation to the plan."""
     target_perf_slot = len(plan.allocations)
-    start_patch = plan.patch_count
-    pid_to_slot: Dict[relations.PatchId, int] = {}
-    allocated: List[Tuple[relations.PatchId, int]] = []
-    for i, pid in enumerate(unique_patches):
-        slot = start_patch + i
-        pid_to_slot[pid] = slot
-        allocated.append((pid, slot))
+    pid_to_slot, allocated = _assign_patch_slots(plan, unique_patches, shared_patches)
 
     part_patch_slots: Dict[int, int] = {}
     for part in parts:
@@ -305,7 +331,6 @@ def _commit_allocation(
         allocated_patches=tuple(allocated),
     )
     plan.allocations.append(alloc)
-    plan.patch_count += len(unique_patches)
 
 
 def _calculate_fresh_steps_atomic(
@@ -325,6 +350,16 @@ def _calculate_fresh_steps_atomic(
     return fresh
 
 
+def _count_fresh_patches(
+    unique_patches: List[relations.PatchId],
+    shared: Optional[Mapping[relations.PatchId, int]],
+) -> int:
+    """How many of ``unique_patches`` still need a slot of their own."""
+    if shared is None:
+        return len(unique_patches)
+    return sum(1 for pid in unique_patches if pid not in shared)
+
+
 def _plan_one_atomic(
     plan: AtomicPlan,
     budget: bankbuild.Budget,
@@ -332,6 +367,7 @@ def _plan_one_atomic(
     srcs: Mapping[str, deps.Source],
     request_index: int,
     perf_id: relations.PerfId,
+    shared_patches: Optional[Dict[relations.PatchId, int]] = None,
 ) -> None:
     """Plan a single performance for an atomic bank."""
     scope = perf_id.scope_id
@@ -347,7 +383,7 @@ def _plan_one_atomic(
 
     name = dumps.record_name(record)
     parts, unique_patches = _collect_unique_patches(record, scope)
-    k = len(unique_patches)
+    k = _count_fresh_patches(unique_patches, shared_patches)
 
     if _check_patch_budget(plan, budget, k, scope, num, name):
         return
@@ -383,6 +419,7 @@ def _plan_one_atomic(
         unique_patches,
         new_seqs,
         chains,
+        shared_patches,
     )
 
 
@@ -392,14 +429,23 @@ def plan_atomic_bank(
     *,
     destination_bank: banks.Bank = _DEFAULT_DESTINATION,
     budget: bankbuild.Budget = _DEFAULT_BUDGET,
+    share_patches: bool = False,
 ) -> AtomicPlan:
+    """Plan ``chosen`` performances into one bank, in the order given.
+
+    With ``share_patches`` false (the default) each performance keeps its
+    own copies of the patches it uses, which is this module's isolation
+    rule. True packs them instead: one target slot per source patch, in
+    first-use order, for callers that want a defragmented bank (plan D3).
+    """
 
     plan = AtomicPlan(destination_bank=destination_bank)
     used: Set[Tuple[str, int, int]] = set()
     srcs = dict(sources)
+    shared: Optional[Dict[relations.PatchId, int]] = {} if share_patches else None
 
     for request_index, perf_id in enumerate(chosen):
-        _plan_one_atomic(plan, budget, used, srcs, request_index, perf_id)
+        _plan_one_atomic(plan, budget, used, srcs, request_index, perf_id, shared)
 
     plan.steps_used = len(used)
     return plan
@@ -643,10 +689,17 @@ def _cleanup_unused_performances(
     made: AtomicPlan,
     performances: bytearray,
 ) -> None:
-    """Zero out performance slots past the planned allocations
-    if they contain non-empty performances."""
+    """Clear template performances in slots the plan does not fill.
+
+    A planned slot is left alone even when its number is not below the
+    allocation count: 1:1 self-contained writes keep performances at their
+    own source slots, so the filled slots are not a prefix.
+    """
     clean = _clean_performance()
-    for slot in range(len(made.allocations), banks.PERFORMANCES_PER_BANK):
+    planned = {alloc.target_perf_slot for alloc in made.allocations}
+    for slot in range(banks.PERFORMANCES_PER_BANK):
+        if slot in planned:
+            continue
         at = slot * rec.PERFORMANCE_SIZE
         existing = bytes(performances[at : at + rec.PERFORMANCE_SIZE])
         if len(existing) == rec.PERFORMANCE_SIZE and not is_empty_performance(existing):
@@ -690,6 +743,118 @@ def build_atomic_bank(
         patches=bytes(patches),
         waveseq=bytes(waveseq) if waveseq is not None else None,
         plan=made,
+    )
+
+
+class ImportMode(Enum):
+    """How a whole-bank write treats the source bank (plan §4).
+
+    ``AS_IS`` is the existing :func:`relocate_bank` path and is listed so a
+    caller can carry one mode through the UI; the self-contained planner
+    refuses it, because it is not a plan.
+    """
+
+    AS_IS = "as_is"
+    SELF_CONTAINED_1TO1 = "self_contained_1to1"
+    SELF_CONTAINED_PACKED = "self_contained_packed"
+
+
+def contained_slots(audit: containment.ContainmentAudit) -> List[int]:
+    """The source slots a self-contained write keeps, in slot order.
+
+    Empty (init) slots never appear in the audit, so they can never be
+    chosen here; neither can a performance that names another writable
+    bank. ROM references are contained by plan D1.
+    """
+    return [entry.slot for entry in audit.performances if entry.contained]
+
+
+def _target_perf_slots(
+    slots: Sequence[int],
+    mode: ImportMode,
+    perf_slots: Optional[Mapping[int, int]],
+) -> Dict[int, int]:
+    """Source slot -> target slot for the chosen performances."""
+    if perf_slots is not None:
+        missing = [slot for slot in slots if slot not in perf_slots]
+        if missing:
+            raise ValueError(f"no target slot planned for source slot {missing[0]}")
+        return {slot: perf_slots[slot] for slot in slots}
+    if mode is ImportMode.SELF_CONTAINED_1TO1:
+        return {slot: slot for slot in slots}
+    return {slot: index for index, slot in enumerate(slots)}
+
+
+def plan_self_contained(
+    sources: Mapping[str, deps.Source],
+    audit: containment.ContainmentAudit,
+    destination_bank: banks.Bank,
+    mode: ImportMode,
+    *,
+    perf_slots: Optional[Mapping[int, int]] = None,
+    budget: bankbuild.Budget = _DEFAULT_BUDGET,
+) -> AtomicPlan:
+    """Plan the contained performances of ``audit`` into one bank.
+
+    This is a slot policy only. Which performances are contained is the
+    audit's decision, and the patch compaction, wave-sequence relocation
+    and slot budgets are :func:`plan_atomic_bank`'s.
+
+    * ``SELF_CONTAINED_1TO1`` keeps each performance at its source slot,
+      and every other slot is cleaned by the builder.
+    * ``SELF_CONTAINED_PACKED`` re-slots them 0..n-1 in source order and
+      shares one patch slot between performances that use the same source
+      patch (plan D3).
+
+    ``perf_slots`` overrides the 1:1 placement for callers that have
+    already decided where things go. ``AS_IS`` raises: it is
+    :func:`relocate_bank`'s path, not a planned write.
+    """
+    if mode is ImportMode.AS_IS:
+        raise ValueError(
+            "AS_IS is relocate_bank's path; plan_self_contained writes a "
+            "self-contained bank only"
+        )
+    if mode is not ImportMode.SELF_CONTAINED_1TO1 and (
+        mode is not ImportMode.SELF_CONTAINED_PACKED
+    ):
+        raise ValueError(f"unknown import mode {mode!r}")
+
+    slots = contained_slots(audit)
+    targets = _target_perf_slots(slots, mode, perf_slots)
+    chosen = [relations.PerfId(audit.source_scope, slot) for slot in slots]
+    plan = plan_atomic_bank(
+        sources,
+        chosen,
+        destination_bank=destination_bank,
+        budget=budget,
+        share_patches=mode is ImportMode.SELF_CONTAINED_PACKED,
+    )
+    for alloc in plan.allocations:
+        alloc.target_perf_slot = targets[alloc.source_perf.number]
+    return plan
+
+
+def build_self_contained(
+    sources: Mapping[str, deps.Source],
+    made: AtomicPlan,
+    *,
+    template_performances: Optional[bytes] = None,
+    template_patches: Optional[bytes] = None,
+    template_waveseq: Optional[bytes] = None,
+) -> AtomicBuilt:
+    """Build the bytes for a :func:`plan_self_contained` plan.
+
+    Thin on purpose: the placement is already in the plan, and patch
+    compaction, wave-sequence relocation and the cleaning of every unfilled
+    slot are :func:`build_atomic_bank`'s.
+    """
+    return build_atomic_bank(
+        sources,
+        made,
+        template_performances=template_performances,
+        template_patches=template_patches,
+        template_waveseq=template_waveseq,
     )
 
 
