@@ -1282,6 +1282,17 @@ class WavestationBridge:
         read back and compared. There is no ROM check because the Multisets
         are not a bank.
 
+        The write lands in **storage only**. The unit's *current* Multiset
+        -- what MULTI plays and what EDT MULTI shows -- is battery-backed
+        working state: it is not reloaded from storage by power-up, nor by
+        entering EDT MULTI, and it survives power-down with un-stored edits
+        intact. Only a Multiset Select reloads it from storage
+        (:meth:`select_multi`, or the panel selector). Measured 2026-11-14:
+        storage held Multiset 0 channel 6 = card slot 9 while EDT MULTI
+        kept showing RAM2:1 from an un-stored edit across a ~20 h power
+        down; one ``select_multi(0)`` resynchronised the two. Callers that
+        want a written Multiset audible should follow up with a select.
+
         **WARNING:** ``verify=False`` skips the read-back comparison, so a
         failed write (cable disconnect, unit busy, memory protect, etc.) will
         not be detected. Without verification, a failed write cannot be
@@ -1519,6 +1530,11 @@ class WavestationBridge:
         byte the manual shows (16 -> ``0x10``). The unit changes its
         current multi setup on reception; there is no memory write and no
         read-back, so neither message is verified.
+
+        This is also the **only** thing that reloads the unit's current
+        Multiset from storage: power-up and entering EDT MULTI keep the
+        battery-backed working copy, un-stored edits included -- see
+        :meth:`write_multi` for the measured 2026-11-14 case.
         """
         target = self.channel if channel is None else channel
         if not 0 <= target <= 15:
