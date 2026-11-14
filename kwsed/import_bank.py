@@ -18,7 +18,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Dict, Optional, Sequence, Tuple
 
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -27,7 +27,8 @@ from textual.screen import ModalScreen
 from textual.widgets import DataTable, Static
 
 from kws import banks as kws_banks
-from kws import dumps, records
+from kws import containment, dumps, records
+from kws.perfcopy import ImportMode
 from kwsed.gate import EditGate
 from vinsynlib.ui.report import ReportScreen
 
@@ -40,9 +41,24 @@ TABLE_ID = "whole-bank-table"
 PATH_ID = "whole-bank-path"
 SUMMARY_ID = "whole-bank-summary"
 TARGET_ID = "whole-bank-target"
+MODE_ID = "whole-bank-mode"
 GATE_ID = "whole-bank-gate"
 STATUS_ID = "whole-bank-status"
 SOURCE_ID = "whole-bank-source"
+
+#: The order ``m`` walks: today's byte-identical write first, then the two
+#: self-contained slot policies (plan R2 a1 and a2).
+MODE_ORDER: Tuple[ImportMode, ...] = (
+    ImportMode.AS_IS,
+    ImportMode.SELF_CONTAINED_1TO1,
+    ImportMode.SELF_CONTAINED_PACKED,
+)
+
+MODE_LABELS: Dict[ImportMode, str] = {
+    ImportMode.AS_IS: "as-is",
+    ImportMode.SELF_CONTAINED_1TO1: "self-contained 1:1",
+    ImportMode.SELF_CONTAINED_PACKED: "self-contained packed",
+}
 
 
 @dataclass(frozen=True)
@@ -50,6 +66,10 @@ class WholeBankChoice:
     source_index: int
     target_bank: str
     write_to_unit: bool
+    #: How the write treats performances that reference another bank. The
+    #: default keeps every existing caller on the byte-identical as-is path
+    #: (:func:`kws.perfcopy.relocate_bank`).
+    mode: ImportMode = ImportMode.AS_IS
 
 
 def _escape(text: str) -> str:
@@ -97,6 +117,7 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
     WholeBankImportScreen .summary { height: auto; }
     WholeBankImportScreen DataTable { height: 1fr; }
     WholeBankImportScreen .target { height: auto; }
+    WholeBankImportScreen .mode { height: auto; }
     WholeBankImportScreen .gate { height: auto; }
     WholeBankImportScreen .status { height: auto; color: $text; padding: 0 1; }
     WholeBankImportScreen .hint { height: auto; color: $text-muted; }
@@ -107,6 +128,7 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
         Binding("q", "cancel", "Cancel"),
         Binding("s", "source", "Source"),
         Binding("b", "target", "Target"),
+        Binding("m", "mode", "Mode"),
         Binding("w", "toggle_gate", "Gate"),
         Binding("ctrl+s", "write", "Write", priority=True),
         Binding("c", "cache", "Cache"),
@@ -127,6 +149,8 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
         self._writable = kws_banks.writable_banks()
         self._target_index = 0
         self._gate = gate
+        self._mode = ImportMode.AS_IS
+        self._audit: Optional[containment.ContainmentAudit] = None
 
     @property
     def banks(self) -> list["ImportedBank"]:
@@ -158,6 +182,97 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
                     out.append(index)
         return out
 
+    def _sources(self) -> Dict[str, Any]:
+        """The loaded banks as the audit's source map, keyed by scope.
+
+        Every bank in the file is offered, not just the selected one, so a
+        part that points at a companion bank is judged through the alias the
+        importer gave that bank.
+        """
+        out: Dict[str, Any] = {}
+        for entry in self._banks:
+            scope = getattr(entry, "scope", None)
+            source = getattr(entry, "source", None)
+            if isinstance(scope, str) and source is not None:
+                out[scope] = source
+        return out
+
+    def _refresh_audit(self) -> None:
+        """Re-audit the selected source bank for containment (plan D1).
+
+        A file can hold a partial bank, and a test fixture can hold anything;
+        an audit that cannot run leaves the block out rather than failing the
+        screen. ``None`` means "not known", which the mode line says in
+        words.
+        """
+        self._audit = None
+        try:
+            bank = self._source_bank()
+            self._audit = containment.audit_containment(
+                self._sources(), str(bank.scope)
+            )
+        except (IndexError, LookupError, ValueError, TypeError, AttributeError):
+            self._audit = None
+
+    def _containment_text(self) -> str:
+        """``contained: N · other bank: M (banks …) · ROM: K``, or "".
+
+        The three counts are all performance counts and add up to the bank's
+        non-empty performances: contained includes the ROM-assisted ones
+        (plan D1), and ROM is reported separately so its number is never
+        hidden behind that total.
+        """
+        audit = self._audit
+        if audit is None:
+            return ""
+        banks_text = ""
+        if audit.parts_per_bank:
+            labels = ", ".join(
+                kws_banks.bank(number).label for number in sorted(audit.parts_per_bank)
+            )
+            banks_text = f" ({labels})"
+        return (
+            f"contained: {audit.contained} · other bank: {audit.other_bank}"
+            f"{banks_text} · ROM: {audit.rom_assisted}"
+        )
+
+    def _self_contained_counts(self) -> Optional[Tuple[int, int]]:
+        """(written, skipped) performances for a self-contained mode."""
+        if self._audit is None:
+            return None
+        return (self._audit.contained, self._audit.other_bank)
+
+    def _mode_line(self) -> str:
+        """What the selected mode writes and what it leaves out.
+
+        Shown above the gate and repeated in the status line when ``m`` is
+        pressed, so the choice is stated before the gate can be armed (R1).
+        """
+        label = MODE_LABELS[self._mode]
+        if self._mode is ImportMode.AS_IS:
+            return (
+                f"Mode: {label} · writes the whole bank (every performance, "
+                f"patch and wave sequence), skipping nothing; self-references "
+                f"move to the target, references to other writable banks and "
+                f"to ROM stay where they point"
+            )
+        counts = self._self_contained_counts()
+        if counts is None:
+            return (
+                f"Mode: {label} · containment is not known for this bank, so "
+                f"the number of performances left out cannot be stated"
+            )
+        written, skipped = counts
+        if self._mode is ImportMode.SELF_CONTAINED_1TO1:
+            placement = "at their own slots"
+        else:
+            placement = f"packed into slots 0-{max(written - 1, 0)}"
+        return (
+            f"Mode: {label} · writes {written} of {written + skipped} "
+            f"performances {placement}, skipping {skipped} that reference "
+            f"another writable bank; ROM references stay in ROM"
+        )
+
     def _summary_text(self) -> str:
         try:
             bank = self._source_bank()
@@ -171,11 +286,13 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
         )
         patch_count = _active_count(patches)
         has_ws = bool(getattr(source, "waveseq", None))
-        return (
+        counts = (
             f"{perf_count} active performances · "
             f"{patch_count} patches · "
             f"waveseq {'yes' if has_ws else 'no'}"
         )
+        block = self._containment_text()
+        return f"{counts}\n{block}" if block else counts
 
     def _target_line(self) -> str:
         try:
@@ -258,10 +375,18 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
         except Exception:
             _ = None
 
+    def _update_mode(self) -> None:
+        try:
+            self.query_one(f"#{MODE_ID}", Static).update(self._mode_line())
+        except Exception:
+            _ = None
+
     def _rebuild_all(self) -> None:
+        self._refresh_audit()
         self._update_source()
         self._rebuild_table()
         self._update_target()
+        self._update_mode()
         self._update_gate()
 
     def compose(self) -> ComposeResult:
@@ -276,10 +401,11 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
                 zebra_stripes=True,
             )
             yield Static("", id=TARGET_ID, classes="target", markup=False)
+            yield Static("", id=MODE_ID, classes="mode", markup=False)
             yield Static("", id=GATE_ID, classes="gate", markup=False)
             yield Static("", id=STATUS_ID, classes="status", markup=False)
             yield Static(
-                "s source · b target · w gate · ctrl+s write · c cache · "
+                "s source · b target · m mode · w gate · ctrl+s write · c cache · "
                 "? help · esc/q cancel",
                 classes="hint",
                 markup=False,
@@ -323,27 +449,47 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
         self._update_gate()
         self._set_status(self._gate.describe())
 
+    def action_mode(self) -> None:
+        index = MODE_ORDER.index(self._mode)
+        self._mode = MODE_ORDER[(index + 1) % len(MODE_ORDER)]
+        self._update_mode()
+        self._set_status(self._mode_line())
+
     def action_write(self) -> None:
         if self._gate is not None and not self._gate.armed:
             self._set_status("write gate is locked")
             return
-        self.dismiss(WholeBankChoice(self._source_index, self._target_bank().id, True))
+        self.dismiss(
+            WholeBankChoice(
+                self._source_index, self._target_bank().id, True, self._mode
+            )
+        )
 
     def action_cache(self) -> None:
-        self.dismiss(WholeBankChoice(self._source_index, self._target_bank().id, False))
+        self.dismiss(
+            WholeBankChoice(
+                self._source_index, self._target_bank().id, False, self._mode
+            )
+        )
 
     def action_help(self) -> None:
         text = (
             "Whole-bank import keys:\n"
             "s  switch to the next source bank in the file\n"
             "b  switch the target bank (RAM 1/2/3, Card)\n"
+            "m  cycle the import mode: as-is, self-contained 1:1, "
+            "self-contained packed\n"
             "w  arm/lock the write gate\n"
             "c  save the bank to the local cache only (no unit write)\n"
             "ctrl+s  write the whole bank to the target (gate must be armed)\n"
             "?  this help\n"
             "Esc / q  cancel\n\n"
-            "Whole-bank writes relocate interior bank references to the\n"
-            "target and leave ROM references in ROM."
+            "Whole-bank writes move only self-references to the target.\n"
+            "References to other writable banks stay where they point, and\n"
+            "ROM references stay in ROM.\n\n"
+            "The self-contained modes write only the performances whose parts\n"
+            "are all self or ROM: 1:1 keeps their own slots, packed re-slots\n"
+            "them 0..n-1 and defragments the patches beneath them."
         )
         self.app.push_screen(ReportScreen("Whole bank import", text))
 
