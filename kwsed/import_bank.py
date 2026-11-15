@@ -44,6 +44,7 @@ if TYPE_CHECKING:
     from kws.importers import ImportedBank
 
 __all__ = [
+    "DanglingRefsScreen",
     "ImportPassState",
     "SpilloverCompanion",
     "WholeBankChoice",
@@ -268,6 +269,62 @@ def _entry_bank(entry: Any) -> Optional[kws_banks.Bank]:
         return kws_banks.bank(number)
     except LookupError:
         return None
+
+
+class DanglingRefsScreen(ModalScreen[Optional[str]]):
+    """A popup: this write left parts pointing at a bank the file carries.
+
+    An as-is write of one bank of a multi-bank file keeps every part
+    pointing where the file points. When the file also carries the bank
+    those parts name, the written performances play whatever that bank
+    holds -- usually Init -- until the companion is written too. Saying so
+    in the status line put it in a wall of text, so it is a modal with one
+    sentence and the two keys that finish the job.
+    """
+
+    DEFAULT_CSS = """
+    DanglingRefsScreen { align: center middle; }
+    DanglingRefsScreen Vertical {
+        width: 78; height: auto; border: thick $warning;
+        padding: 1 2; background: $panel;
+    }
+    DanglingRefsScreen #dangling-title { text-style: bold; height: auto; }
+    DanglingRefsScreen #dangling-body { height: auto; padding: 1 0; }
+    DanglingRefsScreen #dangling-hint { height: auto; color: $text-muted; }
+    """
+
+    BINDINGS = [
+        Binding("x", "write", "Write it"),
+        Binding("o", "repoint", "Repoint"),
+        Binding("escape", "cancel", "Leave"),
+        Binding("q", "cancel", "Leave"),
+    ]
+
+    def __init__(self, body: str, *, write_label: str) -> None:
+        super().__init__()
+        self._body = body
+        self._write_label = write_label
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Static("Parts left pointing outside", id="dangling-title")
+            yield Static(self._body, id="dangling-body", markup=False)
+            yield Static(
+                f"x  write {self._write_label} now\n"
+                "o  self-contained pass, repointing those parts\n"
+                "esc  leave it as it is",
+                id="dangling-hint",
+                markup=False,
+            )
+
+    def action_write(self) -> None:
+        self.dismiss("write")
+
+    def action_repoint(self) -> None:
+        self.dismiss("repoint")
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
 
 
 class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):

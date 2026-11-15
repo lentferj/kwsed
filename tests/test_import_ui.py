@@ -2415,15 +2415,12 @@ def _two_bank_file() -> list[Any]:
 
 
 @pytest.mark.asyncio
-async def test_as_is_write_reopens_for_the_carried_companion(
+async def test_as_is_write_ends_in_a_popup_for_the_carried_companion(
     tmp_path: Any, monkeypatch: Any
 ) -> None:
-    """The as-is write ends, then the screen comes back with the one line.
+    """The as-is write ends with a modal, not a line buried in the status."""
+    from kwsed.import_bank import DanglingRefsScreen
 
-    Two parts name RAM 2 and the file carries RAM 2, so the write leaves
-    them pointing at an empty unit bank. The re-opened screen says how to
-    finish: write the companion with ``x``, or repoint with ``o``.
-    """
     app, recorded = _armed_app(tmp_path, monkeypatch)
     monkeypatch.setattr(bankstore, "save", lambda *a, **k: None)
     file_banks = _two_bank_file()
@@ -2435,26 +2432,87 @@ async def test_as_is_write_reopens_for_the_carried_companion(
         app._import_whole_bank_write(
             file_banks[0], choice, banks_list=file_banks, path="two.syx"
         )
-        screen = None
+        popup = None
         for _ in range(100):
             await pilot.pause()
-            open_screens = [
-                s for s in app.screen_stack if isinstance(s, WholeBankImportScreen)
-            ]
-            if open_screens:
-                screen = open_screens[-1]
+            if isinstance(app.screen, DanglingRefsScreen):
+                popup = app.screen
                 break
         await _settle(pilot)
-        assert screen is not None, "the import screen was not re-opened"
-        status = _static_text(screen, "whole-bank-status")
-        assert "press x" in status
-        assert "2 parts" in status
-        assert "RAM 2" in status
+        assert popup is not None, "the popup was not shown"
+        body = _static_text(popup, "dangling-body")
+        assert "2 parts name RAM 2" in body
+        assert "Main bank only" in body
+        hint = _static_text(popup, "dangling-hint")
+        assert "write the file's RAM 2 bank" in hint
+        assert "esc" in hint
     # The write itself is unchanged: exactly one bundle, backed up.
     assert app.device.bundle_write_count == 1
     assert recorded, "the as-is write is recorded, exactly once"
     backup_path = recorded[0]["backup"]
     assert isinstance(backup_path, str) and os.path.exists(backup_path)
+
+
+@pytest.mark.asyncio
+async def test_the_popup_refusal_leaves_everything_alone(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """esc dismisses the popup and writes nothing more."""
+    from kwsed.import_bank import DanglingRefsScreen
+
+    app, _recorded = _armed_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(bankstore, "save", lambda *a, **k: None)
+    file_banks = _two_bank_file()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._import_whole_bank_write(
+            file_banks[0],
+            WholeBankChoice(0, "RAM3", True, perfcopy.ImportMode.AS_IS, "s", True),
+            banks_list=file_banks,
+            path="two.syx",
+        )
+        for _ in range(100):
+            await pilot.pause()
+            if isinstance(app.screen, DanglingRefsScreen):
+                break
+        assert isinstance(app.screen, DanglingRefsScreen)
+        await pilot.press("escape")
+        await _settle(pilot)
+        assert not isinstance(app.screen, DanglingRefsScreen)
+    assert app.device.bundle_write_count == 1
+
+
+@pytest.mark.asyncio
+async def test_the_popup_writes_the_companion_bank_on_x(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """x writes the file's companion into the bank its parts name."""
+    from kwsed.import_bank import DanglingRefsScreen
+
+    app, _recorded = _armed_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(bankstore, "save", lambda *a, **k: None)
+    file_banks = _two_bank_file()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._import_whole_bank_write(
+            file_banks[0],
+            WholeBankChoice(0, "RAM3", True, perfcopy.ImportMode.AS_IS, "s", True),
+            banks_list=file_banks,
+            path="two.syx",
+        )
+        for _ in range(100):
+            await pilot.pause()
+            if isinstance(app.screen, DanglingRefsScreen):
+                break
+        assert isinstance(app.screen, DanglingRefsScreen)
+        await pilot.press("x")
+        for _ in range(100):
+            await pilot.pause()
+            if app.device.bundle_write_count == 2:
+                break
+    assert app.device.bundle_write_count == 2
+    # The second write went to the bank the parts name, not the first target.
+    assert app.device.bundle_writes[-1]["bank"] == banks.bank("RAM2").label
 
 
 @pytest.mark.asyncio

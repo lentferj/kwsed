@@ -103,6 +103,7 @@ from kwsed.import_bank import (
     OVERFLOW_PATCHES,
     OVERFLOW_SELF_CONTAINED,
     ImportPassState,
+    WholeBankChoice,
     WholeBankImportScreen,
     _entry_bank,
 )
@@ -5718,7 +5719,13 @@ class KwsedApp(App[None]):
     def _companions_named_by_parts(
         self, bank: Any, banks_list: Sequence[Any], source_index: int
     ) -> List[Tuple[int, int, Any]]:
-        """``(part count, file index, bank)`` for companions the parts name."""
+        """``(part count, file index, bank)`` for companions the parts name.
+
+        A companion is only reported when the unit does not already hold
+        the patches those parts name: a bank that was written before (or
+        that already matched the file) would otherwise be offered a second
+        time for no reason.
+        """
         from kws import containment
 
         try:
@@ -5736,9 +5743,25 @@ class KwsedApp(App[None]):
             if companion is None:
                 continue
             count = audit.parts_per_bank.get(companion.number, 0)
-            if count:
-                named.append((count, index, companion))
+            if not count:
+                continue
+            slots = audit.patch_records.get(companion.number, ())
+            if self._unit_matches(companion, slots):
+                continue
+            named.append((count, index, companion))
         return named
+
+    def _unit_matches(self, companion: Any, slots: Sequence[int]) -> bool:
+        """Whether the loaded copy of ``companion`` already holds those patches."""
+        current = self._sources_with_store().get(companion.id)
+        if current is None:
+            return False
+        for slot in slots:
+            if slot >= len(current.patches) or slot >= len(companion.source.patches):
+                return False
+            if bytes(current.patches[slot]) != bytes(companion.source.patches[slot]):
+                return False
+        return True
 
     def _offer_companions_after_write(
         self,
@@ -5773,22 +5796,50 @@ class KwsedApp(App[None]):
         named = self._companions_named_by_parts(bank, banks_list, source_index)
         if not named:
             return
-        count, _index, companion = max(named, key=lambda item: (item[0], -item[1]))
-        notice = (
-            f"{count} parts name {companion.label}, and this file carries "
-            "that bank too — press x to write it, or o for a self-contained "
-            "pass that repoints them"
+        count, index, companion = max(named, key=lambda item: (item[0], -item[1]))
+        from kwsed.import_bank import DanglingRefsScreen
+
+        self.push_screen(
+            DanglingRefsScreen(
+                f"{count} parts name {companion.label}, and this file carries "
+                f"that bank too.\n\nThe import wrote {bank.label} only, so "
+                f"those parts play whatever {companion.label} holds now — "
+                "often Init, which makes the performance silent or wrong.",
+                write_label=f"the file's {companion.label} bank",
+            ),
+            lambda answer: self._dangling_answer(
+                answer, banks_list, index, companion, path
+            ),
         )
-        mode = getattr(choice, "mode", perfcopy.ImportMode.AS_IS)
-        session_key = str(getattr(choice, "session_key", "") or "")
-        if session_key:
-            # The screen comes back showing the bank that was written, so
-            # ``x`` offers the companions of the same source.
-            state = self._import_passes.setdefault(session_key, {})
-            state.setdefault("source_index", source_index)
-        self._reopen_whole_bank_import(
-            banks_list, path, session_key, mode, notice=notice
-        )
+
+    def _dangling_answer(
+        self,
+        answer: Optional[str],
+        banks_list: Sequence[Any],
+        companion_index: int,
+        companion: Any,
+        path: str,
+    ) -> None:
+        """Do what the popup promised: write the companion, or repoint."""
+        if answer == "write":
+            if not self._write_gate.armed:
+                self.notify_status("write gate is locked", refused=True)
+                return
+            try:
+                bank = banks_list[companion_index]
+            except (IndexError, TypeError):
+                return
+            self._import_whole_bank_write(
+                bank,
+                WholeBankChoice(companion_index, companion.id, True),
+                banks_list=banks_list,
+                path=path,
+            )
+            return
+        if answer == "repoint":
+            self._reopen_whole_bank_import(
+                banks_list, path, "", perfcopy.ImportMode.AS_IS
+            )
 
     def _write_with_overflow(
         self,
