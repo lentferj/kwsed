@@ -3399,3 +3399,59 @@ async def test_a_raising_done_still_ends_the_progress_bar(tmp_path: Any) -> None
                 break
         await _settle(pilot)
         assert not app._progress_active, "the bar is still held"
+
+
+@pytest.mark.asyncio
+async def test_the_offer_compares_against_the_unit_when_it_has_the_bank(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """A present but different unit bank still raises the popup.
+
+    The bank table's entry has no records; the file's imported bank does.
+    Asking the wrong one for ``.source`` crashed before the popup could
+    show, and only a unit source being absent hid it from the tests.
+    """
+    from kwsed.import_bank import DanglingRefsScreen
+
+    app, _recorded = _armed_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(bankstore, "save", lambda *a, **k: None)
+    file_banks = _two_bank_file()
+    # The unit holds RAM 2, but with none of the patches the file has there.
+    app._sources["RAM2"] = _make_bank(scope="RAM2", active_slots=[]).source
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._import_whole_bank_write(
+            file_banks[0],
+            WholeBankChoice(0, "RAM3", True, perfcopy.ImportMode.AS_IS, "s", True),
+            banks_list=file_banks,
+            path="two.syx",
+        )
+        for _ in range(100):
+            await pilot.pause()
+            if isinstance(app.screen, DanglingRefsScreen):
+                break
+        assert isinstance(app.screen, DanglingRefsScreen)
+
+
+@pytest.mark.asyncio
+async def test_a_unit_bank_that_already_matches_is_not_offered(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """The companion is offered only when it is actually missing."""
+    from kwsed.import_bank import DanglingRefsScreen
+
+    app, _recorded = _armed_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(bankstore, "save", lambda *a, **k: None)
+    file_banks = _two_bank_file()
+    app._sources["RAM2"] = file_banks[1].source
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._import_whole_bank_write(
+            file_banks[0],
+            WholeBankChoice(0, "RAM3", True, perfcopy.ImportMode.AS_IS, "s", True),
+            banks_list=file_banks,
+            path="two.syx",
+        )
+        await _settle(pilot, times=60)
+        assert not isinstance(app.screen, DanglingRefsScreen)
+    assert app.device.bundle_write_count == 1

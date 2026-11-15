@@ -5761,20 +5761,26 @@ class KwsedApp(App[None]):
             if not count:
                 continue
             slots = audit.patch_records.get(companion.number, ())
-            if self._unit_matches(companion, slots):
+            # ``companion`` is the bank table's entry; the file's records are
+            # on the imported bank, which is what the unit must match.
+            file_source = getattr(entry, "source", None)
+            if self._unit_matches(companion, file_source, slots):
                 continue
             named.append((count, index, companion))
         return named
 
-    def _unit_matches(self, companion: Any, slots: Sequence[int]) -> bool:
+    def _unit_matches(
+        self, companion: Any, file_source: Any, slots: Sequence[int]
+    ) -> bool:
         """Whether the loaded copy of ``companion`` already holds those patches."""
         current = self._sources_with_store().get(companion.id)
-        if current is None:
+        if current is None or file_source is None:
             return False
+        file_patches = list(getattr(file_source, "patches", []) or [])
         for slot in slots:
-            if slot >= len(current.patches) or slot >= len(companion.source.patches):
+            if slot >= len(current.patches) or slot >= len(file_patches):
                 return False
-            if bytes(current.patches[slot]) != bytes(companion.source.patches[slot]):
+            if bytes(current.patches[slot]) != bytes(file_patches[slot]):
                 return False
         return True
 
