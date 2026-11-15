@@ -2290,6 +2290,9 @@ async def test_overflow_key_only_when_parts_name_another_bank() -> None:
         await _settle(pilot)
         await pilot.press("o")
         await _settle(pilot)
+        assert isinstance(app.screen, ImportMenuScreen)
+        await pilot.press("enter")  # the patches-only kind, still the default
+        await _settle(pilot)
         assert isinstance(app.screen, TargetBankScreen)
         # RAM 2 is the bank the parts name, so it is offered first.
         assert app.screen._choices[0] == banks.bank("RAM2").label
@@ -2310,14 +2313,14 @@ async def test_overflow_choice_carries_the_bank_and_keeps_the_target() -> None:
         await _settle(pilot)
         await pilot.press("o")
         await _settle(pilot)
+        assert isinstance(app.screen, ImportMenuScreen)
+        await pilot.press("enter")  # the patches-only kind
+        await _settle(pilot)
         screen_now = app.screen
         assert isinstance(screen_now, TargetBankScreen)
         labels = screen_now._choices
         assert banks.bank("RAM2").label not in labels  # the target itself
         await pilot.press("enter")
-        await _settle(pilot)
-        assert isinstance(app.screen, ImportMenuScreen)
-        await pilot.press("enter")  # the patches-only kind, still the default
         await _settle(pilot)
     choice = captured[0]
     assert choice.overflow_bank in ("RAM1", "RAM3")
@@ -2391,8 +2394,8 @@ def _split_file_banks() -> list[Any]:
 
 
 @pytest.mark.asyncio
-async def test_overflow_kind_menu_offers_both_kinds() -> None:
-    """``o`` picks the bank, then asks which kind of overflow to plan."""
+async def test_overflow_kind_menu_offers_three_kinds() -> None:
+    """``o`` asks which kind of overflow first, then for the RAM bank."""
     app = KwsedApp(DemoDevice())
     captured: list[Any] = []
     screen = WholeBankImportScreen(
@@ -2404,19 +2407,20 @@ async def test_overflow_kind_menu_offers_both_kinds() -> None:
         await _settle(pilot)
         await pilot.press("o")
         await _settle(pilot)
-        assert isinstance(app.screen, TargetBankScreen)
-        await pilot.press("enter")  # the first overflow bank: RAM 2
-        await _settle(pilot)
         menu = app.screen
         assert isinstance(menu, ImportMenuScreen)
         assert menu._choices == [
             "Only the patches it cannot hold (performances stay on the target)",
             "The performances that point outside it, with all their patches "
             "(both banks self-contained)",
+            "Cards only: one self-contained group per card, no RAM bank",
         ]
         await pilot.press("down")
         await _settle(pilot)
-        await pilot.press("enter")
+        await pilot.press("enter")  # the self-contained kind asks for a bank
+        await _settle(pilot)
+        assert isinstance(app.screen, TargetBankScreen)
+        await pilot.press("enter")  # the first overflow bank: RAM 2
         await _settle(pilot)
     assert captured, "choosing a kind dismisses with a write choice"
     choice = captured[0]
@@ -2558,12 +2562,12 @@ async def test_self_contained_split_needing_more_banks_is_refused_at_the_screen(
         await _settle(pilot)
         await pilot.press("o")
         await _settle(pilot)
-        assert isinstance(app.screen, TargetBankScreen)
-        await pilot.press("enter")
-        await _settle(pilot)
         assert isinstance(app.screen, ImportMenuScreen)
         await pilot.press("down")  # the self-contained kind
         await _settle(pilot)
+        await pilot.press("enter")
+        await _settle(pilot)
+        assert isinstance(app.screen, TargetBankScreen)
         await pilot.press("enter")
         await _settle(pilot)
         # Still open: a split that cannot fit is refused, not dismissed.
@@ -2747,6 +2751,12 @@ async def test_self_contained_split_continues_onto_the_next_card(
         assert first._target_bank().id == "CARD"
         await pilot.press("o")
         await _settle(pilot)
+        menu = app.screen
+        assert isinstance(menu, ImportMenuScreen)
+        await pilot.press("down")  # the self-contained kind
+        await _settle(pilot)
+        await pilot.press("enter")
+        await _settle(pilot)
         chooser = app.screen
         assert isinstance(chooser, TargetBankScreen)
         # RAM 2 is named by the source's own parts, so it is offered first;
@@ -2757,12 +2767,6 @@ async def test_self_contained_split_continues_onto_the_next_card(
         await pilot.press("down")  # RAM 1 sits between them
         await _settle(pilot)
         await pilot.press("enter")  # RAM 3
-        await _settle(pilot)
-        menu = app.screen
-        assert isinstance(menu, ImportMenuScreen)
-        await pilot.press("down")  # the self-contained kind
-        await _settle(pilot)
-        await pilot.press("enter")
         await _wait_for_writes(app, pilot, 2)
         await _settle(pilot)
 
@@ -2926,3 +2930,250 @@ async def test_split_continuation_requires_the_write_gate(
     state = app._import_passes["three.syx|RAM1|gated"]
     assert state["split_remaining"] == [50, 51, 52, 53, 54]
     assert any("5 performances remain" in s for s in statuses), statuses
+
+
+def _cards_only_banks() -> list[Any]:
+    """A source bank of 60 performances, plus the RAM 2 bank two of them name.
+
+    Slots 0-57 name patch ``slot % 35`` of their own bank, so one Card holds
+    the first fifty and the last ten need a second card; slots 58-59 name
+    RAM 2 patches 2 and 3, which the cards-only split carries along. Every
+    name is invented.
+    """
+    from tests.test_bankbuild import make_patch, make_performance
+
+    performances = [
+        make_performance(f"Card Perf {index:02d}", ((0, index % 35),))
+        for index in range(58)
+    ]
+    performances += [
+        make_performance("Quay Marker", ((1, 2),)),
+        make_performance("Quay Beacon", ((1, 3),)),
+    ]
+    source = deps.Source(
+        scope_id="RAM1",
+        performances=performances,
+        patches=[make_patch(f"Card Basis {index:02d}") for index in range(35)],
+        waveseq=None,
+    )
+    main = importers.ImportedBank(
+        label="Card source", scope="RAM1", format="sysex", source=source
+    )
+    return [main, _split_continuation_banks()[1]]
+
+
+@pytest.mark.asyncio
+async def test_cards_only_first_pass_writes_one_card_and_records_the_rest(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """Cards only: no RAM bank, one self-contained group per card.
+
+    The first pass writes exactly the card in the slot, records the ten
+    slots left over and re-opens the screen naming them; ``n`` writes
+    exactly one more group to the card and empties the session. The union
+    of the written source slots is every non-empty performance, none
+    twice, and every written group is self-contained.
+    """
+    app = _split_pass_app(tmp_path, monkeypatch)
+    statuses: list[str] = []
+    app.notify_status = lambda msg, *a, **k: statuses.append(str(msg))  # type: ignore[method-assign]
+    file_banks = _cards_only_banks()
+    bank = file_banks[0]
+    source = bank.source
+    ram2 = _split_continuation_banks()[1].source
+    phrase = (
+        "switch the card on the unit (select it on the HCard and press C), then press n"
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        first = WholeBankImportScreen(
+            path="cards.syx", banks=file_banks, gate=app._write_gate
+        )
+        app.push_screen(
+            first,
+            lambda picked: app._import_whole_bank_chosen(
+                file_banks, picked, "cards.syx"
+            ),
+        )
+        await _settle(pilot)
+        await pilot.press("m")
+        await _settle(pilot)
+        await pilot.press("m")  # self-contained packed
+        await _settle(pilot)
+        for _ in range(3):
+            await pilot.press("b")  # target Card
+            await _settle(pilot)
+        assert first._target_bank().id == "CARD"
+        await pilot.press("o")
+        await _settle(pilot)
+        menu = app.screen
+        assert isinstance(menu, ImportMenuScreen)
+        assert menu._choices[-1] == (
+            "Cards only: one self-contained group per card, no RAM bank"
+        )
+        await pilot.press("down")
+        await _settle(pilot)
+        await pilot.press("down")
+        await _settle(pilot)
+        await pilot.press("enter")  # cards only: no bank step at all
+        await _wait_for_writes(app, pilot, 1)
+        await _settle(pilot)
+
+        # One bank only: the card in the slot. No RAM bank was touched.
+        assert app.device.bundle_write_count == 1
+        assert set(app.device._written) == {
+            ("CARD", banks.Kind.PERFORMANCE),
+            ("CARD", banks.Kind.PATCH),
+        }
+        assert [w["bank"] for w in app.device.bundle_writes] == [
+            banks.bank("CARD").label
+        ]
+        # The statement before the write names the card and what is left.
+        statement = next(s for s in statuses if "cards-only groups" in s)
+        assert "Card gets 50 performances and 35 patches" in statement
+        assert "10 performances remain for the next card" in statement
+        closing = statuses[-1]
+        assert closing.startswith(
+            "imported Card source as cards-only groups — 1 card: "
+            "Card: 50 performances, 35 patches"
+        )
+        assert "10 performances remain" in closing
+        assert phrase in closing
+
+        second = app.screen
+        assert isinstance(second, WholeBankImportScreen)
+        assert second is not first
+        status = _static_text(second, "whole-bank-status")
+        assert "10 performances remain for the next card" in status
+        assert phrase in status
+        mode_line = _static_text(second, "whole-bank-mode")
+        assert "cards-only: next pass writes one group of 10 performances" in mode_line
+        assert "into Card" in mode_line
+        assert phrase in mode_line
+
+        keys = [k for k in app._import_passes if k.startswith("cards.syx|RAM1|")]
+        assert len(keys) == 1
+        key = keys[0]
+        state = app._import_passes[key]
+        assert state["pass_kind"] == "cards_only"  # noqa: S105 -- session marker
+        assert state["split_target"] == "CARD"
+        assert state["split_remaining"] == list(range(50, 60))
+        assert set(state["written"]) == set(range(50))
+
+        # Pass 1's bytes, before pass 2 overwrites the one card blob.
+        card_pass1_perf = _pass_blob(app.device, "CARD", banks.Kind.PERFORMANCE)
+        card_pass1_patch = _pass_blob(app.device, "CARD", banks.Kind.PATCH)
+
+        await pilot.press("n")
+        await _wait_for_writes(app, pilot, 2)
+        await _settle(pilot)
+        assert app.device.bundle_write_count == 2
+        assert [w["bank"] for w in app.device.bundle_writes] == [
+            banks.bank("CARD").label,
+            banks.bank("CARD").label,
+        ]
+
+        third = app.screen
+        assert isinstance(third, WholeBankImportScreen)
+        assert "nothing left to write" in _static_text(third, "whole-bank-status")
+        assert "cards-only pass is complete" in _static_text(third, "whole-bank-mode")
+        await pilot.press("n")
+        await _settle(pilot)
+        assert "nothing left to write" in _static_text(third, "whole-bank-status")
+        assert app.device.bundle_write_count == 2
+
+    # Every non-empty performance is written exactly once, across the two
+    # cards: the session's written map is the union.
+    slots = perfcopy.active_performances(source)
+    assert len(slots) == 60
+    assert set(state["written"]) == set(slots)
+    assert len(state["written"]) == len(slots)
+    assert state["split_remaining"] == []
+    _assert_cards_only_bytes(app, source, ram2, card_pass1_perf, card_pass1_patch)
+
+
+def _assert_cards_only_bytes(
+    app: KwsedApp,
+    source: Any,
+    ram2: Any,
+    card_pass1_perf: bytes,
+    card_pass1_patch: bytes,
+) -> None:
+    """Both cards' groups, byte for byte, and their self-containment."""
+    card_no = banks.bank("CARD").number
+    card_pass2_perf = _pass_blob(app.device, "CARD", banks.Kind.PERFORMANCE)
+    card_pass2_patch = _pass_blob(app.device, "CARD", banks.Kind.PATCH)
+    for slot in range(50):
+        assert _perf_at(card_pass1_perf, slot) == _as_written(
+            source.performances[slot], {0: (card_no, slot % 35)}
+        )
+    for patch_slot in range(35):
+        assert _patch_at(card_pass1_patch, patch_slot) == source.patches[patch_slot]
+    for index in range(8):
+        assert _perf_at(card_pass2_perf, index) == _as_written(
+            source.performances[50 + index], {0: (card_no, index)}
+        )
+        assert _patch_at(card_pass2_patch, index) == source.patches[15 + index]
+    assert _perf_at(card_pass2_perf, 8) == _as_written(
+        source.performances[58], {0: (card_no, 8)}
+    )
+    assert _patch_at(card_pass2_patch, 8) == ram2.patches[2]
+    assert _perf_at(card_pass2_perf, 9) == _as_written(
+        source.performances[59], {0: (card_no, 9)}
+    )
+    assert _patch_at(card_pass2_patch, 9) == ram2.patches[3]
+    for slot in range(10, 50):
+        assert _perf_at(card_pass2_perf, slot) == _clean_perf_record()
+    for patch_slot in range(10, 35):
+        assert _patch_at(card_pass2_patch, patch_slot) == bytes(PATCH_RECORD_SIZE)
+
+    # Every written group is self-contained: each used part names the card
+    # or a ROM bank, never another writable bank.
+    rom_numbers = {entry.number for entry in banks.BANKS if not entry.writable}
+    for blob in (card_pass1_perf, card_pass2_perf):
+        for slot in range(banks.PERFORMANCES_PER_BANK):
+            for part in r.performance_parts(_perf_at(blob, slot)):
+                if not part.used:
+                    continue
+                assert part.bank == card_no or part.bank in rom_numbers
+
+
+@pytest.mark.asyncio
+async def test_cards_only_continuation_requires_the_write_gate(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """With the gate locked, ``n`` refuses the cards-only pass and writes nothing."""
+    app = _split_pass_app(tmp_path, monkeypatch)
+    statuses: list[str] = []
+    app.notify_status = lambda msg, *a, **k: statuses.append(str(msg))  # type: ignore[method-assign]
+    file_banks = _cards_only_banks()
+    choice = WholeBankChoice(
+        0,
+        "CARD",
+        True,
+        perfcopy.ImportMode.SELF_CONTAINED_PACKED,
+        "cards.syx|RAM1|gated",
+        True,
+        "",
+        "cards_only",
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._import_whole_bank_write(
+            file_banks[0], choice, banks_list=file_banks, path="cards.syx"
+        )
+        await _wait_for_writes(app, pilot, 1)
+        await _settle(pilot)
+        second = app.screen
+        assert isinstance(second, WholeBankImportScreen)
+        assert "10 performances remain for the next card" in _static_text(
+            second, "whole-bank-status"
+        )
+        app._write_gate.toggle()  # the user locked the gate
+        await pilot.press("n")
+        await _settle(pilot)
+        assert isinstance(app.screen, WholeBankImportScreen)
+        assert "write gate is locked" in _static_text(app.screen, "whole-bank-status")
+        assert app.device.bundle_write_count == 1
+    state = app._import_passes["cards.syx|RAM1|gated"]
+    assert state["split_remaining"] == list(range(50, 60))
