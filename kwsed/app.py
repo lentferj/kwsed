@@ -5812,16 +5812,39 @@ class KwsedApp(App[None]):
         if not named:
             return
         count, index, companion = max(named, key=lambda item: (item[0], -item[1]))
+        body = (
+            f"{count} parts name {companion.label}, and this file carries "
+            f"that bank too.\n\nThe import wrote {bank.label} only, so "
+            f"those parts play whatever {companion.label} holds now — "
+            "often Init, which makes the performance silent or wrong."
+        )
+        # Push on the next refresh, not inside the worker's completion:
+        # a screen pushed in that same turn can be popped again while the
+        # stack settles, which is a popup nobody ever sees.
+        self.call_after_refresh(
+            self._push_dangling_popup,
+            body,
+            companion.label,
+            banks_list,
+            index,
+            companion,
+            path,
+        )
+
+    def _push_dangling_popup(
+        self,
+        body: str,
+        companion_label: str,
+        banks_list: Sequence[Any],
+        index: int,
+        companion: Any,
+        path: str,
+    ) -> None:
+        """Put the dangling-reference popup on the stack."""
         from kwsed.import_bank import DanglingRefsScreen
 
         self.push_screen(
-            DanglingRefsScreen(
-                f"{count} parts name {companion.label}, and this file carries "
-                f"that bank too.\n\nThe import wrote {bank.label} only, so "
-                f"those parts play whatever {companion.label} holds now — "
-                "often Init, which makes the performance silent or wrong.",
-                write_label=f"the file's {companion.label} bank",
-            ),
+            DanglingRefsScreen(body, write_label=f"the file's {companion_label} bank"),
             lambda answer: self._dangling_answer(
                 answer, banks_list, index, companion, path
             ),
