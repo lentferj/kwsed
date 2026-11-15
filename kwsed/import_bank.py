@@ -27,9 +27,11 @@ from textual.screen import ModalScreen
 from textual.widgets import DataTable, Static
 
 from kws import banks as kws_banks
+from kws import cards as kws_cards
 from kws import containment, dumps, records
 from kws.perfcopy import ImportMode
 from kwsed.gate import EditGate
+from kwsed.import_source import origin_for_unit
 from kwsed.target_bank import ImportMenuScreen, TargetBankScreen
 from vinsynlib.ui.report import ReportScreen
 
@@ -171,6 +173,24 @@ def _entry_bank(entry: Any) -> Optional[kws_banks.Bank]:
         return None
 
 
+@dataclass(frozen=True)
+class _HCardTarget:
+    """A whole-bank write target that is one HCard bank (``CARD/NN``).
+
+    HCard banks are not entries in :mod:`kws.banks` -- the synth has one
+    physical card slot -- so they cannot be :class:`kws.banks.Bank`
+    instances. This small stand-in carries the two fields the screen and
+    the app actually use (``id`` for the choice's scope, ``label`` for the
+    status line) without inventing new bank semantics.
+    """
+
+    id: str
+    label: str
+    number: int = 11
+    sysex: int = 3
+    writable: bool = True
+
+
 class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
     DEFAULT_CSS = """
     WholeBankImportScreen { align: center middle; }
@@ -209,16 +229,40 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
         path: str,
         banks: Sequence["ImportedBank"],
         gate: Optional[EditGate] = None,
+        card_mode: Optional[str] = None,
+        hcard_banks: Optional[Sequence[Any]] = None,
     ) -> None:
         super().__init__()
         self._path = path
         self._banks: list["ImportedBank"] = list(banks)
         self._source_index = 0
-        self._writable = kws_banks.writable_banks()
+        self._writable: list[Any] = list(kws_banks.writable_banks())
         self._target_index = 0
         self._gate = gate
         self._mode = ImportMode.AS_IS
         self._audit: Optional[containment.ContainmentAudit] = None
+        is_hcard = card_mode == "hcard" or hcard_banks is not None
+        if is_hcard:
+            if hcard_banks is not None:
+                numbers: Sequence[Any] = hcard_banks
+            else:
+                numbers = kws_cards.bank_numbers()
+            seen: set[str] = {str(getattr(w, "id", w)) for w in self._writable}
+            for number in numbers:
+                if isinstance(number, str):
+                    scope = (
+                        number
+                        if number.startswith("CARD/")
+                        else f"CARD/{int(number):02d}"
+                    )
+                else:
+                    scope = kws_cards.scope_id(int(number))
+                if scope in seen:
+                    continue
+                seen.add(scope)
+                self._writable.append(
+                    _HCardTarget(id=scope, label=origin_for_unit(scope))
+                )
 
     @property
     def banks(self) -> list["ImportedBank"]:
@@ -229,7 +273,7 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
             raise IndexError("no source banks")
         return self._banks[self._source_index]
 
-    def _target_bank(self) -> kws_banks.Bank:
+    def _target_bank(self) -> Any:
         if not self._writable:
             raise IndexError("no writable banks")
         return self._writable[self._target_index]

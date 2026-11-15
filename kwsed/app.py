@@ -5304,7 +5304,10 @@ class KwsedApp(App[None]):
         whole_banks: Any = [entry]
         self.push_screen(
             WholeBankImportScreen(
-                path=origin, banks=whole_banks, gate=self._write_gate
+                path=origin,
+                banks=whole_banks,
+                gate=self._write_gate,
+                card_mode=self._card_mode,
             ),
             lambda picked: self._import_whole_bank_chosen(whole_banks, picked),
         )
@@ -5342,7 +5345,10 @@ class KwsedApp(App[None]):
         if kind == 0:
             self.push_screen(
                 WholeBankImportScreen(
-                    path=path, banks=banks_list, gate=self._write_gate
+                    path=path,
+                    banks=banks_list,
+                    gate=self._write_gate,
+                    card_mode=self._card_mode,
                 ),
                 lambda choice: self._import_whole_bank_chosen(banks_list, choice),
             )
@@ -5427,6 +5433,34 @@ class KwsedApp(App[None]):
             raise ValueError("; ".join(plan.rejected))
         return perfcopy.build_self_contained(plan_sources, plan)
 
+    def _resolve_whole_bank_target(self, choice: Any) -> tuple[Any, str]:
+        from kws import banks as _banks
+
+        target_scope = str(getattr(choice, "target_bank", "") or "")
+        if not target_scope:
+            target_scope = "CARD"
+        try:
+            target = _banks.bank(target_scope)
+        except LookupError:
+            if target_scope.startswith("CARD/"):
+                target = _banks.bank("CARD")
+            else:
+                raise
+        return target, target_scope
+
+    def _read_target_source_for_write(
+        self, sources: dict[str, Any], target_scope: str, target: Any
+    ) -> Any:
+        target_source = sources.get(target_scope)
+        if target_source is None and target_scope != getattr(target, "id", None):
+            target_source = sources.get(target.id)
+        if target_source is None:
+            try:
+                target_source = self._read_source_offline(target_scope)
+            except Exception:
+                target_source = self._read_source_offline(target.id)
+        return target_source
+
     def _import_whole_bank_write(self, bank: Any, choice: Any) -> None:
         if not self._write_gate.armed:
             self.notify_status("write gate is locked", refused=True)
@@ -5434,7 +5468,17 @@ class KwsedApp(App[None]):
         from kws import banks as _banks
         from kws import backup as _backup
 
-        target = _banks.bank(choice.target_bank)
+        target, target_scope = self._resolve_whole_bank_target(choice)
+        if target_scope.startswith("CARD/"):
+            # The unit has one card slot: a write to CARD/07 lands on
+            # whatever card is in the slot. Refuse unless the slot holds
+            # that card, or the bytes would overwrite the wrong physical
+            # card while being filed under the requested archive scope.
+            try:
+                self._guard_card_slot(target_scope)
+            except ValueError as exc:
+                self.notify_status(str(exc), refused=True)
+                return
         sources = self._sources_with_store()
         label = getattr(bank, "label", "")
         mode = getattr(choice, "mode", perfcopy.ImportMode.AS_IS)
@@ -5445,9 +5489,9 @@ class KwsedApp(App[None]):
         )
 
         def work() -> Any:
-            target_source = sources.get(target.id)
-            if target_source is None:
-                target_source = self._read_source_offline(target.id)
+            target_source = self._read_target_source_for_write(
+                sources, target_scope, target
+            )
             built = self._whole_bank_bytes(bank, sources, target, mode)
             before = self._before_blocks(target_source, target)
             result = self.device.write_bank_bundle(
@@ -5466,14 +5510,15 @@ class KwsedApp(App[None]):
                 return
             built, write_result = result
             self._import_whole_bank_written(
-                label, target, built, write_result, conflict
+                label, target, built, write_result, conflict, target_scope=target_scope
             )
 
-        status = f"writing {label} into {target.label}..."
+        into = target_scope if target_scope != target.id else target.label
+        status = f"writing {label} into {into}..."
         if conflict:
             status = f"warning: this import overwrites {conflict} — writing anyway"
         self.notify_status(status, warn=bool(conflict))
-        self._device_worker(work, done, f"importing {label} into {target.label}")
+        self._device_worker(work, done, f"importing {label} into {into}")
 
     def _import_whole_bank_written(
         self,
@@ -5482,8 +5527,11 @@ class KwsedApp(App[None]):
         relocated: Any,
         result: Any,
         conflict: str = "",
+        target_scope: Optional[str] = None,
     ) -> None:
         """Book-keeping after a whole-bank import has landed."""
+        if target_scope is None:
+            target_scope = getattr(target, "id", None) or str(target)
         if hasattr(self, "_record_write"):
             self._record_write(result)
         perfs = [
@@ -5497,16 +5545,16 @@ class KwsedApp(App[None]):
             for i in range(len(relocated.patches) // rec.PATCH_SIZE)
         ]
         new_source = deps.Source(
-            scope_id=target.id,
+            scope_id=target_scope,
             performances=perfs,
             patches=patches,
             waveseq=relocated.waveseq,
         )
-        self._sources[target.id] = new_source
+        self._sources[target_scope] = new_source
         if self._bankstore_dir is not None:
             try:
                 bankstore.save(
-                    target.id,
+                    target_scope,
                     performances=relocated.performances,
                     patches=relocated.patches,
                     waveseq=relocated.waveseq,
@@ -5514,11 +5562,11 @@ class KwsedApp(App[None]):
                 )
             except OSError:
                 pass
-        self._refresh_written_bank(target.id, relocated)
+        self._refresh_written_bank(target_scope, relocated)
         overwrote = f"; overwrote {conflict}" if conflict else ""
+        into = target_scope if target_scope != target.id else target.label
         self.notify_status(
-            f"imported {label} into {target.label}: {len(perfs)} performances"
-            f"{overwrote}",
+            f"imported {label} into {into}: {len(perfs)} performances{overwrote}",
             warn=bool(conflict),
         )
 

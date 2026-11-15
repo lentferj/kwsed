@@ -1946,3 +1946,90 @@ async def test_spillover_requires_the_write_gate(tmp_path: Any) -> None:
         assert isinstance(app.screen, WholeBankImportScreen)
         assert "write gate is locked" in _static_text(app.screen, "whole-bank-status")
     assert app.device.bundle_write_count == 0
+
+
+@pytest.mark.asyncio
+async def test_whole_bank_targets_include_hcard_banks_only_in_hcard_mode() -> None:
+    """CARD/NN targets appear in hcard mode and nowhere else."""
+    plain = WholeBankImportScreen(path="one.syx", banks=[_make_bank(scope="RAM1")])
+    assert all(
+        not str(getattr(w, "id", "")).startswith("CARD/") for w in plain._writable
+    )
+    hcard = WholeBankImportScreen(
+        path="one.syx",
+        banks=[_make_bank(scope="RAM1")],
+        card_mode="hcard",
+        hcard_banks=[7],
+    )
+    ids = [str(getattr(w, "id", "")) for w in hcard._writable]
+    assert "CARD/07" in ids
+    assert ids.index("CARD/07") >= len(ids) - 1  # appended after physical banks
+
+
+def _card_write_app(
+    tmp_path: Any, monkeypatch: Any, active_scope: str
+) -> tuple[Any, list[tuple[int, dict[str, Any]]], dict[str, Any], list[str]]:
+    """An armed app with a captured CARD/07, writes and statuses recorded."""
+    from kws import backup as _backup
+
+    app = _make_app(tmp_path, bankstore_dir=str(tmp_path / "store"))
+    app._sources["CARD/07"] = _make_bank(scope="CARD/07").source
+    app._write_gate = EditGate(armed=True)
+    statuses: list[str] = []
+    app.notify_status = lambda msg, *a, **k: statuses.append(str(msg))  # type: ignore[method-assign]
+    app._active_card_scope = lambda: active_scope  # type: ignore[method-assign]
+    backup_dir = str(tmp_path / "backups")
+    os.makedirs(backup_dir, exist_ok=True)
+    monkeypatch.setattr(_backup, "default_dir", lambda root=None: backup_dir)
+    saved: dict[str, Any] = {}
+
+    def fake_save(scope_id: str, **k: Any) -> None:
+        saved["scope"] = scope_id
+        saved.update(k)
+
+    monkeypatch.setattr(bankstore, "save", fake_save)
+    writes: list[tuple[int, dict[str, Any]]] = []
+
+    def fake_write(bank_number: int, **k: Any) -> dict[str, Any]:
+        writes.append((bank_number, k))
+        return {"verified": True}
+
+    app.device.write_bank_bundle = fake_write
+
+    def _no_record(result: Any) -> None:
+        return None
+
+    app._record_write = _no_record  # type: ignore[method-assign]
+    return app, writes, saved, statuses
+
+
+@pytest.mark.asyncio
+async def test_whole_write_to_hcard_scope_uses_slot_and_files_archive(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """A CARD/07 write hits the one physical slot, filed under the archive."""
+    app, writes, saved, _statuses = _card_write_app(tmp_path, monkeypatch, "CARD/07")
+    app._import_whole_bank_write(
+        _make_bank(scope="RAM1"), WholeBankChoice(0, "CARD/07", True)
+    )
+    assert len(writes) == 1
+    assert writes[0][0] == banks.bank("CARD").number
+    assert writes[0][1]["backup_dir"].endswith("backups")
+    assert saved.get("scope") == "CARD/07"
+    assert "CARD/07" in app._sources
+
+
+@pytest.mark.asyncio
+async def test_whole_write_to_other_hcard_scope_refuses(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """The slot guard refuses a CARD/07 write while CARD/08 is inserted."""
+    app, writes, saved, statuses = _card_write_app(tmp_path, monkeypatch, "CARD/08")
+    app._sources.pop("CARD/07")
+    app._import_whole_bank_write(
+        _make_bank(scope="RAM1"), WholeBankChoice(0, "CARD/07", True)
+    )
+    assert writes == []
+    assert saved == {}
+    assert "CARD/07" not in app._sources
+    assert any("CARD/07" in s and "CARD/08" in s for s in statuses)
