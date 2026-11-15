@@ -270,3 +270,83 @@ def test_as_is_is_not_a_plan():
     audit = containment.audit_containment(sources, "RAM1")
     with pytest.raises(ValueError):
         perfcopy.plan_self_contained(sources, audit, CARD, perfcopy.ImportMode.AS_IS)
+
+
+class TestOverflowImport:
+    """External patches go to a second bank; the parts are repointed there."""
+
+    def _sources(self):
+        # RAM 1: two performances, each naming one own patch and one RAM 2
+        # patch. RAM 2's patch 0 names a wave sequence that lives in RAM 1 --
+        # the cross-bank reference the holder resolution exists for.
+        seq = make_waveseq({0: [40, 41]})[0]
+        own = [make_patch("Local One"), make_patch("Local Two")]
+        foreign = make_patch("Foreign One")
+        buf = bytearray(foreign)
+        r.set_patch_wave(buf, 0, bank=0, wave=0)
+        foreign = bytes(buf)
+        performances = [
+            make_performance("Overflow One", ((0, 0), (1, 0))),
+            make_performance("Overflow Two", ((0, 1), (1, 0))),
+        ]
+        sources = {
+            "RAM1": deps.Source(
+                scope_id="RAM1",
+                performances=performances,
+                patches=own,
+                waveseq=seq,
+            ),
+            "RAM2": deps.Source(
+                scope_id="RAM2", performances=[], patches=[foreign], waveseq=None
+            ),
+        }
+        return sources, foreign
+
+    def test_every_performance_travels_and_parts_are_repointed(self):
+        sources, foreign = self._sources()
+        plan = perfcopy.plan_overflow_import(
+            sources, "RAM1", CARD, banks.bank("RAM3"), mode=MODE_1TO1
+        )
+        assert plan.fits, plan.rejected
+        built = perfcopy.build_overflow_import(sources, plan)
+        assert len(plan.atomic.allocations) == 2
+        for slot in (0, 1):
+            parts = _used_parts(_performance(built.destination, slot))
+            assert parts[0].bank == CARD.number  # own patch -> the card
+            assert parts[1].bank == banks.bank("RAM3").number
+            assert parts[1].patch == 0  # one shared overflow slot
+        assert built.repointed_parts == 2
+        assert built.patch_count == 1
+        at = 0
+        assert built.overflow_patches[at : at + r.PATCH_SIZE] == _as_wave_bank(
+            foreign, banks.bank("RAM3").number
+        )
+        # The card's own patches travelled too.
+        assert _patch(built.destination, 0) == make_patch("Local One")
+
+    def test_overflow_patch_reads_the_bank_its_sequence_names(self):
+        """A RAM 2 patch naming a RAM 1 sequence gets RAM 1's bytes."""
+        sources, _foreign = self._sources()
+        plan = perfcopy.plan_overflow_import(
+            sources, "RAM1", CARD, banks.bank("RAM3"), mode=MODE_1TO1
+        )
+        built = perfcopy.build_overflow_import(sources, plan)
+        assert built.overflow_waveseq is not None
+        header = r.sequence_header(built.overflow_waveseq, 0)
+        assert header["link"] != 0
+        step = r.step(built.overflow_waveseq, header["link"])
+        assert step["wave"] == 40  # the RAM 1 sequence's first step
+
+    def test_an_overflow_bank_of_the_target_is_refused(self):
+        sources, _foreign = self._sources()
+        with pytest.raises(ValueError, match="overflow bank is the destination"):
+            perfcopy.plan_overflow_import(sources, "RAM1", CARD, CARD)
+
+
+def _as_wave_bank(record, bank):
+    """``record`` with every wave-sequence reference repointed to ``bank``."""
+    out = bytearray(record)
+    for wave in r.patch_waves(out):
+        if wave.is_sequence:
+            r.set_patch_wave(out, wave.index, bank=bank, wave=wave.wave)
+    return bytes(out)

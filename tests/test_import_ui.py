@@ -712,7 +712,9 @@ async def test_whole_unit_choice_armed(tmp_path: Any) -> None:
 
     assert len(writes) == 1
     w = writes[0]
-    assert w["before_blocks"]  # non-empty
+    # The bridge must read the unit itself. A cached bank here would be
+    # treated as "what is on the unit" and could skip the whole write.
+    assert w["before_blocks"] is None
     # target bytes relocated to RAM3
     assert w["performances"] is not None
     # check a part bank points to target.number if present
@@ -814,7 +816,8 @@ async def test_whole_write_as_is_matches_relocate_bank(tmp_path: Any) -> None:
     assert w["performances"] == expected.performances
     assert w["patches"] == expected.patches
     assert w["waveseq"] == expected.waveseq
-    assert w["before_blocks"]  # the pre-write backup read still happens
+    # No cached before-block: the bridge reads the unit before writing it.
+    assert w["before_blocks"] is None
 
 
 def _written_perfs(device: DemoDevice) -> bytes:
@@ -1949,21 +1952,21 @@ async def test_spillover_requires_the_write_gate(tmp_path: Any) -> None:
 
 
 @pytest.mark.asyncio
-async def test_whole_bank_targets_include_hcard_banks_only_in_hcard_mode() -> None:
-    """CARD/NN targets appear in hcard mode and nowhere else."""
-    plain = WholeBankImportScreen(path="one.syx", banks=[_make_bank(scope="RAM1")])
-    assert all(
-        not str(getattr(w, "id", "")).startswith("CARD/") for w in plain._writable
-    )
-    hcard = WholeBankImportScreen(
-        path="one.syx",
-        banks=[_make_bank(scope="RAM1")],
-        card_mode="hcard",
-        hcard_banks=[7],
-    )
-    ids = [str(getattr(w, "id", "")) for w in hcard._writable]
-    assert "CARD/07" in ids
-    assert ids.index("CARD/07") >= len(ids) - 1  # appended after physical banks
+async def test_whole_bank_targets_are_the_four_physical_banks() -> None:
+    """The target list never names an archived card bank.
+
+    The unit has one card slot, so "Card 07" could only ever write the card
+    that is in it. Offering every archive invited a write nobody could aim.
+    """
+    for card_mode in (None, "hcard", "cards"):
+        screen = WholeBankImportScreen(
+            path="one.syx",
+            banks=[_make_bank(scope="RAM1")],
+            card_mode=card_mode,
+            hcard_banks=[7, 30],
+        )
+        ids = [str(getattr(w, "id", "")) for w in screen._writable]
+        assert ids == ["RAM1", "RAM2", "RAM3", "CARD"]
 
 
 def _card_write_app(
@@ -2077,18 +2080,16 @@ async def test_next_pass_needs_a_self_contained_mode() -> None:
 
 
 def _pass_app(tmp_path: Any, monkeypatch: Any) -> KwsedApp:
-    """An armed hcard app with RAM 2 and CARD/07 targets ready to write."""
+    """An armed app with RAM 2 and RAM 3 ready to receive two passes."""
     from kws import backup as _backup
 
     app = KwsedApp(
         DemoDevice(),
-        card_mode="hcard",
         bankstore_dir=str(tmp_path / "store"),
     )
     app._sources["RAM2"] = _make_bank(scope="RAM2", active_slots=[]).source
-    app._sources["CARD/07"] = _make_bank(scope="CARD/07", active_slots=[]).source
+    app._sources["RAM3"] = _make_bank(scope="RAM3", active_slots=[]).source
     app._write_gate = EditGate(armed=True)
-    app._active_card_scope = lambda: "CARD/07"  # type: ignore[method-assign]
     app.notify_status = lambda *a, **k: None  # type: ignore[method-assign]
 
     def _no_record(_result: Any) -> None:
@@ -2110,30 +2111,30 @@ async def _wait_for_writes(app: KwsedApp, pilot: Any, count: int) -> None:
 
 
 def _assert_two_pass_bytes(app: KwsedApp, bank: Any) -> None:
-    """Pass 1 fills RAM 2; pass 2 compacts the last five into CARD/07."""
+    """Pass 1 fills RAM 2; pass 2 compacts the last five into RAM 3."""
     source = bank.source
     ram2 = banks.bank("RAM2").number
-    card = banks.bank("CARD").number
+    ram3 = banks.bank("RAM3").number
     ram2_perf = _pass_blob(app.device, "RAM2", banks.Kind.PERFORMANCE)
     for slot in range(50):
         assert _perf_at(ram2_perf, slot) == _as_written(
             source.performances[slot], {0: (ram2, slot % 35)}
         )
-    card_perf = _pass_blob(app.device, "CARD", banks.Kind.PERFORMANCE)
+    ram3_perf = _pass_blob(app.device, "RAM3", banks.Kind.PERFORMANCE)
     for slot in range(5):
-        assert _perf_at(card_perf, slot) == _as_written(
-            source.performances[50 + slot], {0: (card, slot)}
+        assert _perf_at(ram3_perf, slot) == _as_written(
+            source.performances[50 + slot], {0: (ram3, slot)}
         )
     for slot in range(5, 50):
-        assert _perf_at(card_perf, slot) == _clean_perf_record()
+        assert _perf_at(ram3_perf, slot) == _clean_perf_record()
     ram2_patch = _pass_blob(app.device, "RAM2", banks.Kind.PATCH)
     for slot in range(35):
         assert _patch_at(ram2_patch, slot) == source.patches[slot]
-    card_patch = _pass_blob(app.device, "CARD", banks.Kind.PATCH)
+    ram3_patch = _pass_blob(app.device, "RAM3", banks.Kind.PATCH)
     for slot in range(5):
-        assert _patch_at(card_patch, slot) == source.patches[15 + slot]
+        assert _patch_at(ram3_patch, slot) == source.patches[15 + slot]
     for slot in range(5, 35):
-        assert _patch_at(card_patch, slot) == bytes(PATCH_RECORD_SIZE)
+        assert _patch_at(ram3_patch, slot) == bytes(PATCH_RECORD_SIZE)
 
 
 def _assert_pass_state(app: KwsedApp, bank: Any) -> None:
@@ -2146,7 +2147,7 @@ def _assert_pass_state(app: KwsedApp, bank: Any) -> None:
     written = state["written"]
     assert set(written) == set(range(55))
     assert {slot for slot, t in written.items() if t == "RAM 2"} == set(range(50))
-    assert {slot for slot, t in written.items() if t == "CARD/07"} == set(range(50, 55))
+    assert {slot for slot, t in written.items() if t == "RAM 3"} == set(range(50, 55))
     audit = containment.audit_containment({"RAM1": bank.source}, "RAM1")
     contained = {entry.slot for entry in audit.performances if entry.contained}
     assert set(written) == contained
@@ -2169,7 +2170,7 @@ async def test_two_pass_import_splits_disjoint_targets(
     async with app.run_test() as pilot:
         await pilot.pause()
         first = WholeBankImportScreen(
-            path="two.syx", banks=[bank], gate=app._write_gate, card_mode="hcard"
+            path="two.syx", banks=[bank], gate=app._write_gate
         )
         app.push_screen(
             first,
@@ -2206,7 +2207,7 @@ async def test_two_pass_import_splits_disjoint_targets(
         await pilot.press("n")
         await _settle(pilot)
         assert isinstance(app.screen, TargetBankScreen)
-        for _ in range(11):  # RAM 1..3, Card, CARD/00..07
+        for _ in range(2):  # RAM 1 -> RAM 3
             await pilot.press("down")
         await pilot.press("enter")
         await _wait_for_writes(app, pilot, 2)
@@ -2262,3 +2263,110 @@ async def test_self_contained_sessions_are_independent(
     write("session-two")
     assert len(writes) == 3
     assert writes[2]["performances"] == first
+
+
+@pytest.mark.asyncio
+async def test_overflow_key_only_when_parts_name_another_bank() -> None:
+    """`o` is offered for a mixed bank and refused for a self-contained one."""
+    app = KwsedApp(DemoDevice())
+    from tests.test_bankbuild import make_performance
+
+    mixed = WholeBankImportScreen(path="mixed.syx", banks=[_mixed_bank()])
+    clean_bank = _make_bank(scope="RAM1", active_slots=[])
+    clean_bank.source.performances[3] = make_performance("Local Only", ((0, 0),))
+    clean = WholeBankImportScreen(path="clean.syx", banks=[clean_bank])
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.push_screen(clean)
+        await _settle(pilot)
+        await pilot.press("o")
+        await _settle(pilot)
+        assert isinstance(app.screen, WholeBankImportScreen)
+        assert "nothing to overflow" in _static_text(clean, "whole-bank-status")
+        clean.dismiss(None)
+        await _settle(pilot)
+
+        app.push_screen(mixed)
+        await _settle(pilot)
+        await pilot.press("o")
+        await _settle(pilot)
+        assert isinstance(app.screen, TargetBankScreen)
+        # RAM 2 is the bank the parts name, so it is offered first.
+        assert app.screen._choices[0] == banks.bank("RAM2").label
+
+
+@pytest.mark.asyncio
+async def test_overflow_choice_carries_the_bank_and_keeps_the_target() -> None:
+    app = KwsedApp(DemoDevice())
+    captured: list[Any] = []
+    screen = WholeBankImportScreen(
+        path="mixed.syx", banks=[_mixed_bank()], gate=EditGate(armed=True)
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.push_screen(screen, captured.append)
+        await _settle(pilot)
+        await pilot.press("b")  # target RAM 2 ... then overflow must skip it
+        await _settle(pilot)
+        await pilot.press("o")
+        await _settle(pilot)
+        screen_now = app.screen
+        assert isinstance(screen_now, TargetBankScreen)
+        labels = screen_now._choices
+        assert banks.bank("RAM2").label not in labels  # the target itself
+        await pilot.press("enter")
+        await _settle(pilot)
+    choice = captured[0]
+    assert choice.overflow_bank in ("RAM1", "RAM3")
+    assert choice.target_bank == "RAM2"
+    assert choice.mode is perfcopy.ImportMode.AS_IS
+
+
+@pytest.mark.asyncio
+async def test_overflow_writes_the_ram_bank_first_then_the_target(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """Two fenced writes, overflow first, target second, both backed up."""
+    from kws import backup as _backup
+
+    app = _make_app(tmp_path, bankstore_dir=str(tmp_path / "store"))
+    app._sources["RAM3"] = _make_bank(scope="RAM3", active_slots=[]).source
+    app._sources["CARD"] = _make_bank(scope="CARD", active_slots=[]).source
+    app._write_gate = EditGate(armed=True)
+    statuses: list[str] = []
+    app.notify_status = lambda msg, *a, **k: statuses.append(str(msg))  # type: ignore[method-assign]
+    backup_dir = str(tmp_path / "backups")
+    os.makedirs(backup_dir, exist_ok=True)
+    monkeypatch.setattr(_backup, "default_dir", lambda root=None: backup_dir)
+    monkeypatch.setattr(bankstore, "save", lambda *a, **k: None)
+
+    def _no_record(_result: Any) -> None:
+        return None
+
+    app._record_write = _no_record  # type: ignore[method-assign]
+    writes: list[tuple[int, dict[str, Any]]] = []
+
+    def fake_write(bank_number: int, **k: Any) -> dict[str, Any]:
+        writes.append((bank_number, dict(k)))
+        return {"verified": True}
+
+    app.device.write_bank_bundle = fake_write
+    bank = _mixed_bank()
+    app._import_whole_bank_write(
+        bank,
+        WholeBankChoice(0, "CARD", True, perfcopy.ImportMode.AS_IS, "", True, "RAM3"),
+    )
+
+    assert [number for number, _k in writes] == [
+        banks.bank("RAM3").number,
+        banks.bank("CARD").number,
+    ]
+    overflow_payload = writes[0][1]
+    target_payload = writes[1][1]
+    assert overflow_payload["patches"] is not None
+    assert target_payload["performances"] is not None
+    # No cached before-block for either: the bridge reads the unit itself,
+    # so a fresh card is never mistaken for the cached one.
+    assert all(k["before_blocks"] is None for _n, k in writes)
+    # The status names both banks and the patches that moved.
+    assert any("RAM 3" in s and "patches" in s for s in statuses), statuses

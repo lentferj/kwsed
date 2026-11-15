@@ -52,6 +52,10 @@ __all__ = [
     "remaining_performances",
     "partition_self_contained",
     "plan_self_contained",
+    "OverflowPlan",
+    "OverflowBuilt",
+    "plan_overflow_import",
+    "build_overflow_import",
     "build_self_contained",
     "active_performances",
     "copy_into_bank",
@@ -131,6 +135,9 @@ class AtomicPlan:
     allocations: List[AtomicPerfAllocation] = field(default_factory=list)
     patch_count: int = 0
     sequence_map: Dict[deps.SequenceKey, int] = field(default_factory=dict)
+    #: Patches that were left in another bank on purpose (``carry_external``
+    #: off), in first-use order, so the caller can plan their overflow.
+    external_patches: List[relations.PatchId] = field(default_factory=list)
     steps_used: int = 0
     rejected: List[str] = field(default_factory=list)
 
@@ -191,19 +198,36 @@ def _load_and_validate_source(
 
 
 def _collect_unique_patches(
-    record: Sequence[int], scope: str
-) -> Tuple[List[Any], List[relations.PatchId]]:
-    """Extract active parts and collect unique patches with intra-performance dedup."""
+    record: Sequence[int],
+    scope: str,
+    *,
+    local_bank_number: Optional[int] = None,
+) -> Tuple[List[Any], List[relations.PatchId], List[relations.PatchId]]:
+    """Active parts plus the patches worth carrying, deduped in order.
+
+    Returns ``(parts, carry, external)``. With ``local_bank_number`` set,
+    ``carry`` holds only the patches that live in the performance's own
+    bank; ``external`` holds the rest, in first-use order, so a caller can
+    heap them into another bank and repoint them afterwards. Without it,
+    every patch is carried and ``external`` is empty.
+    """
     parts = [p for p in rec.performance_parts(record) if p.used]
     local_map: Dict[relations.PatchId, int] = {}
-    unique_patches: List[relations.PatchId] = []
+    carry: List[relations.PatchId] = []
+    external: List[relations.PatchId] = []
+    seen_external: Set[relations.PatchId] = set()
     for part in parts:
         patch_scope = relations.resolve_part_scope(part.bank, scope)
         pid = relations.PatchId(patch_scope, part.patch)
+        if local_bank_number is not None and part.bank != local_bank_number:
+            if pid not in seen_external:
+                seen_external.add(pid)
+                external.append(pid)
+            continue
         if pid not in local_map:
-            local_map[pid] = len(unique_patches)
-            unique_patches.append(pid)
-    return parts, unique_patches
+            local_map[pid] = len(carry)
+            carry.append(pid)
+    return parts, carry, external
 
 
 def _check_patch_budget(
@@ -316,7 +340,8 @@ def _commit_allocation(
     for part in parts:
         patch_scope = relations.resolve_part_scope(part.bank, perf_id.scope_id)
         pid = relations.PatchId(patch_scope, part.patch)
-        part_patch_slots[part.index] = pid_to_slot[pid]
+        if pid in pid_to_slot:
+            part_patch_slots[part.index] = pid_to_slot[pid]
 
     for key in new_seqs:
         plan.sequence_map[key] = len(plan.sequence_map)
@@ -371,6 +396,7 @@ def _plan_one_atomic(
     request_index: int,
     perf_id: relations.PerfId,
     shared_patches: Optional[Dict[relations.PatchId, int]] = None,
+    carry_external: bool = True,
 ) -> None:
     """Plan a single performance for an atomic bank."""
     scope = perf_id.scope_id
@@ -385,7 +411,13 @@ def _plan_one_atomic(
         return
 
     name = dumps.record_name(record)
-    parts, unique_patches = _collect_unique_patches(record, scope)
+    local_bank = None if carry_external else _source_bank_number(scope, srcs)
+    parts, unique_patches, external = _collect_unique_patches(
+        record, scope, local_bank_number=local_bank
+    )
+    for pid in external:
+        if pid not in plan.external_patches:
+            plan.external_patches.append(pid)
     k = _count_fresh_patches(unique_patches, shared_patches)
 
     if _check_patch_budget(plan, budget, k, scope, num, name):
@@ -433,6 +465,7 @@ def plan_atomic_bank(
     destination_bank: banks.Bank = _DEFAULT_DESTINATION,
     budget: bankbuild.Budget = _DEFAULT_BUDGET,
     share_patches: bool = False,
+    carry_external: bool = True,
 ) -> AtomicPlan:
     """Plan ``chosen`` performances into one bank, in the order given.
 
@@ -448,7 +481,9 @@ def plan_atomic_bank(
     shared: Optional[Dict[relations.PatchId, int]] = {} if share_patches else None
 
     for request_index, perf_id in enumerate(chosen):
-        _plan_one_atomic(plan, budget, used, srcs, request_index, perf_id, shared)
+        _plan_one_atomic(
+            plan, budget, used, srcs, request_index, perf_id, shared, carry_external
+        )
 
     plan.steps_used = len(used)
     return plan
@@ -596,8 +631,8 @@ def _build_wave_sequences(
 
     # First pass: copy steps
     for (src_id, wave_bank, seq), _slot in sorted_map:
-        holder = srcs[src_id]
-        if holder.waveseq is None:
+        holder = deps.sequence_holder(dict(srcs), src_id, wave_bank)
+        if holder is None or holder.waveseq is None:
             raise ValueError(f"{src_id} has no wave sequence bank")
         next_step = _copy_wave_sequence_steps(
             holder, seq, src_id, wave_bank, waveseq, next_step, moved
@@ -605,7 +640,9 @@ def _build_wave_sequences(
 
     # Second pass: links and headers
     for (src_id, wave_bank, seq), slot in sorted_map:
-        holder = srcs[src_id]
+        holder = deps.sequence_holder(dict(srcs), src_id, wave_bank)
+        if holder is None or holder.waveseq is None:
+            raise ValueError(f"{src_id} has no wave sequence bank")
         _link_wave_sequence_steps(holder, seq, src_id, wave_bank, waveseq, made, moved)
 
         head = rec.SEQ_BASE + slot * rec.SEQ_SIZE
@@ -864,6 +901,237 @@ def build_self_contained(
         template_performances=template_performances,
         template_patches=template_patches,
         template_waveseq=template_waveseq,
+    )
+
+
+@dataclass
+class OverflowPlan:
+    """One import split across a destination bank and an overflow bank.
+
+    The destination holds the performances and the patches they reference in
+    their own bank; the overflow bank holds the patches they reference in
+    *other* writable banks, so the destination's parts can be repointed at
+    it. Two banks, two writes, one self-contained result: every patch a
+    performance names now lives in a bank the instrument has.
+    """
+
+    destination_bank: banks.Bank
+    overflow_bank: banks.Bank
+    atomic: AtomicPlan
+    #: Patch → overflow slot, first-use order, deduplicated by content.
+    patch_slots: Dict[relations.PatchId, int] = field(default_factory=dict)
+    sequence_map: Dict[deps.SequenceKey, int] = field(default_factory=dict)
+    rejected: List[str] = field(default_factory=list)
+
+    @property
+    def fits(self) -> bool:
+        return not self.rejected
+
+
+@dataclass
+class OverflowBuilt:
+    """The bytes of both banks, and what the repoint touched."""
+
+    destination: AtomicBuilt
+    overflow_patches: bytes
+    overflow_waveseq: Optional[bytes]
+    repointed_parts: int
+    patch_count: int
+
+
+def _external_patch_slots(
+    srcs: Mapping[str, deps.Source],
+    patches: Sequence[relations.PatchId],
+) -> Tuple[Dict[relations.PatchId, int], List[bytes]]:
+    """Assign overflow slots, deduplicating byte-identical patch records."""
+    slots: Dict[relations.PatchId, int] = {}
+    records: List[bytes] = []
+    by_content: Dict[bytes, int] = {}
+    for pid in patches:
+        holder = srcs.get(pid.scope_id)
+        if holder is None or pid.number >= len(holder.patches):
+            continue
+        record = bytes(holder.patches[pid.number])
+        if record in by_content:
+            slots[pid] = by_content[record]
+            continue
+        slot = len(records)
+        by_content[record] = slot
+        slots[pid] = slot
+        records.append(record)
+    return slots, records
+
+
+def plan_overflow_import(
+    sources: Mapping[str, deps.Source],
+    source_scope: str,
+    destination_bank: banks.Bank,
+    overflow_bank: banks.Bank,
+    *,
+    mode: ImportMode = ImportMode.SELF_CONTAINED_PACKED,
+    budget: bankbuild.Budget = _DEFAULT_BUDGET,
+) -> OverflowPlan:
+    """Plan a self-contained import whose external patches go to another bank.
+
+    Every non-empty performance travels, not only the already-contained
+    ones: the destination receives the performances and the patches they
+    name in their own bank, and the patches they name in other writable
+    banks are deduplicated by content and slotted into ``overflow_bank``.
+    The caller writes both banks and repoints the parts, which is what the
+    instrument needs to sound as authored -- no performance is dropped for
+    the fault of pointing at a second bank.
+
+    ``mode`` chooses placement: 1:1 keeps each performance's own slot;
+    packed re-slots them 0..n-1 and shares one slot per source patch.
+    """
+    if destination_bank.number == overflow_bank.number:
+        raise ValueError("the overflow bank is the destination bank")
+    if mode is ImportMode.AS_IS:
+        # A whole-bank import keeps each performance at its own slot; with
+        # an overflow bank the placement question is the same, so as-is
+        # means 1:1 here rather than "refuse".
+        mode = ImportMode.SELF_CONTAINED_1TO1
+    source = sources.get(source_scope)
+    if source is None:
+        raise LookupError(f"source {source_scope!r} is not loaded")
+    slots = [
+        slot
+        for slot, record in enumerate(source.performances)
+        if len(record) >= rec.PERFORMANCE_SIZE and not is_empty_performance(record)
+    ]
+    chosen = [relations.PerfId(source_scope, slot) for slot in slots]
+    atomic = plan_atomic_bank(
+        sources,
+        chosen,
+        destination_bank=destination_bank,
+        budget=budget,
+        share_patches=True,
+        carry_external=False,
+    )
+    targets = _target_perf_slots(slots, mode, None)
+    for alloc in atomic.allocations:
+        alloc.target_perf_slot = targets[alloc.source_perf.number]
+    plan = OverflowPlan(
+        destination_bank=destination_bank,
+        overflow_bank=overflow_bank,
+        atomic=atomic,
+    )
+    plan.rejected.extend(atomic.rejected)
+    srcs = dict(sources)
+    plan.patch_slots, records = _external_patch_slots(srcs, atomic.external_patches)
+    if len(records) > budget.patches:
+        plan.rejected.append(
+            f"{len(records)} overflow patches do not fit {overflow_bank.label}'s "
+            f"{budget.patches} slots"
+        )
+    seeds: List[deps.SequenceKey] = []
+    for pid in atomic.external_patches:
+        holder = srcs.get(pid.scope_id)
+        if holder is None or pid.number >= len(holder.patches):
+            continue
+        seeds.extend(deps.patch_dependencies(holder.patches[pid.number], pid.scope_id))
+    order, _chains, unresolved = deps.quoted_closure(srcs, seeds)
+    if unresolved:
+        _src, wave_bank, seq = unresolved[0]
+        plan.rejected.append(
+            f"overflow patch needs wave sequence {seq} from bank {wave_bank}, "
+            f"whose bank is not loaded"
+        )
+    if len(order) > budget.sequences:
+        plan.rejected.append(
+            f"{len(order)} overflow wave sequences do not fit "
+            f"{overflow_bank.label}'s {budget.sequences} slots"
+        )
+    plan.sequence_map = {key: index for index, key in enumerate(order)}
+    return plan
+
+
+def _repoint_built_parts(
+    built: AtomicBuilt,
+    srcs: Mapping[str, deps.Source],
+    overflow_bank: banks.Bank,
+    patch_slots: Mapping[relations.PatchId, int],
+) -> Tuple[bytes, int]:
+    """Point the destination's external parts at their overflow slots."""
+    blob = bytearray(built.performances)
+    moved = 0
+    for alloc in built.plan.allocations:
+        at = alloc.target_perf_slot * rec.PERFORMANCE_SIZE
+        # The builder already rewrote the self-references; take its record,
+        # never the source one, or the self-remap would be undone here.
+        record = bytearray(blob[at : at + rec.PERFORMANCE_SIZE])
+        changed = False
+        for part in rec.performance_parts(record):
+            if not part.used:
+                continue
+            pid = relations.PatchId(
+                relations.resolve_part_scope(part.bank, alloc.source_perf.scope_id),
+                part.patch,
+            )
+            slot = patch_slots.get(pid)
+            if slot is None:
+                continue
+            rec.set_performance_part(
+                record, part.index, bank=overflow_bank.number, patch=slot
+            )
+            changed = True
+            moved += 1
+        if changed:
+            blob[at : at + rec.PERFORMANCE_SIZE] = record
+    return bytes(blob), moved
+
+
+def build_overflow_import(
+    sources: Mapping[str, deps.Source],
+    plan: OverflowPlan,
+) -> OverflowBuilt:
+    """Build both banks. The destination's external parts are repointed."""
+    if not plan.fits:
+        raise ValueError("; ".join(plan.rejected))
+    srcs = dict(sources)
+    built = build_atomic_bank(srcs, plan.atomic)
+    performances, moved = _repoint_built_parts(
+        built, srcs, plan.overflow_bank, plan.patch_slots
+    )
+    patches = bytearray(banks.PATCHES_PER_BANK * rec.PATCH_SIZE)
+    for pid, slot in sorted(plan.patch_slots.items(), key=lambda kv: kv[1]):
+        holder = srcs[pid.scope_id]
+        record = bytearray(holder.patches[pid.number])
+        for wave in rec.patch_waves(record):
+            if not wave.is_sequence:
+                continue
+            key = (pid.scope_id, wave.bank, wave.wave)
+            sequence = plan.sequence_map.get(key)
+            if sequence is None:
+                raise ValueError(
+                    f"{pid.scope_id} patch {pid.number} uses wave sequence "
+                    f"{wave.wave} from bank {wave.bank}, which the plan does "
+                    f"not carry"
+                )
+            rec.set_patch_wave(
+                record, wave.index, bank=plan.overflow_bank.number, wave=sequence
+            )
+        at = slot * rec.PATCH_SIZE
+        patches[at : at + rec.PATCH_SIZE] = record
+    waveseq: Optional[bytes] = None
+    if plan.sequence_map:
+        holder_bank = bytearray(rec.WAVESEQ_BANK_SIZE)
+        carrier = AtomicPlan(destination_bank=plan.overflow_bank)
+        carrier.sequence_map = dict(plan.sequence_map)
+        _build_wave_sequences(srcs, carrier, holder_bank)
+        waveseq = bytes(holder_bank)
+    destination = AtomicBuilt(
+        performances=performances,
+        patches=built.patches,
+        waveseq=built.waveseq,
+        plan=built.plan,
+    )
+    return OverflowBuilt(
+        destination=destination,
+        overflow_patches=bytes(patches),
+        overflow_waveseq=waveseq,
+        repointed_parts=moved,
+        patch_count=len(plan.patch_slots),
     )
 
 
@@ -1804,8 +2072,8 @@ def _build_slot_import_wave_sequences(
 
     # First pass: copy steps
     for key, _slot in sorted_map:
-        holder = srcs[key[0]]
-        if holder.waveseq is None:
+        holder = deps.sequence_holder(dict(srcs), key[0], key[1])
+        if holder is None or holder.waveseq is None:
             raise ValueError(f"{key[0]} has no wave sequence bank")
         _copy_slot_import_steps(
             holder,
@@ -1819,7 +2087,9 @@ def _build_slot_import_wave_sequences(
 
     # Second pass: links and headers
     for key, slot in sorted_map:
-        holder = srcs[key[0]]
+        holder = deps.sequence_holder(dict(srcs), key[0], key[1])
+        if holder is None or holder.waveseq is None:
+            raise ValueError(f"{key[0]} has no wave sequence bank")
         _link_slot_import_steps(holder, key, waveseq, made, moved)
 
         head = rec.SEQ_BASE + slot * rec.SEQ_SIZE

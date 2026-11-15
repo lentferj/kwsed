@@ -28,11 +28,9 @@ from textual.screen import ModalScreen
 from textual.widgets import DataTable, Static
 
 from kws import banks as kws_banks
-from kws import cards as kws_cards
 from kws import containment, dumps, records
 from kws.perfcopy import ImportMode
 from kwsed.gate import EditGate
-from kwsed.import_source import origin_for_unit
 from kwsed.target_bank import ImportMenuScreen, TargetBankScreen
 from vinsynlib.ui.report import ReportScreen
 
@@ -87,6 +85,10 @@ class WholeBankChoice:
     #: app re-offers the screen with the pass state once the write lands.
     #: Companion writes (``x``) leave it off: they are their own flow.
     continue_pass: bool = False
+    #: Where the patches the target cannot hold go (option ``o``), or "" for
+    #: a plain write. The app writes this bank first and repoints the
+    #: target's parts at it.
+    overflow_bank: str = ""
 
 
 @dataclass(frozen=True)
@@ -202,24 +204,6 @@ def _entry_bank(entry: Any) -> Optional[kws_banks.Bank]:
         return None
 
 
-@dataclass(frozen=True)
-class _HCardTarget:
-    """A whole-bank write target that is one HCard bank (``CARD/NN``).
-
-    HCard banks are not entries in :mod:`kws.banks` -- the synth has one
-    physical card slot -- so they cannot be :class:`kws.banks.Bank`
-    instances. This small stand-in carries the two fields the screen and
-    the app actually use (``id`` for the choice's scope, ``label`` for the
-    status line) without inventing new bank semantics.
-    """
-
-    id: str
-    label: str
-    number: int = 11
-    sysex: int = 3
-    writable: bool = True
-
-
 class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
     DEFAULT_CSS = """
     WholeBankImportScreen { align: center middle; }
@@ -246,6 +230,7 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
         Binding("b", "target", "Target"),
         Binding("m", "mode", "Mode"),
         Binding("n", "next_pass", "Next pass"),
+        Binding("o", "overflow", "Overflow"),
         Binding("x", "spillover", "Companions"),
         Binding("w", "toggle_gate", "Gate"),
         Binding("ctrl+s", "write", "Write", priority=True),
@@ -277,28 +262,15 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
         #: Unique per screen visit; see _session_key.
         self._session_token: Optional[str] = None
         self._audit: Optional[containment.ContainmentAudit] = None
-        is_hcard = card_mode == "hcard" or hcard_banks is not None
-        if is_hcard:
-            if hcard_banks is not None:
-                numbers: Sequence[Any] = hcard_banks
-            else:
-                numbers = kws_cards.bank_numbers()
-            seen: set[str] = {str(getattr(w, "id", w)) for w in self._writable}
-            for number in numbers:
-                if isinstance(number, str):
-                    scope = (
-                        number
-                        if number.startswith("CARD/")
-                        else f"CARD/{int(number):02d}"
-                    )
-                else:
-                    scope = kws_cards.scope_id(int(number))
-                if scope in seen:
-                    continue
-                seen.add(scope)
-                self._writable.append(
-                    _HCardTarget(id=scope, label=origin_for_unit(scope))
-                )
+        #: The bank the excess patches go to (option b), or "" for none.
+        self._overflow_index: Optional[int] = None
+        # The target list is the unit's four writable banks, and nothing
+        # else. The card slot is one physical place: listing every archived
+        # card bank here invited a write to "Card 07" that could only ever
+        # land on whatever card is in the slot. Multi-pass imports continue
+        # onto another card by switching the card on the unit, not by
+        # naming a different archive.
+        del card_mode, hcard_banks
 
     @property
     def banks(self) -> list["ImportedBank"]:
@@ -457,6 +429,89 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
         later = len(remainder_audit.performances) - len(first.slots)
         return (len(first.slots), total, skipped, later)
 
+    def _overflow_parts(self) -> int:
+        """How many used parts name a writable bank other than the source."""
+        audit = self._audit
+        if audit is None:
+            return 0
+        return sum(audit.parts_per_bank.values())
+
+    def _overflow_hint(self) -> str:
+        """Suffix naming the overflow option, when there is something to send."""
+        parts = self._overflow_parts()
+        if not parts:
+            return ""
+        banks = self._overflow_banks()
+        where = banks[0].label if banks else "a RAM bank"
+        return (
+            f" · {parts} parts name another bank: press o to send those "
+            f"patches to {where} and repoint them"
+        )
+
+    def _overflow_banks(self) -> list[Any]:
+        """The writable RAM banks this target can overflow into, best first.
+
+        A part naming RAM 2 is best served by RAM 2 (plan D2), so the banks
+        the source's own parts name come first; the rest follow. The target
+        bank itself is never offered.
+        """
+        target = self._target_bank()
+        audit = self._audit
+        named = [] if audit is None else list(audit.parts_per_bank)
+        candidates = [
+            entry
+            for entry in kws_banks.writable_banks()
+            if entry.number != target.number and entry.id.startswith("RAM")
+        ]
+        candidates.sort(
+            key=lambda entry: (
+                named.index(entry.number) if entry.number in named else len(named),
+                entry.number,
+            )
+        )
+        return candidates
+
+    def action_overflow(self) -> None:
+        """Offer to send the patches that point elsewhere into a RAM bank."""
+        if not self._overflow_parts():
+            self._set_status(
+                "this bank's parts name no other bank, so there is nothing to overflow"
+            )
+            return
+        banks = self._overflow_banks()
+        if not banks:
+            self._set_status("no RAM bank is free to overflow into")
+            return
+        self.app.push_screen(
+            TargetBankScreen("Overflow bank", [b.label for b in banks]),
+            lambda picked: self._overflow_bank_chosen(banks, picked),
+        )
+
+    def _overflow_bank_chosen(
+        self, banks: Sequence[Any], picked: Optional[int]
+    ) -> None:
+        """Dismiss with a write choice that also carries the overflow bank."""
+        if picked is None:
+            return
+        try:
+            overflow = banks[picked]
+        except (IndexError, TypeError):
+            return
+        if self._gate is not None and not self._gate.armed:
+            self._set_status("write gate is locked")
+            return
+        self.dismiss(
+            WholeBankChoice(
+                self._source_index,
+                str(self._target_bank().id),
+                True,
+                self._mode,
+                self._session_key(),
+                True,
+                str(overflow.id),
+            )
+        )
+
     def _mode_line(self) -> str:
         """What the selected mode writes and what it leaves out.
 
@@ -472,7 +527,7 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
                 f"Mode: {label} · writes the whole bank (every performance, "
                 f"patch and wave sequence), skipping nothing; self-references "
                 f"move to the target, references to other writable banks and "
-                f"to ROM stay where they point"
+                f"to ROM stay where they point{self._overflow_hint()}"
             )
         counts = self._pass_counts()
         if counts is None:
@@ -640,7 +695,8 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
             yield Static("", id=GATE_ID, classes="gate", markup=False)
             yield Static("", id=STATUS_ID, classes="status", markup=False)
             yield Static(
-                "s source · b target · m mode · n next pass · x companions · "
+                "s source · b target · m mode · o overflow · n next pass · "
+                "x companions · "
                 "w gate · ctrl+s write · c cache · ? help · esc/q cancel",
                 classes="hint",
                 markup=False,
@@ -860,6 +916,9 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
             "b  switch the target bank (RAM 1/2/3, Card)\n"
             "m  cycle the import mode: as-is, self-contained 1:1, "
             "self-contained packed\n"
+            "o  send the patches whose parts name another bank into a RAM\n"
+            "   bank and repoint those parts at it; the target keeps the\n"
+            "   performances and the patches they name in their own bank\n"
             "n  offer the next pass: the contained performances no earlier\n"
             "   pass has written, into a fresh target (another card bank\n"
             "   after a switch, or a RAM bank); each pass is its own gated\n"

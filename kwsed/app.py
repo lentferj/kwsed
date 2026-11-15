@@ -5540,36 +5540,40 @@ class KwsedApp(App[None]):
             range(_banks.PATCHES_PER_BANK),
         )
 
+        overflow_id = str(getattr(choice, "overflow_bank", "") or "")
+
         def work() -> Any:
-            target_source = self._read_target_source_for_write(
-                sources, target_scope, target
-            )
+            if overflow_id:
+                return self._write_with_overflow(
+                    bank, sources, target, mode, _backup.default_dir(), overflow_id
+                )
             built = self._whole_bank_bytes(bank, sources, target, mode, written=written)
-            before = self._before_blocks(target_source, target)
+            # The bridge reads the unit before writing it. Handing it the
+            # cached bank instead would (a) skip the write when the file
+            # matches the cache -- telling the user it wrote a card it never
+            # touched -- and (b) back up bytes that may not be on the unit.
             result = self.device.write_bank_bundle(
                 target.number,
                 performances=built.performances,
                 patches=built.patches,
                 waveseq=built.waveseq,
                 backup_dir=_backup.default_dir(),
-                before_blocks=before if before else None,
+                before_blocks=None,
             )
             return built, result
 
         def done(result: Any, failure: BaseException | None) -> None:
-            if failure is not None:
-                self.notify_status(f"import: {failure}", refused=True)
-                return
-            built, write_result = result
-            self._import_whole_bank_written(
-                label, target, built, write_result, conflict, target_scope=target_scope
+            self._whole_write_done(
+                result,
+                failure,
+                choice=choice,
+                label=label,
+                target=target,
+                target_scope=target_scope,
+                conflict=conflict,
+                banks_list=banks_list,
+                path=path,
             )
-            if mode is perfcopy.ImportMode.AS_IS:
-                return
-            if session_key:
-                self._import_pass_after_write(
-                    choice, session_key, built, into, banks_list, path, mode
-                )
 
         into = target_scope if target_scope != target.id else target.label
         status = f"writing {label} into {into}..."
@@ -5577,6 +5581,137 @@ class KwsedApp(App[None]):
             status = f"warning: this import overwrites {conflict} — writing anyway"
         self.notify_status(status, warn=bool(conflict))
         self._device_worker(work, done, f"importing {label} into {into}")
+
+    def _whole_write_done(
+        self,
+        result: Any,
+        failure: BaseException | None,
+        *,
+        choice: Any,
+        label: str,
+        target: Any,
+        target_scope: str,
+        conflict: str,
+        banks_list: Optional[Sequence[Any]],
+        path: str,
+    ) -> None:
+        """Report one fenced whole-bank write and offer what comes next."""
+        if failure is not None:
+            self.notify_status(f"import: {failure}", refused=True)
+            return
+        into = target_scope if target_scope != target.id else target.label
+        overflow_id = str(getattr(choice, "overflow_bank", "") or "")
+        if overflow_id:
+            self._overflow_written(result, label, into, target, target_scope)
+            return
+        built, write_result = result
+        self._import_whole_bank_written(
+            label, target, built, write_result, conflict, target_scope=target_scope
+        )
+        mode = getattr(choice, "mode", perfcopy.ImportMode.AS_IS)
+        session_key = str(getattr(choice, "session_key", "") or "")
+        if mode is perfcopy.ImportMode.AS_IS or not session_key:
+            return
+        self._import_pass_after_write(
+            choice, session_key, built, into, banks_list, path, mode
+        )
+
+    def _write_with_overflow(
+        self,
+        bank: Any,
+        sources: Mapping[str, deps.Source],
+        target: Any,
+        mode: Any,
+        backup_dir: str,
+        overflow_id: str,
+    ) -> Any:
+        """Write the overflow bank first, then the target.
+
+        The overflow bank must exist on the unit before a performance that
+        names it arrives, so its patches and wave sequences go out first.
+        Each bank is its own fenced ``write_bank_bundle``: two backups, two
+        read-back verifications, two independent undo points.
+        """
+        from kws import banks as _banks
+
+        overflow = _banks.bank(overflow_id)
+        plan_sources = dict(sources)
+        plan_sources[bank.scope] = bank.source
+        plan = perfcopy.plan_overflow_import(
+            plan_sources, bank.scope, target, overflow, mode=mode
+        )
+        if not plan.fits:
+            raise ValueError("; ".join(plan.rejected))
+        built = perfcopy.build_overflow_import(plan_sources, plan)
+        overflow_result = self.device.write_bank_bundle(
+            overflow.number,
+            patches=built.overflow_patches,
+            waveseq=built.overflow_waveseq,
+            backup_dir=backup_dir,
+            before_blocks=None,
+        )
+        target_result = self.device.write_bank_bundle(
+            target.number,
+            performances=built.destination.performances,
+            patches=built.destination.patches,
+            waveseq=built.destination.waveseq,
+            backup_dir=backup_dir,
+            before_blocks=None,
+        )
+        return built, overflow, overflow_result, target_result
+
+    def _overflow_written(
+        self,
+        result: Any,
+        label: str,
+        into: str,
+        target: Any,
+        target_scope: str,
+    ) -> None:
+        """Book-keeping after both halves of an overflow import landed."""
+        built, overflow, overflow_result, target_result = result
+        if hasattr(self, "_record_write"):
+            self._record_write(overflow_result)
+        self._import_whole_bank_written(
+            label,
+            target,
+            built.destination,
+            target_result,
+            "",
+            target_scope=target_scope,
+        )
+        self._remember_overflow(overflow, built)
+        self.notify_status(
+            f"imported {label} into {into}: "
+            f"{len(built.destination.performances) // rec.PERFORMANCE_SIZE} "
+            f"performances, {built.patch_count} patches repointed from "
+            f"{overflow.label}; {overflow.label} also received "
+            f"{built.patch_count} patches"
+        )
+
+    def _remember_overflow(self, overflow: Any, built: Any) -> None:
+        """Update the session source and cache for the overflow bank."""
+        existing = self._sources.get(overflow.id)
+        performances = list(getattr(existing, "performances", []) or [])
+        self._sources[overflow.id] = deps.Source(
+            scope_id=overflow.id,
+            performances=performances,
+            patches=[
+                built.overflow_patches[i * rec.PATCH_SIZE : (i + 1) * rec.PATCH_SIZE]
+                for i in range(len(built.overflow_patches) // rec.PATCH_SIZE)
+            ],
+            waveseq=built.overflow_waveseq,
+        )
+        if self._bankstore_dir is not None:
+            try:
+                bankstore.save(
+                    overflow.id,
+                    patches=built.overflow_patches,
+                    waveseq=built.overflow_waveseq,
+                    directory=self._bankstore_dir,
+                )
+            except OSError:
+                pass
 
     def _import_pass_after_write(
         self,

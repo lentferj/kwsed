@@ -30,10 +30,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
+from kws import banks
 from kws import records as rec
 
 __all__ = [
     "PatchId",
+    "resolve_bank_number",
+    "sequence_holder",
     "SequenceId",
     "Source",
     "SequenceChain",
@@ -181,6 +184,47 @@ def performance_dependencies(record: Sequence[int]) -> List[Tuple[int, int]]:
 SequenceKey = Tuple[str, int, int]
 
 
+def resolve_bank_number(
+    scope_id: str, sources: Optional[Dict[str, "Source"]] = None
+) -> Optional[int]:
+    """The bank *number* (0-11) a scope names, or ``None``.
+
+    A session alias carries its real number on the source; a canonical
+    scope resolves through the bank table. ``CARD/NN`` is the card slot.
+    """
+    if sources is not None:
+        source = sources.get(scope_id)
+        if source is not None and source.bank_number is not None:
+            return int(source.bank_number)
+    if scope_id.startswith("CARD/"):
+        return banks.bank("CARD").number
+    try:
+        return banks.bank(scope_id).number
+    except LookupError:
+        return None
+
+
+def sequence_holder(
+    sources: Dict[str, "Source"], src_id: str, wave_bank: int
+) -> Optional["Source"]:
+    """The loaded source whose wave-sequence bank is ``wave_bank``.
+
+    A patch's oscillator names a wave bank that need not be the bank the
+    patch lives in. Reading the sequence bytes from the patch's own source
+    would then copy a different sequence under the same number -- a sound
+    that loads cleanly and plays the wrong thing. Prefer the source that
+    actually holds that bank, and fall back to ``src_id`` only when no
+    loaded source claims it (the caller reports that as unresolved).
+    """
+    direct = sources.get(src_id)
+    if direct is not None and resolve_bank_number(src_id, sources) == wave_bank:
+        return direct
+    for scope_id, candidate in sources.items():
+        if resolve_bank_number(scope_id, sources) == wave_bank:
+            return candidate
+    return direct
+
+
 def quoted_closure(
     sources: Dict[str, Source],
     seeds: Iterable[SequenceKey],
@@ -216,7 +260,7 @@ def quoted_closure(
             continue
         seen.add(key)
         src_id, wave_bank, number = key
-        holder = sources.get(src_id)
+        holder = sequence_holder(sources, src_id, wave_bank)
         if holder is None or holder.waveseq is None:
             unresolved.append(key)
             continue
