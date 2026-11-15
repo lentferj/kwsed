@@ -543,7 +543,9 @@ opens `WholeBankImportScreen`:
   split (the performances that point outside the target move to the RAM bank
   with all their patches, so both banks are self-contained; when the split
   needs more banks than the one offered, the groups that fit are written and
-  the rest wait for the next card);
+  the rest wait for the next card), or cards only (no RAM bank at all: every
+  performance is packed into self-contained groups that each fit one card,
+  one group per pass, so the import visits card after card);
 - `n` offers the next pass: for a split, switch the card on the unit (select
   it on the HCard and press C) and press n to write the next group onto that
   card; otherwise it offers the contained performances no earlier pass has
