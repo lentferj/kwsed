@@ -645,3 +645,17 @@ class TestSplitPartition:
             assert group.plan is not None
             assert group.plan.patch_count <= banks.PATCHES_PER_BANK
             assert len(group.performances) <= banks.PERFORMANCES_PER_BANK
+
+    def test_no_two_groups_share_a_bank(self):
+        """A too-short bank list leaves groups out instead of overwriting."""
+        # 40 performances, each naming one own patch and one RAM 2 patch:
+        # 80 distinct patches, so the non-contained side needs three banks.
+        groups = [[(0, index), (1, index)] for index in range(40)]
+        sources = self._sources(groups)
+        partition = perfcopy.partition_self_contained_split(
+            sources, "RAM1", [banks.bank("CARD"), banks.bank("RAM3")], mode=MODE_1TO1
+        )
+        banks_used = [group.target_bank.id for group in partition.groups]
+        assert len(banks_used) == len(set(banks_used)), banks_used
+        assert not partition.fits
+        assert any("banks" in text for text in partition.rejected)

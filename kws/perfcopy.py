@@ -61,6 +61,7 @@ __all__ = [
     "SplitGroup",
     "SplitPartition",
     "partition_self_contained_split",
+    "pack_self_contained_into",
     "build_split_partition",
     "plan_self_contained_split",
     "build_split_import",
@@ -1453,12 +1454,11 @@ def partition_self_contained_split(
         sources, source_scope, non_contained_slots, placeholder_bank, mode, budget
     )
     for index, slots in enumerate(packed):
-        if index < len(available):
-            target_bank = available[index]
-        elif available:
-            target_bank = available[-1]
-        else:
-            target_bank = placeholder_bank
+        if index >= len(available):
+            # No bank left for this group: never assign two groups to one
+            # bank, which would make the second overwrite the first.
+            break
+        target_bank = available[index]
         made, rejections = _plan_split_group(
             sources, source_scope, slots, target_bank, mode, budget
         )
@@ -1492,6 +1492,41 @@ def build_split_partition(
             raise ValueError("partition group has no plan")
         built.append(build_atomic_bank(srcs, group.plan))
     return built
+
+
+def pack_self_contained_into(
+    sources: Mapping[str, deps.Source],
+    source_scope: str,
+    slots: Sequence[int],
+    bank: banks.Bank,
+    *,
+    mode: ImportMode = ImportMode.SELF_CONTAINED_PACKED,
+    budget: bankbuild.Budget = _DEFAULT_BUDGET,
+) -> List[SplitGroup]:
+    """Pack source slots, in order, into groups that each fit one bank.
+
+    The greedy packer fills one bank at a time: a slot joins the current
+    group while the group's real totals fit ``budget``, and one that cannot
+    join starts the next. Every group is planned against ``bank`` with
+    every patch it names carried (ROM parts stay in ROM), so each group is
+    a self-contained bank on its own and the caller may write one group
+    per card, one pass at a time. ``AS_IS`` means 1:1, the same convention
+    :func:`partition_self_contained_split` uses. Groups and their slots
+    stay in source order.
+    """
+    if mode is ImportMode.AS_IS:
+        mode = ImportMode.SELF_CONTAINED_1TO1
+    groups: List[SplitGroup] = []
+    for packed in _pack_performance_groups(
+        sources, source_scope, slots, bank, mode, budget
+    ):
+        made, _rejections = _plan_split_group(
+            sources, source_scope, packed, bank, mode, budget
+        )
+        groups.append(
+            SplitGroup(target_bank=bank, performances=tuple(packed), plan=made)
+        )
+    return groups
 
 
 def active_performances(source: deps.Source) -> List[int]:

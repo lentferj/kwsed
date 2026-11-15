@@ -176,6 +176,16 @@ def favorite_bank_id(bank_id: str, kind: str) -> str:
     return f"{bank_id}:{kind}"
 
 
+def _split_groups_plannable(groups: Sequence[perfcopy.SplitGroup]) -> bool:
+    """Whether every group of a split packing can be planned at all.
+
+    A group whose plan carries rejections -- a patch it names is not
+    loaded, or one performance alone exceeds the bank -- must not be
+    written: the fence would put a broken half of the split onto the unit.
+    """
+    return all(group.plan is None or not group.plan.rejected for group in groups)
+
+
 @dataclass(frozen=True)
 class ViewSlot:
     """A slot plus the scoped bank it came from.
@@ -5553,7 +5563,7 @@ class KwsedApp(App[None]):
                 range(_banks.PATCHES_PER_BANK),
             )
             conflict = "; ".join(part for part in (conflict, overflow_conflict) if part)
-        split_plan, proceed = self._split_choice_plan(
+        split_plan, proceed, split_remaining = self._split_choice_plan(
             bank, sources, target, mode, choice
         )
         if not proceed:
@@ -5593,6 +5603,7 @@ class KwsedApp(App[None]):
                 conflict=conflict,
                 banks_list=banks_list,
                 path=path,
+                split_remainder=split_remaining,
             )
 
         into = target_scope if target_scope != target.id else target.label
@@ -5632,6 +5643,7 @@ class KwsedApp(App[None]):
         conflict: str,
         banks_list: Optional[Sequence[Any]],
         path: str,
+        split_remainder: Optional[Sequence[int]] = None,
     ) -> None:
         """Report one fenced whole-bank write and offer what comes next."""
         if failure is not None:
@@ -5642,8 +5654,18 @@ class KwsedApp(App[None]):
         overflow_kind = str(
             getattr(choice, "overflow_kind", OVERFLOW_PATCHES) or OVERFLOW_PATCHES
         )
-        if overflow_id and overflow_kind == OVERFLOW_SELF_CONTAINED:
+        session_key = str(getattr(choice, "session_key", "") or "")
+        split_pass = bool(session_key) and (
+            split_remainder is not None or self._split_pass_kind(session_key) == "split"
+        )
+        if overflow_id and overflow_kind == OVERFLOW_SELF_CONTAINED and not split_pass:
+            # A split the offered banks hold in full: nothing continues.
             self._split_written(result, label)
+            return
+        if split_pass:
+            self._split_pass_done(
+                result, choice, label, banks_list, path, split_remainder
+            )
             return
         if overflow_id:
             self._overflow_written(result, label, into, target, target_scope)
@@ -5793,31 +5815,137 @@ class KwsedApp(App[None]):
         target: Any,
         mode: Any,
         choice: Any,
-    ) -> Tuple[Optional[Tuple[Dict[str, deps.Source], Any]], bool]:
+    ) -> Tuple[Optional[Tuple[Dict[str, deps.Source], Any]], bool, Optional[List[int]]]:
         """The self-contained split this choice asks for, and whether to write.
 
-        ``(None, True)`` for a plain or patches-only write. For the
-        self-contained kind it returns the partition, or ``(None, False)``
-        after stating the engine's rejections when the target plus the one
-        overflow bank cannot hold it -- nothing is written in that case.
+        ``(None, True, None)`` for a plain or patches-only write. For the
+        self-contained kind it returns the partition, or ``(None, False,
+        None)`` after stating the engine's rejections when the content
+        cannot be planned at all -- nothing is written in that case.
+
+        When the split needs more banks than the two the choice offers but
+        every group can still be planned, the third element is the list of
+        source slots the offered banks leave out: the write carries the
+        groups that fit and the caller records the rest for the next card.
+        A choice whose import session already carries a split remainder is
+        a continuation: one more group of the remainder, into the target.
         """
+        session_key = str(getattr(choice, "session_key", "") or "")
+        remainder = self._split_pass_remainder(session_key) if session_key else []
+        if remainder:
+            return (
+                self._split_continuation_plan(bank, sources, target, mode, remainder),
+                True,
+                None,
+            )
         kind = str(
             getattr(choice, "overflow_kind", OVERFLOW_PATCHES) or OVERFLOW_PATCHES
         )
         overflow_id = str(getattr(choice, "overflow_bank", "") or "")
         if not overflow_id or kind != OVERFLOW_SELF_CONTAINED:
-            return None, True
+            return None, True, None
         split_plan = self._self_contained_split(
             bank, sources, target, mode, overflow_id
         )
-        if not split_plan[1].fits:
+        if split_plan[1].fits:
+            return split_plan, True, None
+        from kws import banks as _banks
+
+        try:
+            overflow = _banks.bank(overflow_id)
+        except LookupError:
+            overflow = None
+        if overflow is not None:
+            first_pass, remaining = self._split_first_pass_partition(
+                split_plan[0], bank.scope, [target, overflow], mode
+            )
+        else:
+            first_pass, remaining = None, []
+        if first_pass is None:
             self.notify_status(
                 "self-contained split does not fit: "
                 + "; ".join(split_plan[1].rejected),
                 refused=True,
             )
-            return None, False
-        return split_plan, True
+            return None, False, None
+        return (split_plan[0], first_pass), True, remaining
+
+    def _split_continuation_plan(
+        self,
+        bank: Any,
+        sources: Mapping[str, deps.Source],
+        target: Any,
+        mode: Any,
+        remainder: Sequence[int],
+    ) -> Tuple[Dict[str, deps.Source], Any]:
+        """One more group of a split, packed into the card now in the slot.
+
+        The remainder's slots are packed against ``target`` and only the
+        first group travels: the user swaps the card between passes, so
+        each pass is one fenced write into whatever the slot holds now.
+        """
+        plan_sources = dict(sources)
+        # The file the bank came from is not necessarily in the session,
+        # so the planner sees it under its own scope.
+        plan_sources[bank.scope] = bank.source
+        groups = perfcopy.pack_self_contained_into(
+            plan_sources, bank.scope, remainder, target, mode=mode
+        )
+        keep = [groups[0]] if groups else []
+        return plan_sources, perfcopy.SplitPartition(groups=keep)
+
+    def _split_first_pass_partition(
+        self,
+        plan_sources: Mapping[str, deps.Source],
+        source_scope: str,
+        offered: Sequence[Any],
+        mode: Any,
+    ) -> Tuple[Optional[perfcopy.SplitPartition], List[int]]:
+        """The groups the offered banks hold, and the slots they leave out.
+
+        The first bank receives the contained performances, each further
+        bank one group of the performances that point outside it, every
+        group packed to fit its bank. When a group cannot be planned at
+        all -- a patch it names is not loaded, or one performance alone
+        exceeds a bank -- the result is ``(None, [])`` and the caller
+        refuses as before: writing a part of such a split would only move
+        the failure onto the unit.
+        """
+        from kws import containment
+
+        try:
+            audit = containment.audit_containment(plan_sources, source_scope)
+        except (LookupError, ValueError, TypeError, AttributeError):
+            return None, []
+        contained = [entry.slot for entry in audit.performances if entry.contained]
+        non_contained = [
+            entry.slot for entry in audit.performances if not entry.contained
+        ]
+        groups: List[perfcopy.SplitGroup] = []
+        remaining: List[int] = []
+        overflow_banks = list(offered[1:])
+        if offered and contained:
+            packed = perfcopy.pack_self_contained_into(
+                plan_sources, source_scope, contained, offered[0], mode=mode
+            )
+            if not _split_groups_plannable(packed):
+                return None, []
+            groups.append(packed[0])
+            placed = set(packed[0].performances)
+            remaining.extend(slot for slot in contained if slot not in placed)
+        if overflow_banks and non_contained:
+            packed = perfcopy.pack_self_contained_into(
+                plan_sources, source_scope, non_contained, overflow_banks[0], mode=mode
+            )
+            if not _split_groups_plannable(packed):
+                return None, []
+            keep = packed[: len(overflow_banks)]
+            groups.extend(keep)
+            placed_out: Set[int] = set()
+            for group in keep:
+                placed_out.update(group.performances)
+            remaining.extend(slot for slot in non_contained if slot not in placed_out)
+        return perfcopy.SplitPartition(groups=groups), remaining
 
     @staticmethod
     def _counted(count: int, singular: str, plural: str) -> str:
@@ -5869,8 +5997,15 @@ class KwsedApp(App[None]):
             written.append((group, payload, result))
         return written
 
-    def _split_written(self, result: Any, label: str) -> None:
-        """Book-keeping after every bank of a self-contained split landed."""
+    def _split_written(
+        self, result: Any, label: str, remaining: Optional[Sequence[int]] = None
+    ) -> None:
+        """Book-keeping after every bank of a self-contained split landed.
+
+        With ``remaining`` the split needs another card: the status says
+        exactly how many performances are still to place and that the card
+        must be switched before the next pass.
+        """
         summary: list[str] = []
         for group, built, write_result in result:
             scope = getattr(group.target_bank, "id", str(group.target_bank))
@@ -5890,10 +6025,97 @@ class KwsedApp(App[None]):
                 f"{group.target_bank.label}: {performances}"
                 f", {self._counted(patches, 'patch', 'patches')}"
             )
-        self.notify_status(
+        message = (
             f"imported {label} as a self-contained split — "
             f"{len(result)} banks: " + "; ".join(summary)
         )
+        if remaining:
+            message += (
+                f" — {self._counted(len(remaining), 'performance', 'performances')}"
+                " remain: switch the card on the unit (select it on the "
+                "HCard and press C), then press n"
+            )
+        self.notify_status(message)
+
+    def _split_pass_remainder(self, key: str) -> List[int]:
+        """The source slots a split still has to place, in source order."""
+        state = self._import_passes.get(key)
+        if not state:
+            return []
+        return [int(slot) for slot in state.get("split_remaining") or ()]
+
+    def _split_pass_kind(self, key: str) -> str:
+        """The session's pass kind: ``split`` here, the contained flow's own."""
+        state = self._import_passes.get(key)
+        if not state:
+            return ""
+        return str(state.get("pass_kind") or "")
+
+    def _record_split_pass_groups(self, key: str, result: Any) -> Set[int]:
+        """Record one split pass's placements; return the source slots it wrote.
+
+        Each group's plan names exactly what the write put where, so the
+        session's written map grows by the group's allocations and the
+        remainder shrinks by the same slots.
+        """
+        written: Set[int] = set()
+        for group, built, _write_result in result:
+            into = str(getattr(group.target_bank, "label", group.target_bank))
+            self._record_import_pass(key, built, into)
+            plan = getattr(built, "plan", None)
+            for allocation in getattr(plan, "allocations", None) or []:
+                written.add(int(allocation.source_perf.number))
+        return written
+
+    def _split_pass_done(
+        self,
+        result: Any,
+        choice: Any,
+        label: str,
+        banks_list: Optional[Sequence[Any]],
+        path: str,
+        first_remainder: Optional[Sequence[int]],
+    ) -> None:
+        """Book-keep a finished split pass and offer the next one.
+
+        ``first_remainder`` is the too-short first pass's leftover slots,
+        computed before the write; a continuation pass reads the session's
+        own remainder and shrinks it by what this write placed. Either way
+        the session ends up with the slots still to place, and the screen
+        is re-offered so ``n`` can carry them onto the next card.
+        """
+        session_key = str(getattr(choice, "session_key", "") or "")
+        mode = getattr(choice, "mode", perfcopy.ImportMode.AS_IS)
+        reported: Optional[Sequence[int]] = first_remainder
+        if session_key:
+            written_now = self._record_split_pass_groups(session_key, result)
+            prior = (
+                list(first_remainder)
+                if first_remainder is not None
+                else self._split_pass_remainder(session_key)
+            )
+            remaining = [slot for slot in prior if slot not in written_now]
+            state = self._import_passes.setdefault(
+                session_key, {"written": {}, "targets": []}
+            )
+            state["pass_kind"] = "split"  # noqa: S105 -- a session marker, not a secret
+            state["mode"] = mode
+            state["split_remaining"] = remaining
+            state.setdefault(
+                "split_target", str(getattr(choice, "target_bank", "") or "")
+            )
+            state.setdefault(
+                "source_index", int(getattr(choice, "source_index", 0) or 0)
+            )
+            reported = remaining
+        self._split_written(result, label, reported)
+        if (
+            session_key
+            and getattr(choice, "continue_pass", False)
+            and banks_list
+            and getattr(self, "is_running", False)
+        ):
+            self._reopen_whole_bank_import(banks_list, path, session_key, mode)
 
     def _import_pass_after_write(
         self,
@@ -5946,6 +6168,8 @@ class KwsedApp(App[None]):
         self, banks_list: Sequence[Any], path: str, key: str, mode: Any
     ) -> None:
         """Offer the next pass on the screen, with the session's pass state."""
+        state = self._import_passes.get(key) or {}
+        split_state = state.get("pass_kind") == "split"
         self.push_screen(
             WholeBankImportScreen(
                 path=path,
@@ -5956,6 +6180,15 @@ class KwsedApp(App[None]):
                 pass_state=ImportPassState(
                     session_key=key,
                     written=self._import_pass_written(key),
+                    split_remaining=tuple(
+                        int(slot) for slot in state.get("split_remaining") or ()
+                    )
+                    if split_state
+                    else (),
+                    split_target=str(state.get("split_target") or "")
+                    if split_state
+                    else "",
+                    source_index=int(state.get("source_index") or 0),
                 ),
             ),
             lambda picked: self._import_whole_bank_chosen(banks_list, picked, path),

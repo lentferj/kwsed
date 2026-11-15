@@ -2606,3 +2606,323 @@ async def test_self_contained_split_refusal_at_the_app_writes_nothing(
     assert app.device.bundle_write_count == 0
     assert any("self-contained split does not fit" in s for s in statuses), statuses
     assert any("need 2 banks" in s for s in statuses), statuses
+
+
+def _pack_source() -> Any:
+    """A source of 120 contained performances, one patch slot each.
+
+    Every name is invented. Performance i names patch i % 35 of its own
+    bank, so a packed group of 50 needs all 35 patch slots of a bank and
+    120 slots need three groups.
+    """
+    from tests.test_bankbuild import make_patch, make_performance
+
+    perfs = [make_performance(f"Pack Perf {i:03d}", ((0, i % 35),)) for i in range(120)]
+    patches = [make_patch(f"Pack Basis {i:02d}") for i in range(35)]
+    return deps.Source(
+        scope_id="RAM1", performances=perfs, patches=patches, waveseq=None
+    )
+
+
+def test_pack_self_contained_into_splits_into_bank_sized_groups() -> None:
+    """Slots that outgrow one bank pack into the fewest groups that fit."""
+    source = _pack_source()
+    groups = perfcopy.pack_self_contained_into(
+        {"RAM1": source}, "RAM1", list(range(120)), banks.bank("CARD")
+    )
+    assert [list(group.performances) for group in groups] == [
+        list(range(50)),
+        list(range(50, 100)),
+        list(range(100, 120)),
+    ]
+    for group in groups:
+        assert group.target_bank is banks.bank("CARD")
+        plan = group.plan
+        assert plan is not None
+        assert plan.destination_bank is banks.bank("CARD")
+        assert len(group.performances) <= banks.PERFORMANCES_PER_BANK
+        assert plan.patch_count <= banks.PATCHES_PER_BANK
+        # Every patch the group's performances name is carried: one target
+        # slot per source patch, and every used part remapped to it.
+        named = {relations.PatchId("RAM1", slot % 35) for slot in group.performances}
+        allocated = {
+            pid for alloc in plan.allocations for pid, _slot in alloc.allocated_patches
+        }
+        assert allocated == named
+        for alloc in plan.allocations:
+            record = source.performances[alloc.source_perf.number]
+            used = [p.index for p in r.performance_parts(record) if p.used]
+            assert set(alloc.part_patch_slots) == set(used)
+
+
+def test_pack_self_contained_into_yields_one_group_when_it_fits() -> None:
+    source = _pack_source()
+    groups = perfcopy.pack_self_contained_into(
+        {"RAM1": source}, "RAM1", list(range(10)), banks.bank("RAM3")
+    )
+    assert len(groups) == 1
+    assert list(groups[0].performances) == list(range(10))
+    assert groups[0].target_bank is banks.bank("RAM3")
+    plan = groups[0].plan
+    assert plan is not None
+    assert plan.patch_count == 10
+
+
+def _split_continuation_banks() -> list[Any]:
+    """A source bank plus the RAM 2 bank two of its performances name.
+
+    Slots 0-54 are contained (each names its own bank's patch slot), so
+    they need two Card-sized groups; slots 56-57 name RAM 2 patches 2 and
+    3 and pack into a third group. The offered banks are the Card and
+    RAM 3: two of the three groups travel on the first pass. Every name
+    is invented.
+    """
+    from tests.test_bankbuild import make_patch
+
+    ram2 = _make_bank(scope="RAM2", active_slots=[2, 3])
+    ram2.source.patches[2] = make_patch("Harbour Slate")
+    ram2.source.patches[3] = make_patch("Quay Lintel")
+    return [_multipass_bank(), ram2]
+
+
+def _split_pass_app(tmp_path: Any, monkeypatch: Any) -> KwsedApp:
+    """An armed app with RAM 2 loaded and the Card and RAM 3 to receive."""
+    from kws import backup as _backup
+
+    app = KwsedApp(DemoDevice(), bankstore_dir=str(tmp_path / "store"))
+    app._sources["RAM2"] = _split_continuation_banks()[1].source
+    app._sources["RAM3"] = _make_bank(scope="RAM3", active_slots=[]).source
+    app._write_gate = EditGate(armed=True)
+
+    def _no_record(_result: Any) -> None:
+        return None
+
+    app._record_write = _no_record  # type: ignore[method-assign]
+    backup_dir = str(tmp_path / "backups")
+    os.makedirs(backup_dir, exist_ok=True)
+    monkeypatch.setattr(_backup, "default_dir", lambda root=None: backup_dir)
+    monkeypatch.setattr(bankstore, "save", lambda *a, **k: None)
+    return app
+
+
+@pytest.mark.asyncio
+async def test_self_contained_split_continues_onto_the_next_card(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """Two groups travel on the first pass; ``n`` writes the last one.
+
+    The split needs three groups but the choice offers only the Card and
+    RAM 3: the first pass fills both, the session records the five slots
+    left over, and the reopened screen says how many remain and that the
+    card must be switched. Pressing ``n`` writes exactly one more group
+    into the card slot -- the user has swapped the card meanwhile -- and
+    the session is empty afterwards.
+    """
+    app = _split_pass_app(tmp_path, monkeypatch)
+    statuses: list[str] = []
+    app.notify_status = lambda msg, *a, **k: statuses.append(str(msg))  # type: ignore[method-assign]
+    file_banks = _split_continuation_banks()
+    bank = file_banks[0]
+    ram2 = file_banks[1].source
+    source = bank.source
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        first = WholeBankImportScreen(
+            path="three.syx", banks=file_banks, gate=app._write_gate
+        )
+        app.push_screen(
+            first,
+            lambda picked: app._import_whole_bank_chosen(
+                file_banks, picked, "three.syx"
+            ),
+        )
+        await _settle(pilot)
+        await pilot.press("m")
+        await _settle(pilot)
+        await pilot.press("m")  # self-contained packed
+        await _settle(pilot)
+        for _ in range(3):
+            await pilot.press("b")  # target Card
+            await _settle(pilot)
+        assert first._target_bank().id == "CARD"
+        await pilot.press("o")
+        await _settle(pilot)
+        chooser = app.screen
+        assert isinstance(chooser, TargetBankScreen)
+        # RAM 2 is named by the source's own parts, so it is offered first;
+        # the split carries its overflow onto RAM 3.
+        assert chooser._choices[0] == banks.bank("RAM2").label
+        await pilot.press("down")
+        await _settle(pilot)
+        await pilot.press("down")  # RAM 1 sits between them
+        await _settle(pilot)
+        await pilot.press("enter")  # RAM 3
+        await _settle(pilot)
+        menu = app.screen
+        assert isinstance(menu, ImportMenuScreen)
+        await pilot.press("down")  # the self-contained kind
+        await _settle(pilot)
+        await pilot.press("enter")
+        await _wait_for_writes(app, pilot, 2)
+        await _settle(pilot)
+
+        # The statement before the write says what each bank receives.
+        statement = next(s for s in statuses if "Card gets" in s)
+        assert "self-contained split" in statement
+        assert "Card gets 50 performances and 35 patches" in statement
+        assert "RAM 3 gets 2 performances and 2 patches" in statement
+        # The closing status says exactly what is left and what to do.
+        after_first = statuses[-1]
+        assert "5 performances remain" in after_first
+        assert (
+            "switch the card on the unit (select it on the HCard and press C), "
+            "then press n" in after_first
+        )
+
+        second = app.screen
+        assert isinstance(second, WholeBankImportScreen)
+        assert second is not first
+        phrase = (
+            "switch the card on the unit (select it on the HCard and press C), "
+            "then press n"
+        )
+        status = _static_text(second, "whole-bank-status")
+        assert "5 performances remain" in status
+        assert phrase in status
+        assert phrase in _static_text(second, "whole-bank-mode")
+
+        keys = [k for k in app._import_passes if k.startswith("three.syx|RAM1|")]
+        assert len(keys) == 1
+        key = keys[0]
+        state = app._import_passes[key]
+        assert state["pass_kind"] == "split"  # noqa: S105 -- a session marker, not a secret
+        assert state["split_target"] == "CARD"
+        assert state["split_remaining"] == [50, 51, 52, 53, 54]
+
+        # Pass 1's bytes, captured before pass 2 overwrites the Card blob:
+        # each group carries every patch its performances name.
+        card_pass1_perf = _pass_blob(app.device, "CARD", banks.Kind.PERFORMANCE)
+        card_pass1_patch = _pass_blob(app.device, "CARD", banks.Kind.PATCH)
+
+        await pilot.press("n")
+        await _wait_for_writes(app, pilot, 3)
+        await _settle(pilot)
+        assert app.device.bundle_write_count == 3
+
+        third = app.screen
+        assert isinstance(third, WholeBankImportScreen)
+        assert "nothing left to write" in _static_text(third, "whole-bank-status")
+        await pilot.press("n")
+        await _settle(pilot)
+        assert "nothing left to write" in _static_text(third, "whole-bank-status")
+        assert app.device.bundle_write_count == 3
+
+    assert state["split_remaining"] == []
+    written = state["written"]
+    assert set(written) == set(range(55)) | {56, 57}
+    assert {slot for slot, t in written.items() if t == "Card"} == set(range(55))
+    assert {slot for slot, t in written.items() if t == "RAM 3"} == {56, 57}
+    # One fenced write per group, in partition order.
+    assert [w["bank"] for w in app.device.bundle_writes] == ["Card", "RAM 3", "Card"]
+    _assert_split_pass_bytes(app, source, ram2, card_pass1_perf, card_pass1_patch)
+
+
+def _assert_split_pass_bytes(
+    app: KwsedApp,
+    source: Any,
+    ram2: Any,
+    card_pass1_perf: bytes,
+    card_pass1_patch: bytes,
+) -> None:
+    """The three written groups, byte for byte, and their self-containment.
+
+    The Card's two passes both target the CARD slot, so the device's blob
+    holds the second pass by the time the assertions run; the first pass's
+    bytes were captured before ``n`` was pressed.
+    """
+    card_no = banks.bank("CARD").number
+    ram3_no = banks.bank("RAM3").number
+    # The first pass: the Card holds slots 0-49 packed, patches 0-34.
+    for slot in range(50):
+        assert _perf_at(card_pass1_perf, slot) == _as_written(
+            source.performances[slot], {0: (card_no, slot % 35)}
+        )
+    for patch_slot in range(35):
+        assert _patch_at(card_pass1_patch, patch_slot) == source.patches[patch_slot]
+    # RAM 3 holds the two external performances and the patches they name.
+    ram3_perf = _pass_blob(app.device, "RAM3", banks.Kind.PERFORMANCE)
+    ram3_patch = _pass_blob(app.device, "RAM3", banks.Kind.PATCH)
+    assert _perf_at(ram3_perf, 0) == _as_written(
+        source.performances[56], {0: (ram3_no, 0)}
+    )
+    assert _perf_at(ram3_perf, 1) == _as_written(
+        source.performances[57], {0: (ram3_no, 1)}
+    )
+    assert _patch_at(ram3_patch, 0) == ram2.patches[2]
+    assert _patch_at(ram3_patch, 1) == ram2.patches[3]
+    # The continuation: exactly one more group, into the card slot.
+    card_pass2_perf = _pass_blob(app.device, "CARD", banks.Kind.PERFORMANCE)
+    card_pass2_patch = _pass_blob(app.device, "CARD", banks.Kind.PATCH)
+    for index in range(5):
+        assert _perf_at(card_pass2_perf, index) == _as_written(
+            source.performances[50 + index], {0: (card_no, index)}
+        )
+        assert _patch_at(card_pass2_patch, index) == source.patches[15 + index]
+    for index in range(5, 50):
+        assert _perf_at(card_pass2_perf, index) == _clean_perf_record()
+    for index in range(5, 35):
+        assert _patch_at(card_pass2_patch, index) == bytes(PATCH_RECORD_SIZE)
+
+    # Every written group is self-contained: each used part names that
+    # group's own bank or a ROM bank, never another writable one.
+    rom_numbers = {entry.number for entry in banks.BANKS if not entry.writable}
+    for blob, own in (
+        (card_pass1_perf, card_no),
+        (card_pass2_perf, card_no),
+        (ram3_perf, ram3_no),
+    ):
+        for slot in range(banks.PERFORMANCES_PER_BANK):
+            for part in r.performance_parts(_perf_at(blob, slot)):
+                if not part.used:
+                    continue
+                assert part.bank == own or part.bank in rom_numbers
+
+
+@pytest.mark.asyncio
+async def test_split_continuation_requires_the_write_gate(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """With the gate locked, ``n`` refuses the continuation and writes nothing."""
+    app = _split_pass_app(tmp_path, monkeypatch)
+    statuses: list[str] = []
+    app.notify_status = lambda msg, *a, **k: statuses.append(str(msg))  # type: ignore[method-assign]
+    file_banks = _split_continuation_banks()
+    choice = WholeBankChoice(
+        0,
+        "CARD",
+        True,
+        perfcopy.ImportMode.SELF_CONTAINED_PACKED,
+        "three.syx|RAM1|gated",
+        True,
+        "RAM3",
+        "self_contained",
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._import_whole_bank_write(
+            file_banks[0], choice, banks_list=file_banks, path="three.syx"
+        )
+        await _wait_for_writes(app, pilot, 2)
+        await _settle(pilot)
+        second = app.screen
+        assert isinstance(second, WholeBankImportScreen)
+        assert "5 performances remain" in _static_text(second, "whole-bank-status")
+        app._write_gate.toggle()  # the user locked the gate
+        await pilot.press("n")
+        await _settle(pilot)
+        assert isinstance(app.screen, WholeBankImportScreen)
+        assert "write gate is locked" in _static_text(app.screen, "whole-bank-status")
+        assert app.device.bundle_write_count == 2
+    state = app._import_passes["three.syx|RAM1|gated"]
+    assert state["split_remaining"] == [50, 51, 52, 53, 54]
+    assert any("5 performances remain" in s for s in statuses), statuses

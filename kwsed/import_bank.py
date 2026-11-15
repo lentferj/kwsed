@@ -29,7 +29,13 @@ from textual.widgets import DataTable, Static
 
 from kws import banks as kws_banks
 from kws import containment, dumps, records
-from kws.perfcopy import ImportMode, SplitPartition, partition_self_contained_split
+from kws.perfcopy import (
+    ImportMode,
+    SplitGroup,
+    SplitPartition,
+    pack_self_contained_into,
+    partition_self_contained_split,
+)
 from kwsed.gate import EditGate
 from kwsed.target_bank import ImportMenuScreen, TargetBankScreen
 from vinsynlib.ui.report import ReportScreen
@@ -121,10 +127,33 @@ class ImportPassState:
     remainder a ``n`` pass offers is the contained slots *not* in here,
     and the status line echoes the whole map so nothing is dropped
     silently.
+
+    A self-contained split that needed more banks than one pass offered
+    continues under the same session: ``split_remaining`` holds the source
+    slots still to place and ``split_target`` the bank the split writes
+    into (the card slot -- the user swaps the card between passes).
+    ``source_index`` keeps the session's own source bank selected when the
+    screen is re-offered.
     """
 
     session_key: str = ""
     written: Mapping[int, str] = field(default_factory=dict)
+    #: Source slots the split still has to place, in source order.
+    split_remaining: Tuple[int, ...] = ()
+    #: The bank id the split writes into, or "" outside a split session.
+    split_target: str = ""
+    #: The source bank index the session started from.
+    source_index: int = 0
+
+    @property
+    def split_session(self) -> bool:
+        """Whether this screen continues a self-contained split.
+
+        True while the session carries a split target, even once nothing
+        is left: the screen then says the split is complete instead of
+        speaking about the contained-remainder flow.
+        """
+        return bool(self.split_remaining) or bool(self.split_target)
 
 
 @dataclass(frozen=True)
@@ -280,6 +309,8 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
         self._mode = ImportMode.AS_IS if mode is None else mode
         #: The session's written-slot state for this source (plan R4 c).
         self._pass_state = pass_state
+        if pass_state is not None and pass_state.source_index:
+            self._source_index = pass_state.source_index
         #: Unique per screen visit; see _session_key.
         self._session_token: Optional[str] = None
         self._audit: Optional[containment.ContainmentAudit] = None
@@ -382,6 +413,82 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
         if self._pass_state is None:
             return set()
         return {int(slot) for slot in self._pass_state.written}
+
+    def _split_session(self) -> bool:
+        """Whether this screen continues a self-contained split (plan R4 d)."""
+        return self._pass_state is not None and self._pass_state.split_session
+
+    def _split_remaining(self) -> list[int]:
+        """The source slots the split still has to place, in source order."""
+        if self._pass_state is None:
+            return []
+        return [int(slot) for slot in self._pass_state.split_remaining]
+
+    def _split_target_bank(self) -> Any:
+        """The bank the split writes into: the card now in the slot.
+
+        The session carries the bank the split started with -- the card
+        slot. The user swaps the card between passes, so the target stays
+        the slot, not whatever this screen's selector happens to show.
+        """
+        target_id = (
+            str(self._pass_state.split_target) if self._pass_state is not None else ""
+        )
+        if target_id:
+            try:
+                return kws_banks.bank(target_id)
+            except LookupError:
+                pass
+        return self._target_bank()
+
+    def _split_next_group(
+        self, remaining: Sequence[int], target: Any
+    ) -> Optional[SplitGroup]:
+        """The one group the next ``n`` pass would write, or ``None``.
+
+        The same packing the app performs before writing, so the statement
+        before the gate says what this pass places and nothing else.
+        """
+        try:
+            bank = self._source_bank()
+            scope = str(bank.scope)
+            sources = dict(self._sources())
+            sources[scope] = bank.source
+            groups = pack_self_contained_into(
+                sources, scope, remaining, target, mode=self._mode
+            )
+        except (IndexError, LookupError, ValueError, TypeError, AttributeError):
+            return None
+        return groups[0] if groups else None
+
+    def _split_group_words(self, group: Optional[SplitGroup]) -> str:
+        """``one group of 5 performances and 5 patches``, or a fallback."""
+        if group is None:
+            return "one group of the remaining performances"
+        patches = 0 if group.plan is None else group.plan.patch_count
+        return (
+            f"one group of {len(group.performances)} performances and {patches} patches"
+        )
+
+    def _split_mode_line(self, label: str) -> str:
+        """The mode line while a split remainder waits for the next card."""
+        remaining = self._split_remaining()
+        if not remaining:
+            return (
+                f"Mode: {label} · the self-contained split is complete: "
+                "nothing is left to write"
+            )
+        try:
+            where = self._split_target_bank().label
+        except IndexError:
+            where = "the current target"
+        group = self._split_next_group(remaining, self._split_target_bank())
+        return (
+            f"Mode: {label} · split continues: next pass writes "
+            f"{self._split_group_words(group)} packed into the current "
+            f"target ({where}) — switch the card on the unit (select it on "
+            "the HCard and press C), then press n"
+        )
 
     def _session_key(self) -> str:
         """The import session key: source file, source bank, screen visit.
@@ -559,6 +666,42 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
             f"it with x, one bank per write, or carry the remainder with n"
         )
 
+    def _split_plannable(self, overflow: Any) -> bool:
+        """Whether the offered banks hold a first pass of this split.
+
+        A split needing more banks than the two offered still travels one
+        pass per card -- but only when every group, written or left for
+        the next card, plans cleanly. A patch that is not loaded, or one
+        performance alone bigger than a bank, is a refusal instead: the
+        fence must not put a broken half of the split onto the unit.
+        """
+        audit = self._audit
+        if audit is None:
+            return False
+        try:
+            bank = self._source_bank()
+            scope = str(bank.scope)
+            sources = dict(self._sources())
+            sources[scope] = bank.source
+            contained = [e.slot for e in audit.performances if e.contained]
+            non_contained = [e.slot for e in audit.performances if not e.contained]
+            packed: list[SplitGroup] = []
+            if contained:
+                packed.extend(
+                    pack_self_contained_into(
+                        sources, scope, contained, self._target_bank(), mode=self._mode
+                    )
+                )
+            if non_contained:
+                packed.extend(
+                    pack_self_contained_into(
+                        sources, scope, non_contained, overflow, mode=self._mode
+                    )
+                )
+        except (IndexError, LookupError, ValueError, TypeError, AttributeError):
+            return False
+        return all(group.plan is None or not group.plan.rejected for group in packed)
+
     def _overflow_kind_chosen(self, overflow: Any, index: Optional[int]) -> None:
         """Dismiss with the overflow bank and the kind that was picked."""
         if index is None:
@@ -575,7 +718,7 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
                     "self-contained split cannot be planned"
                 )
                 return
-            if not partition.fits:
+            if not partition.fits and not self._split_plannable(overflow):
                 # Never dismiss on a split that would drop performances.
                 self._set_status(self._split_refusal(overflow, partition))
                 return
@@ -599,9 +742,12 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
         pressed, so the choice is stated before the gate can be armed (R1).
         With pass state on the screen the line names the continuation
         pass: the remaining performances, with the skip count still
-        relative to the whole source bank.
+        relative to the whole source bank. While a split remainder waits,
+        the line names the next card instead.
         """
         label = MODE_LABELS[self._mode]
+        if self._split_session():
+            return self._split_mode_line(label)
         if self._mode is ImportMode.AS_IS:
             return (
                 f"Mode: {label} · writes the whole bank (every performance, "
@@ -638,10 +784,17 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
         for target in state.written.values():
             seen[target] = seen.get(target, 0) + 1
         groups = ", ".join(f"{target}: {count}" for target, count in seen.items())
-        return (
-            f"pass so far: {len(state.written)} written ({groups}) · "
-            f"next pass: {len(self._remaining_slots())} remaining"
-        )
+        head = f"pass so far: {len(state.written)} written ({groups})"
+        if state.split_session:
+            remaining = self._split_remaining()
+            if remaining:
+                return (
+                    f"{head} · {len(remaining)} performances remain: "
+                    "switch the card on the unit (select it on the HCard "
+                    "and press C), then press n"
+                )
+            return f"{head} · nothing left to write: the split is complete"
+        return f"{head} · next pass: {len(self._remaining_slots())} remaining"
 
     def _summary_text(self) -> str:
         try:
@@ -831,7 +984,10 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
         self._set_status(self._mode_line())
 
     def action_next_pass(self) -> None:
-        """Offer the not-yet-written contained performances (plan R4 c)."""
+        """Offer the not-yet-written performances (plan R4 c and d)."""
+        if self._split_session():
+            self._next_split_pass()
+            return
         if self._mode is ImportMode.AS_IS:
             self._set_status("next pass needs a self-contained mode (press m)")
             return
@@ -850,6 +1006,49 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
                 "Next pass target", [str(w.label) for w in self._writable]
             ),
             self._next_pass_target_chosen,
+        )
+
+    def _next_split_pass(self) -> None:
+        """Continue the split onto the card now in the slot (plan R4 d).
+
+        The card has been swapped; the user selects it on the HCard and
+        presses C first, so the next pass replaces what the slot holds
+        with one more self-contained group of the same source bank.
+        """
+        remaining = self._split_remaining()
+        if not remaining:
+            self._set_status(
+                "nothing left to write: the self-contained split is complete"
+            )
+            return
+        try:
+            target = self._split_target_bank()
+        except IndexError:
+            self._set_status("no writable target banks")
+            return
+        group = self._split_next_group(remaining, target)
+        if group is None:
+            self._set_status(f"the next group cannot be planned for {target.label}")
+            return
+        self._set_status(
+            f"next pass: writes {self._split_group_words(group)} packed into "
+            f"{target.label} — switch the card on the unit (select it on "
+            "the HCard and press C), then press n"
+        )
+        if self._gate is not None and not self._gate.armed:
+            self._set_status("write gate is locked")
+            return
+        self.dismiss(
+            WholeBankChoice(
+                self._source_index,
+                str(target.id),
+                True,
+                self._mode,
+                self._session_key(),
+                True,
+                "",
+                OVERFLOW_SELF_CONTAINED,
+            )
         )
 
     def _next_pass_target_chosen(self, picked: Optional[int]) -> None:
@@ -1007,7 +1206,11 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
             "n  offer the next pass: the contained performances no earlier\n"
             "   pass has written, into a fresh target (another card bank\n"
             "   after a switch, or a RAM bank); each pass is its own gated\n"
-            "   write, and with nothing left it says so and writes nothing\n"
+            "   write, and with nothing left it says so and writes nothing.\n"
+            "   When a self-contained split needed more banks than one\n"
+            "   pass offered, n instead writes one more group of the\n"
+            "   remainder into the card slot: switch the card on the unit,\n"
+            "   select it on the HCard and press C, then press n.\n"
             "x  offer the file's companion banks, each writing into the RAM "
             "bank the source's parts name (one gated write per bank)\n"
             "w  arm/lock the write gate\n"
