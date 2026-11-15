@@ -310,6 +310,12 @@ at all (a patch it names is not loaded, or one performance alone exceeds a
 bank) is refused before any write. The patches-only kind is a single-bank
 overflow and is never refused on size.
 
+A third kind, **cards only**, never touches a RAM bank: every non-empty
+performance is packed into self-contained groups that each fit one card,
+the first group is written to the card in the slot, and each later group
+goes to the next card after a switch (`n`). It visits as many cards as the
+content needs and drops nothing.
+
 ### 6.8 Whole-bank write and the cached bank
 
 Whole-bank writes pass no `before_blocks` to the bridge, so the bridge
