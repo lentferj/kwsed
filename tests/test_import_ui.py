@@ -1895,6 +1895,9 @@ async def test_spillover_is_one_fenced_write_to_the_audited_bank(
     app, recorded = _armed_app(tmp_path, monkeypatch)
     monkeypatch.setattr(bankstore, "save", lambda *a, **k: None)
     file_banks = _spillover_banks()
+    # The unit's copy of RAM 2 is all Init: a whole-bank companion write
+    # carries nothing away, so the bank travels whole as before.
+    app._sources["RAM2"] = _make_bank(scope="RAM2", active_slots=[]).source
     async with app.run_test() as pilot:
         await pilot.pause()
         app.push_screen(
@@ -2423,6 +2426,9 @@ async def test_as_is_write_ends_in_a_popup_for_the_carried_companion(
 
     app, recorded = _armed_app(tmp_path, monkeypatch)
     monkeypatch.setattr(bankstore, "save", lambda *a, **k: None)
+    # The preflight asks before the write; this exercises the fallback net
+    # for a write that went out without it.
+    monkeypatch.setattr(KwsedApp, "_preflight_companion", lambda self, *a, **k: None)
     file_banks = _two_bank_file()
     choice = WholeBankChoice(
         0, "RAM3", True, perfcopy.ImportMode.AS_IS, "as-is-session", True
@@ -2462,6 +2468,9 @@ async def test_the_popup_refusal_leaves_everything_alone(
 
     app, _recorded = _armed_app(tmp_path, monkeypatch)
     monkeypatch.setattr(bankstore, "save", lambda *a, **k: None)
+    # The preflight asks before the write; this exercises the fallback net
+    # for a write that went out without it.
+    monkeypatch.setattr(KwsedApp, "_preflight_companion", lambda self, *a, **k: None)
     file_banks = _two_bank_file()
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -2491,6 +2500,9 @@ async def test_the_popup_writes_the_companion_bank_on_x(
 
     app, _recorded = _armed_app(tmp_path, monkeypatch)
     monkeypatch.setattr(bankstore, "save", lambda *a, **k: None)
+    # The preflight asks before the write; this exercises the fallback net
+    # for a write that went out without it.
+    monkeypatch.setattr(KwsedApp, "_preflight_companion", lambda self, *a, **k: None)
     file_banks = _two_bank_file()
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -3415,6 +3427,9 @@ async def test_the_offer_compares_against_the_unit_when_it_has_the_bank(
 
     app, _recorded = _armed_app(tmp_path, monkeypatch)
     monkeypatch.setattr(bankstore, "save", lambda *a, **k: None)
+    # The preflight asks before the write; this exercises the fallback net
+    # for a write that went out without it.
+    monkeypatch.setattr(KwsedApp, "_preflight_companion", lambda self, *a, **k: None)
     file_banks = _two_bank_file()
     # The unit holds RAM 2, but with none of the patches the file has there.
     app._sources["RAM2"] = _make_bank(scope="RAM2", active_slots=[]).source
@@ -3455,3 +3470,294 @@ async def test_a_unit_bank_that_already_matches_is_not_offered(
         await _settle(pilot, times=60)
         assert not isinstance(app.screen, DanglingRefsScreen)
     assert app.device.bundle_write_count == 1
+
+
+def _preflight_app(tmp_path: Any, monkeypatch: Any) -> tuple[Any, list[Any]]:
+    """An armed app for the preflight tests, with its own backup sandbox."""
+    from kws import backup as _backup
+
+    app, recorded = _armed_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(bankstore, "save", lambda *a, **k: None)
+    backup_dir = str(tmp_path / "preflight-backups")
+    os.makedirs(backup_dir, exist_ok=True)
+    monkeypatch.setattr(_backup, "default_dir", lambda root=None: backup_dir)
+    return app, recorded
+
+
+@pytest.mark.asyncio
+async def test_preflight_ctrl_s_asks_before_the_write_and_both_writes_the_companion(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """ctrl+s raises the question; 'both' sends the companion, then the bank."""
+    from kwsed.import_bank import PreflightImportScreen
+    from tests.test_bankbuild import make_waveseq
+
+    app, recorded = _preflight_app(tmp_path, monkeypatch)
+    file_banks = _two_bank_file()
+    file_banks[1].source.waveseq = make_waveseq({0: [40]})[0]
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.push_screen(
+            WholeBankImportScreen(
+                path="two.syx", banks=file_banks, gate=app._write_gate
+            ),
+            lambda picked: app._import_whole_bank_chosen(file_banks, picked, "two.syx"),
+        )
+        await _settle(pilot)
+        await pilot.press("b")
+        await pilot.press("b")  # target RAM 3, not the companion's RAM 2
+        await pilot.press("ctrl+s")
+        for _ in range(100):
+            await pilot.pause()
+            if isinstance(app.screen, PreflightImportScreen):
+                break
+        await _settle(pilot)
+        modal = app.screen
+        assert isinstance(modal, PreflightImportScreen)
+        assert app.device.bundle_write_count == 0, "nothing is written yet"
+        body = _static_text(modal, "preflight-body")
+        assert "2 parts" in body
+        assert "Main bank" in body
+        assert "RAM 2" in body
+        assert "Nothing has been written yet" in body
+        choices = _static_text(modal, "preflight-choices")
+        assert "wave sequences only" in choices
+        assert "its performances stay as they are" in choices
+        await pilot.press("1")  # write both, companion first
+        for _ in range(200):
+            await pilot.pause()
+            if app.device.bundle_write_count == 2:
+                break
+        await _settle(pilot)
+    assert app.device.bundle_write_count == 2
+    companion_write, target_write = app.device.bundle_writes
+    # The companion went first: patches and wave sequences, never its
+    # performances. The bank the parts name must exist before the
+    # performances that name it arrive.
+    assert companion_write["bank"] == banks.bank("RAM2").label
+    assert companion_write["kinds"] == ["waveseq", "patches"]
+    assert "performances" not in companion_write["kinds"]
+    assert ("RAM2", banks.Kind.PERFORMANCE) not in app.device._written
+    assert ("RAM2", banks.Kind.PATCH) in app.device._written
+    assert target_write["bank"] == banks.bank("RAM3").label
+    assert "performances" in target_write["kinds"]
+    # Two fenced writes: one backup and one undo record each.
+    assert len(recorded) == 2
+    for result in recorded:
+        backup_path = result["backup"]
+        assert isinstance(backup_path, str) and os.path.exists(backup_path)
+
+
+@pytest.mark.asyncio
+async def test_preflight_only_choice_writes_one_bundle_without_the_popup(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """'only' is the explicit answer: one bundle, and no popup afterwards."""
+    from kwsed.import_bank import DanglingRefsScreen, PreflightImportScreen
+
+    app, _recorded = _preflight_app(tmp_path, monkeypatch)
+    file_banks = _two_bank_file()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.push_screen(
+            WholeBankImportScreen(
+                path="two.syx", banks=file_banks, gate=app._write_gate
+            ),
+            lambda picked: app._import_whole_bank_chosen(file_banks, picked, "two.syx"),
+        )
+        await _settle(pilot)
+        await pilot.press("b")
+        await pilot.press("b")  # target RAM 3, not the companion's RAM 2
+        await pilot.press("ctrl+s")
+        for _ in range(100):
+            await pilot.pause()
+            if isinstance(app.screen, PreflightImportScreen):
+                break
+        await _settle(pilot)
+        await pilot.press("2")  # write only this bank
+        for _ in range(200):
+            await pilot.pause()
+            if app.device.bundle_write_count == 1:
+                break
+        await _settle(pilot)
+    assert app.device.bundle_write_count == 1
+    assert app.device.bundle_writes[0]["bank"] == banks.bank("RAM3").label
+    assert not any(
+        isinstance(s, (PreflightImportScreen, DanglingRefsScreen))
+        for s in app.screen_stack
+    ), "the choice was explicit: no popup asks again"
+
+
+@pytest.mark.asyncio
+async def test_preflight_cancel_writes_nothing_and_reopens_the_screen(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """Cancel dismisses the modal and gives the import screen back."""
+    from kwsed.import_bank import PreflightImportScreen, WholeBankImportScreen
+
+    app, _recorded = _preflight_app(tmp_path, monkeypatch)
+    file_banks = _two_bank_file()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.push_screen(
+            WholeBankImportScreen(
+                path="two.syx", banks=file_banks, gate=app._write_gate
+            ),
+            lambda picked: app._import_whole_bank_chosen(file_banks, picked, "two.syx"),
+        )
+        await _settle(pilot)
+        await pilot.press("b")
+        await pilot.press("b")  # target RAM 3, not the companion's RAM 2
+        await pilot.press("ctrl+s")
+        for _ in range(100):
+            await pilot.pause()
+            if isinstance(app.screen, PreflightImportScreen):
+                break
+        await _settle(pilot)
+        await pilot.press("3")  # cancel
+        await _settle(pilot)
+        reopened = app.screen
+        assert isinstance(reopened, WholeBankImportScreen)
+        status = _static_text(reopened, "whole-bank-status")
+        assert "nothing was written" in status
+        assert "press o" in status, "the self-contained way out is named"
+        assert "x to write" in status, "the companions way out is named"
+    assert app.device.bundle_write_count == 0
+
+
+@pytest.mark.asyncio
+async def test_preflight_escape_cancels_like_3(tmp_path: Any, monkeypatch: Any) -> None:
+    """esc is the same cancel: no write, the screen comes back."""
+    from kwsed.import_bank import PreflightImportScreen, WholeBankImportScreen
+
+    app, _recorded = _preflight_app(tmp_path, monkeypatch)
+    file_banks = _two_bank_file()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.push_screen(
+            WholeBankImportScreen(
+                path="two.syx", banks=file_banks, gate=app._write_gate
+            ),
+            lambda picked: app._import_whole_bank_chosen(file_banks, picked, "two.syx"),
+        )
+        await _settle(pilot)
+        await pilot.press("b")
+        await pilot.press("b")  # target RAM 3, not the companion's RAM 2
+        await pilot.press("ctrl+s")
+        for _ in range(100):
+            await pilot.pause()
+            if isinstance(app.screen, PreflightImportScreen):
+                break
+        await _settle(pilot)
+        await pilot.press("escape")
+        await _settle(pilot)
+        assert isinstance(app.screen, WholeBankImportScreen)
+    assert app.device.bundle_write_count == 0
+
+
+@pytest.mark.asyncio
+async def test_preflight_never_rises_for_a_one_bank_file(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """A file with a single bank carries nothing to ask about."""
+    from kwsed.import_bank import PreflightImportScreen
+
+    app, _recorded = _preflight_app(tmp_path, monkeypatch)
+    bank = _mixed_bank()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.push_screen(
+            WholeBankImportScreen(path="one.syx", banks=[bank], gate=app._write_gate),
+            lambda picked: app._import_whole_bank_chosen([bank], picked, "one.syx"),
+        )
+        await _settle(pilot)
+        await pilot.press("b")
+        await pilot.press("b")  # target RAM 3, not the companion's RAM 2
+        await pilot.press("ctrl+s")
+        for _ in range(100):
+            await pilot.pause()
+            if app.device.bundle_write_count:
+                break
+        await _settle(pilot)
+        assert not isinstance(app.screen, PreflightImportScreen)
+    assert app.device.bundle_write_count == 1
+
+
+@pytest.mark.asyncio
+async def test_x_writes_patches_only_keeping_the_performances(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """`x` fills the patch slots; the RAM bank's performances stay."""
+    app, recorded = _preflight_app(tmp_path, monkeypatch)
+    file_banks = _two_bank_file()
+    # The unit's RAM 2 holds performances the person made: not all Init,
+    # so a companion write must not replace them.
+    app._sources["RAM2"] = _make_bank(scope="RAM2", active_slots=[4]).source
+    statuses: list[str] = []
+    app.notify_status = lambda msg, *a, **k: statuses.append(str(msg))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.push_screen(
+            WholeBankImportScreen(
+                path="two.syx", banks=file_banks, gate=app._write_gate
+            ),
+            lambda picked: app._import_whole_bank_chosen(file_banks, picked, "two.syx"),
+        )
+        await _settle(pilot)
+        await pilot.press("x")
+        await _settle(pilot)
+        assert isinstance(app.screen, ImportMenuScreen)
+        await pilot.press("enter")  # the file's RAM 2 bank
+        await _settle(pilot)
+        assert isinstance(app.screen, TargetBankScreen)
+        await pilot.press("enter")  # the suggested RAM 2 target
+        for _ in range(200):
+            await pilot.pause()
+            if app.device.bundle_write_count:
+                break
+        await _settle(pilot)
+    assert app.device.bundle_write_count == 1
+    write = app.device.bundle_writes[0]
+    assert write["bank"] == banks.bank("RAM2").label
+    assert write["kinds"] == ["patches"], "no performances key travels"
+    assert ("RAM2", banks.Kind.PERFORMANCE) not in app.device._written
+    assert ("RAM2", banks.Kind.PATCH) in app.device._written
+    assert any(
+        "wrote 2 patches into RAM 2" in s and "performances were left as they were" in s
+        for s in statuses
+    ), statuses
+    assert recorded, "the patches-only write is recorded for undo"
+
+
+@pytest.mark.asyncio
+async def test_x_writes_the_whole_bank_when_the_performances_are_all_init(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """A RAM bank with nothing but Init has nothing to lose: it travels whole."""
+    app, recorded = _preflight_app(tmp_path, monkeypatch)
+    file_banks = _spillover_banks()
+    app._sources["RAM2"] = _make_bank(scope="RAM2", active_slots=[]).source
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.push_screen(
+            WholeBankImportScreen(
+                path="two.syx", banks=file_banks, gate=app._write_gate
+            ),
+            lambda picked: app._import_whole_bank_chosen(file_banks, picked, "two.syx"),
+        )
+        await _settle(pilot)
+        await pilot.press("x")
+        await _settle(pilot)
+        await pilot.press("enter")
+        await _settle(pilot)
+        await pilot.press("enter")
+        for _ in range(200):
+            await pilot.pause()
+            if app.device.bundle_write_count:
+                break
+        await _settle(pilot)
+    assert app.device.bundle_write_count == 1
+    assert app.device.bundle_writes[0]["bank"] == banks.bank("RAM2").label
+    assert "performances" in app.device.bundle_writes[0]["kinds"]
+    assert ("RAM2", banks.Kind.PERFORMANCE) in app.device._written
+    assert recorded

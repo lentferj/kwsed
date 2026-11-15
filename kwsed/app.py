@@ -103,9 +103,11 @@ from kwsed.import_bank import (
     OVERFLOW_PATCHES,
     OVERFLOW_SELF_CONTAINED,
     ImportPassState,
+    PreflightImportScreen,
     WholeBankChoice,
     WholeBankImportScreen,
     _entry_bank,
+    _is_empty_performance,
 )
 from kwsed.import_single import SingleImportScreen
 from kwsed.import_source import (
@@ -5537,8 +5539,9 @@ class KwsedApp(App[None]):
         if not self._write_gate.armed:
             self.notify_status("write gate is locked", refused=True)
             return
+        if self._deferred_companion_step(bank, choice, banks_list, path):
+            return
         from kws import banks as _banks
-        from kws import backup as _backup
 
         target, target_scope = self._resolve_whole_bank_target(choice)
         if target_scope.startswith("CARD/"):
@@ -5558,7 +5561,7 @@ class KwsedApp(App[None]):
         # writes leave it empty so they neither continue nor pollute a
         # session: repeating a self-contained import starts over.
         session_key = str(getattr(choice, "session_key", "") or "")
-        written = self._import_pass_written(session_key) if session_key else {}
+        written = self._import_pass_written(session_key)
         conflict = self._preaudit_conflicting_slots(
             target,
             range(_banks.PERFORMANCES_PER_BANK),
@@ -5572,7 +5575,7 @@ class KwsedApp(App[None]):
                 range(_banks.PERFORMANCES_PER_BANK),
                 range(_banks.PATCHES_PER_BANK),
             )
-            conflict = "; ".join(part for part in (conflict, overflow_conflict) if part)
+            conflict = "; ".join(filter(None, (conflict, overflow_conflict)))
         split_plan, proceed, split_remaining = self._split_choice_plan(
             bank, sources, target, mode, choice
         )
@@ -5584,26 +5587,9 @@ class KwsedApp(App[None]):
         )
 
         def work() -> Any:
-            if split_plan is not None:
-                return self._write_split_banks(split_plan, _backup.default_dir())
-            if overflow_id:
-                return self._write_with_overflow(
-                    bank, sources, target, mode, _backup.default_dir(), overflow_id
-                )
-            built = self._whole_bank_bytes(bank, sources, target, mode, written=written)
-            # The bridge reads the unit before writing it. Handing it the
-            # cached bank instead would (a) skip the write when the file
-            # matches the cache -- telling the user it wrote a card it never
-            # touched -- and (b) back up bytes that may not be on the unit.
-            result = self.device.write_bank_bundle(
-                target.number,
-                performances=built.performances,
-                patches=built.patches,
-                waveseq=built.waveseq,
-                backup_dir=_backup.default_dir(),
-                before_blocks=None,
+            return self._whole_write_work(
+                bank, sources, target, mode, written, split_plan, overflow_id
             )
-            return built, result
 
         def done(result: Any, failure: BaseException | None) -> None:
             self._whole_write_done(
@@ -5625,6 +5611,45 @@ class KwsedApp(App[None]):
         )
         self.notify_status(status, warn=bool(conflict))
         self._device_worker(work, done, f"importing {label} into {into}")
+
+    def _whole_write_work(
+        self,
+        bank: Any,
+        sources: Mapping[str, deps.Source],
+        target: Any,
+        mode: Any,
+        written: Mapping[int, str],
+        split_plan: Any,
+        overflow_id: str,
+    ) -> Any:
+        """The bytes one whole-bank write sends, chosen by the flow.
+
+        A self-contained split writes each bank's share, a patches-only
+        overflow writes the overflow bank first and then the target, and
+        the plain write builds the one target bank (plan R5).
+        """
+        from kws import backup as _backup
+
+        if split_plan is not None:
+            return self._write_split_banks(split_plan, _backup.default_dir())
+        if overflow_id:
+            return self._write_with_overflow(
+                bank, sources, target, mode, _backup.default_dir(), overflow_id
+            )
+        built = self._whole_bank_bytes(bank, sources, target, mode, written=written)
+        # The bridge reads the unit before writing it. Handing it the
+        # cached bank instead would (a) skip the write when the file
+        # matches the cache -- telling the user it wrote a card it never
+        # touched -- and (b) back up bytes that may not be on the unit.
+        result = self.device.write_bank_bundle(
+            target.number,
+            performances=built.performances,
+            patches=built.patches,
+            waveseq=built.waveseq,
+            backup_dir=_backup.default_dir(),
+            before_blocks=None,
+        )
+        return built, result
 
     @staticmethod
     def _whole_write_status(
@@ -5784,6 +5809,352 @@ class KwsedApp(App[None]):
                 return False
         return True
 
+    def _deferred_companion_step(
+        self,
+        bank: Any,
+        choice: Any,
+        banks_list: Optional[Sequence[Any]],
+        path: str,
+    ) -> bool:
+        """Run what stands between this choice and its write, if anything.
+
+        Either the preflight question -- asked before anything is sent,
+        with cancel writing nothing at all -- or the patches-only
+        companion write handles the choice here. ``False`` says the
+        ordinary whole-bank write may proceed.
+        """
+        named = self._preflight_companion(bank, choice, banks_list, path)
+        if named is not None and banks_list is not None:
+            # Nothing has been sent: the question decides what travels.
+            self._ask_preflight(bank, choice, banks_list, path, named)
+            return True
+        if self._companion_write_patches_only(choice):
+            self._write_companion_patches_only(bank, choice)
+            return True
+        return False
+
+    def _preflight_companion(
+        self,
+        bank: Any,
+        choice: Any,
+        banks_list: Optional[Sequence[Any]],
+        path: str,
+    ) -> Optional[Tuple[int, int, Any]]:
+        """The companion a plain write should ask about before it runs.
+
+        The question is asked when the choice comes from the import
+        screen's own write keys (ctrl+s or n, which carry
+        ``continue_pass``), the write is a plain one -- no overflow of its
+        own, nothing answered yet, no split session continuing -- and the
+        audit of the source bank shows parts naming a writable bank that
+        the same file carries while the unit does not already hold those
+        patches. The target being the named bank itself is not a
+        question: those parts already point where they will play.
+        """
+        if not banks_list or not path:
+            return None
+        if not getattr(self, "is_running", False):
+            return None
+        if not bool(getattr(choice, "continue_pass", False)):
+            return None
+        if str(getattr(choice, "preflight", "") or ""):
+            return None
+        if not self._import_left_dangling(choice):
+            return None
+        session_key = str(getattr(choice, "session_key", "") or "")
+        if session_key and self._split_pass_kind(session_key) in (
+            "split",
+            OVERFLOW_CARDS_ONLY,
+        ):
+            return None
+        try:
+            target, _target_scope = self._resolve_whole_bank_target(choice)
+            source_index = int(getattr(choice, "source_index", 0) or 0)
+        except (LookupError, TypeError, ValueError):
+            return None
+        named = self._companions_named_by_parts(bank, banks_list, source_index)
+        if not named:
+            return None
+        count, index, companion = max(named, key=lambda item: (item[0], -item[1]))
+        if companion.number == target.number:
+            return None
+        return (count, index, companion)
+
+    def _ask_preflight(
+        self,
+        bank: Any,
+        choice: Any,
+        banks_list: Optional[Sequence[Any]],
+        path: str,
+        named: Tuple[int, int, Any],
+    ) -> None:
+        """Offer the three answers while nothing has been written yet."""
+        if banks_list is None:
+            return
+        count, index, companion = named
+        body = (
+            f"{count} parts of the performances in {getattr(bank, 'label', '')} "
+            f"name {companion.label}, and this file carries that bank too. "
+            "Nothing has been written yet."
+        )
+        choices = (
+            f"Write both: this bank, plus {companion.label}'s patches and "
+            "wave sequences only (its performances stay as they are)",
+            f"Write only this bank — those parts will play whatever "
+            f"{companion.label} holds now",
+            "Cancel — open the import screen to pick a self-contained or "
+            "cards-only pass",
+        )
+        # Push on the next refresh, not inside the import screen's own
+        # dismissal: a screen pushed in that same turn can be popped
+        # again while the stack settles, which is the trap the dangling
+        # popup already avoids.
+        self.call_after_refresh(
+            self._push_preflight,
+            body,
+            choices,
+            bank,
+            choice,
+            banks_list,
+            path,
+            index,
+            companion,
+        )
+
+    def _push_preflight(
+        self,
+        body: str,
+        choices: Sequence[str],
+        bank: Any,
+        choice: Any,
+        banks_list: Sequence[Any],
+        path: str,
+        companion_index: int,
+        companion: Any,
+    ) -> None:
+        """Put the preflight modal on the stack."""
+        self.push_screen(
+            PreflightImportScreen(body, choices=choices),
+            lambda answer: self._preflight_answer(
+                answer, bank, choice, banks_list, path, companion_index, companion
+            ),
+        )
+
+    def _preflight_answer(
+        self,
+        answer: Optional[str],
+        bank: Any,
+        choice: Any,
+        banks_list: Sequence[Any],
+        path: str,
+        companion_index: int,
+        companion: Any,
+    ) -> None:
+        """Carry out the preflight's answer; cancel writes nothing."""
+        if answer == "both":
+            self._preflight_write_both(
+                bank, choice, banks_list, path, companion_index, companion
+            )
+            return
+        if answer == "only":
+            if not self._write_gate.armed:
+                self.notify_status("write gate is locked", refused=True)
+                return
+            self._import_whole_bank_write(
+                bank,
+                replace(choice, preflight="only"),
+                banks_list=banks_list,
+                path=path,
+            )
+            return
+        # Cancel: no write at all. The screen comes back with the two
+        # ways out of the dilemma it opened with.
+        session_key = str(getattr(choice, "session_key", "") or "")
+        mode = getattr(choice, "mode", perfcopy.ImportMode.AS_IS)
+        self._reopen_whole_bank_import(
+            banks_list,
+            path,
+            session_key,
+            mode,
+            notice=(
+                "nothing was written — press o for a self-contained or "
+                "cards-only pass that repoints those parts, or x to write "
+                "the companion bank they name"
+            ),
+        )
+
+    def _preflight_write_both(
+        self,
+        bank: Any,
+        choice: Any,
+        banks_list: Sequence[Any],
+        path: str,
+        companion_index: int,
+        companion: Any,
+    ) -> None:
+        """The preflight's first answer: the companion's patches, then the bank.
+
+        The companion's patches and wave sequences go out first, because
+        a performance that names them must find them already on the
+        unit; its performances are never sent, so that RAM bank keeps
+        whatever performances it holds. The bank's own write follows,
+        marked so neither the preflight nor the post-write popup runs
+        again.
+        """
+        if not self._write_gate.armed:
+            self.notify_status("write gate is locked", refused=True)
+            return
+        try:
+            companion_entry = banks_list[companion_index]
+        except (IndexError, TypeError):
+            return
+
+        def after_companion() -> None:
+            self._import_whole_bank_write(
+                bank,
+                replace(choice, preflight="both"),
+                banks_list=banks_list,
+                path=path,
+            )
+
+        self._write_companion_patches(companion_entry, companion, after_companion)
+
+    def _companion_write_patches_only(self, choice: Any) -> bool:
+        """Whether a companion write must leave the bank's performances alone.
+
+        A companion (``x``) write exists to fill the patch slots other
+        performances' parts name; replacing that RAM bank's performances
+        too was more than the choice asked for. When the unit's copy of
+        the bank is empty of performances (all Init), a whole-bank write
+        carries nothing away, so the bank travels whole as before. A bank
+        whose contents are not loaded counts as not empty: nothing is
+        guessed about what the write would replace.
+        """
+        if not bool(getattr(choice, "companion_only", False)):
+            return False
+        bank_id = str(getattr(choice, "target_bank", "") or "")
+        current = self._sources_with_store().get(bank_id)
+        if current is None:
+            return True
+        performances = list(getattr(current, "performances", []) or [])
+        if not performances:
+            return True
+        for record in performances:
+            try:
+                if not _is_empty_performance(record):
+                    return True
+            except (ValueError, TypeError):
+                if record and any(record):
+                    return True
+        return False
+
+    def _write_companion_patches_only(self, bank: Any, choice: Any) -> None:
+        """The ``x`` companion write, patches and wave sequences only."""
+        try:
+            companion, _companion_scope = self._resolve_whole_bank_target(choice)
+        except (LookupError, ValueError):
+            return
+        self._write_companion_patches(bank, companion)
+
+    def _write_companion_patches(
+        self,
+        entry: Any,
+        companion: Any,
+        on_done: Optional[Callable[[], None]] = None,
+    ) -> None:
+        """Write one companion bank's patches and wave sequences only.
+
+        The RAM bank's performances are left exactly as they are: a
+        companion write exists to fill the patch slots other
+        performances' parts name, not to replace the performances that
+        bank already holds. The write is fenced like any other: the
+        destination is backed up before anything is sent, and the
+        read-back decides whether it landed.
+        """
+        from kws import backup as _backup
+        from kws import banks as _banks
+
+        source = getattr(entry, "source", None)
+        if source is None:
+            return
+        patches_blob = b"".join(getattr(source, "patches", []) or []) or None
+        waveseq = getattr(source, "waveseq", None)
+        if patches_blob is None and waveseq is None:
+            self.notify_status(
+                f"import: the file carries no patches or wave sequences "
+                f"for {companion.label}, so there is nothing to write",
+                refused=True,
+            )
+            return
+        count = sum(
+            1
+            for record in getattr(source, "patches", []) or ()
+            if record and any(record)
+        )
+        conflict = self._preaudit_conflicting_slots(
+            companion, (), range(_banks.PATCHES_PER_BANK)
+        )
+        if conflict:
+            self.notify_status(
+                f"warning: this import overwrites {conflict} — writing anyway",
+                warn=True,
+            )
+        backup_dir = _backup.default_dir()
+
+        def work() -> Any:
+            return self.device.write_bank_bundle(
+                companion.number,
+                patches=patches_blob,
+                waveseq=waveseq,
+                backup_dir=backup_dir,
+                before_blocks=None,
+            )
+
+        def done(result: Any, failure: BaseException | None) -> None:
+            if failure is not None:
+                self.notify_status(f"import: {failure}", refused=True)
+                return
+            if hasattr(self, "_record_write"):
+                self._record_write(result)
+            self._remember_companion_patches(companion, source)
+            self.notify_status(
+                f"wrote {self._counted(count, 'patch', 'patches')} into "
+                f"{companion.label}; its performances were left as they were"
+            )
+            if on_done is not None:
+                on_done()
+
+        self._device_worker(work, done, f"writing patches into {companion.label}")
+
+    def _remember_companion_patches(self, companion: Any, source: Any) -> None:
+        """Record the patches a companion write left on the unit.
+
+        The session's copy of that bank keeps its own performances --
+        they were never touched -- and takes the file's patches and wave
+        sequences, so a later check sees the bank as written.
+        """
+        existing = self._sources.get(companion.id)
+        patches_blob = b"".join(getattr(source, "patches", []) or [])
+        self._sources[companion.id] = deps.Source(
+            scope_id=companion.id,
+            performances=list(getattr(existing, "performances", []) or []),
+            patches=[
+                patches_blob[i * rec.PATCH_SIZE : (i + 1) * rec.PATCH_SIZE]
+                for i in range(len(patches_blob) // rec.PATCH_SIZE)
+            ],
+            waveseq=getattr(source, "waveseq", None),
+        )
+        if self._bankstore_dir is not None:
+            try:
+                bankstore.save(
+                    companion.id,
+                    patches=patches_blob or None,
+                    waveseq=getattr(source, "waveseq", None),
+                    directory=self._bankstore_dir,
+                )
+            except OSError:
+                pass
+
     def _offer_companions_after_write(
         self,
         choice: Any,
@@ -5802,6 +6173,10 @@ class KwsedApp(App[None]):
         pass that repoints the parts.
         """
         if not self._import_left_dangling(choice):
+            return
+        if str(getattr(choice, "preflight", "") or ""):
+            # The preflight asked before the write; the popup stays a
+            # fallback for writes nobody asked about.
             return
         if not getattr(self, "is_running", False) or not banks_list or not path:
             return
@@ -5875,7 +6250,9 @@ class KwsedApp(App[None]):
                 return
             self._import_whole_bank_write(
                 bank,
-                WholeBankChoice(companion_index, companion.id, True),
+                WholeBankChoice(
+                    companion_index, companion.id, True, companion_only=True
+                ),
                 banks_list=banks_list,
                 path=path,
             )

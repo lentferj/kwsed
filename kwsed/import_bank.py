@@ -46,6 +46,7 @@ if TYPE_CHECKING:
 __all__ = [
     "DanglingRefsScreen",
     "ImportPassState",
+    "PreflightImportScreen",
     "SpilloverCompanion",
     "WholeBankChoice",
     "WholeBankImportScreen",
@@ -129,6 +130,18 @@ class WholeBankChoice:
     #: banks are self-contained. The default keeps every existing caller on
     #: the patches-only split.
     overflow_kind: str = OVERFLOW_PATCHES
+    #: True for a companion write (``x``, or the post-write popup's own
+    #: write): the chosen bank's patches and wave sequences travel, and
+    #: its performances stay as they are -- unless the unit's copy of the
+    #: bank is empty of performances (all Init), where a whole-bank write
+    #: carries nothing away. The app decides which of the two the bank's
+    #: current contents allow.
+    companion_only: bool = False
+    #: The preflight answer this write already carries (``"both"`` or
+    #: ``"only"``), or "" while the question has not been asked. A marked
+    #: write never raises the modal again, and the post-write companion
+    #: popup stays a fallback for writes nobody asked about.
+    preflight: str = ""
 
 
 @dataclass(frozen=True)
@@ -310,7 +323,8 @@ class DanglingRefsScreen(ModalScreen[Optional[str]]):
             yield Static("Parts left pointing outside", id="dangling-title")
             yield Static(self._body, id="dangling-body", markup=False)
             yield Static(
-                f"x  write {self._write_label} now\n"
+                f"x  write {self._write_label}'s patches (its performances "
+                "stay as they are)\n"
                 "o  self-contained pass, repointing those parts\n"
                 "esc  leave it as it is",
                 id="dangling-hint",
@@ -322,6 +336,69 @@ class DanglingRefsScreen(ModalScreen[Optional[str]]):
 
     def action_repoint(self) -> None:
         self.dismiss("repoint")
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class PreflightImportScreen(ModalScreen[Optional[str]]):
+    """Asked before a write: the file carries the bank its parts name.
+
+    An as-is write of one bank of a multi-bank file keeps every part
+    pointing where the file points, and a self-contained pass leaves the
+    performances that name another bank for later. When the file also
+    carries that bank, the write can either fill it with the companion's
+    patches -- leaving its performances alone -- or leave it as it is.
+    Discovering this after the write came too late and offered no choice,
+    so the question is asked while nothing has been sent.
+    """
+
+    DEFAULT_CSS = """
+    PreflightImportScreen { align: center middle; }
+    PreflightImportScreen Vertical {
+        width: 84; height: auto; border: thick $accent;
+        padding: 1 2; background: $panel;
+    }
+    PreflightImportScreen #preflight-title { text-style: bold; height: auto; }
+    PreflightImportScreen #preflight-body { height: auto; padding: 1 0; }
+    PreflightImportScreen #preflight-choices { height: auto; padding: 1 0; }
+    PreflightImportScreen #preflight-hint { height: auto; color: $text-muted; }
+    """
+
+    BINDINGS = [
+        Binding("1", "both", "Write both"),
+        Binding("2", "only", "Only this bank"),
+        Binding("3", "cancel", "Cancel"),
+        Binding("escape", "cancel", "Cancel"),
+        Binding("q", "cancel", "Cancel"),
+    ]
+
+    def __init__(self, body: str, *, choices: Sequence[str]) -> None:
+        super().__init__()
+        self._body = body
+        self._choices = list(choices)
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Static("This file carries a second bank", id="preflight-title")
+            yield Static(self._body, id="preflight-body", markup=False)
+            yield Static(
+                "\n".join(
+                    f"{index + 1}  {choice}"
+                    for index, choice in enumerate(self._choices)
+                ),
+                id="preflight-choices",
+                markup=False,
+            )
+            yield Static(
+                "1 / 2 / 3 choose · esc cancel", id="preflight-hint", markup=False
+            )
+
+    def action_both(self) -> None:
+        self.dismiss("both")
+
+    def action_only(self) -> None:
+        self.dismiss("only")
 
     def action_cancel(self) -> None:
         self.dismiss(None)
@@ -1318,7 +1395,16 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
         if self._gate is not None and not self._gate.armed:
             self._set_status("write gate is locked")
             return
-        self.dismiss(WholeBankChoice(companion.index, target.id, True, self._mode))
+        # A companion write fills the patch slots the parts name; it does
+        # not exist to replace the performances that RAM bank already
+        # holds. The app still writes the bank whole when the unit's copy
+        # of it is empty of performances (all Init) -- there is nothing
+        # there to destroy.
+        self.dismiss(
+            WholeBankChoice(
+                companion.index, target.id, True, self._mode, companion_only=True
+            )
+        )
 
     def action_write(self) -> None:
         if self._gate is not None and not self._gate.armed:
@@ -1368,7 +1454,10 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
             "   the card on the unit, select it on the HCard and press C,\n"
             "   then press n.\n"
             "x  offer the file's companion banks, each writing into the RAM "
-            "bank the source's parts name (one gated write per bank)\n"
+            "bank the source's parts name (one gated write per bank): its "
+            "patches and wave sequences travel, and its performances stay "
+            "as they are -- only a bank with no performances at all is "
+            "written whole\n"
             "w  arm/lock the write gate\n"
             "c  save the bank to the local cache only (no unit write)\n"
             "ctrl+s  write the whole bank to the target (gate must be armed)\n"
@@ -1384,10 +1473,14 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
             "one target, and n carries the remainder into the next one.\n"
             "Cards only packs every performance, contained or not, one\n"
             "self-contained group per card; no RAM bank is written.\n\n"
-            "A companion write is the same fenced whole-bank write as ctrl+s.\n"
-            "It is one bank at a time: picking a companion writes that bank\n"
-            "only, never the first one with it, and the target may be changed\n"
-            "from the suggested bank. Nothing is repointed automatically."
+            "A companion write is the same fenced write as ctrl+s, minus\n"
+            "the performances: the chosen bank's patches and wave\n"
+            "sequences are replaced, and what it holds as performances\n"
+            "stays. Only a bank that is all Init is written whole.\n"
+            "It is one bank at a time: picking a companion writes that\n"
+            "bank only, never the first one with it, and the target may\n"
+            "be changed from the suggested bank. Nothing is repointed\n"
+            "automatically."
         )
         self.app.push_screen(ReportScreen("Whole bank import", text))
 
