@@ -5541,6 +5541,13 @@ class KwsedApp(App[None]):
         )
 
         overflow_id = str(getattr(choice, "overflow_bank", "") or "")
+        if overflow_id:
+            overflow_conflict = self._preaudit_conflicting_slots(
+                _banks.bank(overflow_id),
+                range(_banks.PERFORMANCES_PER_BANK),
+                range(_banks.PATCHES_PER_BANK),
+            )
+            conflict = "; ".join(part for part in (conflict, overflow_conflict) if part)
 
         def work() -> Any:
             if overflow_id:
