@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import os
 from types import SimpleNamespace
 from typing import Any, Optional
 from unittest.mock import patch
@@ -719,6 +720,227 @@ async def test_whole_unit_choice_armed(tmp_path: Any) -> None:
     assert "RAM3" in app._sources
     assert len(recorded) == 1
     assert app.catalog.display_name("RAM3", 3, _banks.Kind.PERFORMANCE) == "TestName"
+
+
+def _clean_perf_record() -> bytes:
+    """The builder's clean slot: every part switched off, no name."""
+    one = bytearray(PERF_RECORD_SIZE)
+    for i in range(r.PARTS_PER_PERFORMANCE):
+        r.set_performance_part(one, i, bank=0, patch=r.UNUSED_PATCH)
+    return bytes(one)
+
+
+def _as_written(record: bytes, part_targets: dict[int, tuple[int, int]]) -> bytes:
+    """``record`` with the used parts repointed, byte for byte."""
+    out = bytearray(record)
+    for index, (bank_no, part_patch) in part_targets.items():
+        r.set_performance_part(out, index, bank=bank_no, patch=part_patch)
+    return bytes(out)
+
+
+def _mixed_bank() -> Any:
+    """A source bank: two contained performances, two that name RAM 2.
+
+    Every name is invented. The two external performances point at RAM 2
+    (bank number 1), so a self-contained write skips them; the two
+    contained ones share one patch (slot 0), which PACKED must dedupe.
+    """
+    from tests.test_bankbuild import make_patch, make_performance
+
+    perfs = [_empty_perf() for _ in range(50)]
+    perfs[2] = make_performance("Anchor Line", ((0, 0),))
+    perfs[5] = make_performance("Beacon Row", ((0, 0),))
+    perfs[7] = make_performance("Crossing Deck", ((1, 2),))
+    perfs[9] = make_performance("Drift Path", ((1, 2),))
+    patches = [bytes(PATCH_RECORD_SIZE) for _ in range(35)]
+    patches[0] = make_patch("Alpha Basis")
+    bank = _make_bank(scope="RAM1")
+    bank.source.performances = perfs
+    bank.source.patches = patches
+    return bank
+
+
+def _armed_app(tmp_path: Any, monkeypatch: Any) -> tuple[Any, list[dict[str, Any]]]:
+    """An app with an armed gate and a RAM 3 target, backups sandboxed.
+
+    Returns the app and the list ``_record_write`` receives (the device's
+    write result, whose ``backup`` path is the pre-write backup envelope).
+    """
+    from kws import backup as _backup
+
+    app = _make_app(tmp_path, bankstore_dir=str(tmp_path / "store"))
+    app._sources["RAM3"] = _make_bank(scope="RAM3").source
+    app._write_gate = EditGate(armed=True)
+    app.notify_status = lambda *a, **k: None  # type: ignore[method-assign]
+    backup_dir = str(tmp_path / "backups")
+    os.makedirs(backup_dir, exist_ok=True)
+    monkeypatch.setattr(_backup, "default_dir", lambda root=None: backup_dir)
+    recorded: list[dict[str, Any]] = []
+    app._record_write = recorded.append  # type: ignore[method-assign]
+    return app, recorded
+
+
+@pytest.mark.asyncio
+async def test_whole_write_as_is_matches_relocate_bank(tmp_path: Any) -> None:
+    """AS_IS stays today's byte-identical relocate_bank write."""
+    app = _make_app(tmp_path, bankstore_dir=str(tmp_path / "store"))
+    app._sources["RAM3"] = _make_bank(scope="RAM3").source
+    app._write_gate = EditGate(armed=True)
+    app.notify_status = lambda *a, **k: None  # type: ignore[method-assign]
+    recorded: list[Any] = []
+
+    def _no_record(result: Any) -> None:
+        recorded.append(result)
+
+    app._record_write = _no_record  # type: ignore[method-assign]
+    bank = _mixed_bank()
+    writes: list[dict[str, Any]] = []
+
+    def fake_write(*a: Any, **k: Any) -> dict[str, Any]:
+        writes.append(dict(k))
+        return {"verified": True}
+
+    app.device.write_bank_bundle = fake_write
+
+    with patch.object(bankstore, "save", lambda *a, **k: None):
+        app._import_whole_bank_write(
+            bank,
+            WholeBankChoice(0, "RAM3", True, perfcopy.ImportMode.AS_IS),
+        )
+
+    assert len(writes) == 1
+    expected = perfcopy.relocate_bank(bank.source, banks.bank("RAM3"))
+    w = writes[0]
+    assert w["performances"] == expected.performances
+    assert w["patches"] == expected.patches
+    assert w["waveseq"] == expected.waveseq
+    assert w["before_blocks"]  # the pre-write backup read still happens
+
+
+def _written_perfs(device: DemoDevice) -> bytes:
+    blob = device._written[("RAM3", banks.Kind.PERFORMANCE)]
+    assert len(blob) == 50 * PERF_RECORD_SIZE
+    return blob
+
+
+def _written_patches(device: DemoDevice) -> bytes:
+    blob = device._written[("RAM3", banks.Kind.PATCH)]
+    assert len(blob) == 35 * PATCH_RECORD_SIZE
+    return blob
+
+
+def _perf_at(blob: bytes, slot: int) -> bytes:
+    return blob[slot * PERF_RECORD_SIZE : (slot + 1) * PERF_RECORD_SIZE]
+
+
+def _patch_at(blob: bytes, slot: int) -> bytes:
+    return blob[slot * PATCH_RECORD_SIZE : (slot + 1) * PATCH_RECORD_SIZE]
+
+
+@pytest.mark.asyncio
+async def test_whole_write_one_to_one_cleans_skipped_slots(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """1TO1: contained performances keep their slots, the rest are clean."""
+    app = _armed_app(tmp_path, monkeypatch)[0]
+    saved: list[dict[str, Any]] = []
+
+    def fake_save(
+        scope_id: Any,
+        *,
+        performances: Any = None,
+        patches: Any = None,
+        waveseq: Any = None,
+        directory: Any = None,
+    ) -> None:
+        saved.append(
+            {"scope": scope_id, "performances": performances, "patches": patches}
+        )
+
+    monkeypatch.setattr(bankstore, "save", fake_save)
+    bank = _mixed_bank()
+    ram3 = banks.bank("RAM3").number
+
+    app._import_whole_bank_write(
+        bank,
+        WholeBankChoice(0, "RAM3", True, perfcopy.ImportMode.SELF_CONTAINED_1TO1),
+    )
+
+    written = _written_perfs(app.device)
+    source = bank.source
+    assert _perf_at(written, 2) == _as_written(source.performances[2], {0: (ram3, 0)})
+    # One private patch copy per performance: the second one shares the
+    # source patch but lands on its own target slot.
+    assert _perf_at(written, 5) == _as_written(source.performances[5], {0: (ram3, 1)})
+    for slot in range(50):
+        if slot in (2, 5):
+            continue
+        # Slot 7 names RAM 2 and is skipped: a clean slot, not the record.
+        assert _perf_at(written, slot) == _clean_perf_record()
+    patch_blob = _written_patches(app.device)
+    assert _patch_at(patch_blob, 0) == source.patches[0]
+    assert _patch_at(patch_blob, 1) == source.patches[0]
+    for slot in range(2, 35):
+        assert _patch_at(patch_blob, slot) == bytes(PATCH_RECORD_SIZE)
+    # Exactly one bank was written, and the cache stub got the same bytes.
+    assert set(app.device._written) == {
+        ("RAM3", banks.Kind.PERFORMANCE),
+        ("RAM3", banks.Kind.PATCH),
+    }
+    assert saved[0]["scope"] == "RAM3"
+    assert saved[0]["performances"] == written
+    assert saved[0]["patches"] == patch_blob
+
+
+@pytest.mark.asyncio
+async def test_whole_write_packed_compacts_non_contained_source(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """PACKED: a source that is half external compacts into a prefix."""
+    app = _armed_app(tmp_path, monkeypatch)[0]
+    monkeypatch.setattr(bankstore, "save", lambda *a, **k: None)
+    bank = _mixed_bank()
+    ram3 = banks.bank("RAM3").number
+
+    app._import_whole_bank_write(
+        bank,
+        WholeBankChoice(0, "RAM3", True, perfcopy.ImportMode.SELF_CONTAINED_PACKED),
+    )
+
+    written = _written_perfs(app.device)
+    source = bank.source
+    # Two contained performances re-slot 0..n-1; the two external ones and
+    # every empty slot vanish behind them.
+    assert _perf_at(written, 0) == _as_written(source.performances[2], {0: (ram3, 0)})
+    assert _perf_at(written, 1) == _as_written(source.performances[5], {0: (ram3, 0)})
+    for slot in range(2, 50):
+        assert _perf_at(written, slot) == _clean_perf_record()
+    patch_blob = _written_patches(app.device)
+    # Both performances share one patch slot; 1TO1 needed two.
+    assert _patch_at(patch_blob, 0) == source.patches[0]
+    for slot in range(1, 35):
+        assert _patch_at(patch_blob, slot) == bytes(PATCH_RECORD_SIZE)
+
+
+@pytest.mark.asyncio
+async def test_whole_write_backs_up_in_every_mode(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """The unconditional pre-write backup still appears for every mode."""
+    from kws.perfcopy import ImportMode
+
+    for mode in (
+        ImportMode.AS_IS,
+        ImportMode.SELF_CONTAINED_1TO1,
+        ImportMode.SELF_CONTAINED_PACKED,
+    ):
+        app, recorded = _armed_app(tmp_path, monkeypatch)
+        bank = _mixed_bank()
+        app._import_whole_bank_write(bank, WholeBankChoice(0, "RAM3", True, mode))
+        assert len(recorded) == 1
+        backup_path = recorded[-1].get("backup")
+        assert isinstance(backup_path, str) and backup_path
+        assert os.path.exists(backup_path)
 
 
 @pytest.mark.asyncio

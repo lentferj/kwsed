@@ -5399,6 +5399,34 @@ class KwsedApp(App[None]):
             return
         self._import_whole_bank_write(bank, choice)
 
+    def _whole_bank_bytes(
+        self,
+        bank: Any,
+        sources: Mapping[str, deps.Source],
+        target: Any,
+        mode: Any,
+    ) -> Any:
+        """The bytes a whole-bank write sends, chosen by the import mode.
+
+        ``AS_IS`` stays :func:`kws.perfcopy.relocate_bank` byte for byte;
+        the self-contained modes plan the chosen source's contained
+        performances into the target and build them. Both build the one
+        target bank and nothing else (plan R5).
+        """
+        if mode is perfcopy.ImportMode.AS_IS:
+            return perfcopy.relocate_bank(bank.source, target)
+        from kws import containment
+
+        # The file the bank came from is not necessarily in the session,
+        # so the planner sees it under its own scope.
+        plan_sources = dict(sources)
+        plan_sources[bank.scope] = bank.source
+        audit = containment.audit_containment(plan_sources, bank.scope)
+        plan = perfcopy.plan_self_contained(plan_sources, audit, target, mode)
+        if not plan.fits:
+            raise ValueError("; ".join(plan.rejected))
+        return perfcopy.build_self_contained(plan_sources, plan)
+
     def _import_whole_bank_write(self, bank: Any, choice: Any) -> None:
         if not self._write_gate.armed:
             self.notify_status("write gate is locked", refused=True)
@@ -5409,6 +5437,7 @@ class KwsedApp(App[None]):
         target = _banks.bank(choice.target_bank)
         sources = self._sources_with_store()
         label = getattr(bank, "label", "")
+        mode = getattr(choice, "mode", perfcopy.ImportMode.AS_IS)
         conflict = self._preaudit_conflicting_slots(
             target,
             range(_banks.PERFORMANCES_PER_BANK),
@@ -5419,25 +5448,25 @@ class KwsedApp(App[None]):
             target_source = sources.get(target.id)
             if target_source is None:
                 target_source = self._read_source_offline(target.id)
-            relocated = perfcopy.relocate_bank(bank.source, target)
+            built = self._whole_bank_bytes(bank, sources, target, mode)
             before = self._before_blocks(target_source, target)
             result = self.device.write_bank_bundle(
                 target.number,
-                performances=relocated.performances,
-                patches=relocated.patches,
-                waveseq=relocated.waveseq,
+                performances=built.performances,
+                patches=built.patches,
+                waveseq=built.waveseq,
                 backup_dir=_backup.default_dir(),
                 before_blocks=before if before else None,
             )
-            return relocated, result
+            return built, result
 
         def done(result: Any, failure: BaseException | None) -> None:
             if failure is not None:
                 self.notify_status(f"import: {failure}", refused=True)
                 return
-            relocated, write_result = result
+            built, write_result = result
             self._import_whole_bank_written(
-                label, target, relocated, write_result, conflict
+                label, target, built, write_result, conflict
             )
 
         status = f"writing {label} into {target.label}..."
