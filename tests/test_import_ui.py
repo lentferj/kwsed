@@ -3375,3 +3375,27 @@ async def test_cards_only_continuation_requires_the_write_gate(
         assert app.device.bundle_write_count == 1
     state = app._import_passes["cards.syx|RAM1|gated"]
     assert state["split_remaining"] == list(range(50, 60))
+
+
+@pytest.mark.asyncio
+async def test_a_raising_done_still_ends_the_progress_bar(tmp_path: Any) -> None:
+    """A failed report must not leave the bar frozen at its last percent.
+
+    A raise in the completion callback used to skip the hold-end, so the
+    app showed a bar at, say, 92% with no operation running and no way to
+    tell whether the write had finished.
+    """
+    app = _make_app(tmp_path, bankstore_dir=str(tmp_path / "store"))
+
+    def done(_result: Any, _failure: Any) -> None:
+        raise RuntimeError("the report itself failed")
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._device_worker(lambda: "written", done, "test operation")
+        for _ in range(200):
+            await pilot.pause()
+            if not app._progress_active:
+                break
+        await _settle(pilot)
+        assert not app._progress_active, "the bar is still held"

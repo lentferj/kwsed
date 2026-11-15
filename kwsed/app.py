@@ -3829,9 +3829,16 @@ class KwsedApp(App[None]):
             failure = exc
         try:
             self.call_from_thread(done, result, failure)
-            self.call_from_thread(self._progress_hold_end)
         except Exception:  # noqa: S110 - the app may be shutting down
             pass
+        finally:
+            # The bar must end even when the report itself failed: a raise
+            # in ``done`` once left it frozen at the last percentage, with
+            # no operation running and nothing to click.
+            try:
+                self.call_from_thread(self._progress_hold_end)
+            except Exception:  # noqa: S110 - the app may be shutting down
+                pass
 
     @work(thread=True)
     def _copy_perf_write_worker(
@@ -5696,7 +5703,15 @@ class KwsedApp(App[None]):
         if mode is perfcopy.ImportMode.AS_IS or not session_key:
             # An as-is (or sessionless) write leaves every part pointing
             # where the file points; the file may carry the bank they name.
-            self._offer_companions_after_write(choice, None, banks_list, path)
+            # A failure here must not look like a failed write: say so and
+            # let the person carry on.
+            try:
+                self._offer_companions_after_write(choice, None, banks_list, path)
+            except Exception as exc:
+                self.notify_status(
+                    f"imported, but the follow-up check failed: {exc}",
+                    refused=True,
+                )
             return
         self._import_pass_after_write(
             choice, session_key, built, into, banks_list, path, mode
