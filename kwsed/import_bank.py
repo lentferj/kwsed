@@ -17,8 +17,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, Optional, Sequence, Tuple
+import uuid
+from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING, Any, Dict, Mapping, Optional, Sequence, Tuple
 
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -38,7 +39,12 @@ from vinsynlib.ui.report import ReportScreen
 if TYPE_CHECKING:
     from kws.importers import ImportedBank
 
-__all__ = ["SpilloverCompanion", "WholeBankChoice", "WholeBankImportScreen"]
+__all__ = [
+    "ImportPassState",
+    "SpilloverCompanion",
+    "WholeBankChoice",
+    "WholeBankImportScreen",
+]
 
 TABLE_ID = "whole-bank-table"
 PATH_ID = "whole-bank-path"
@@ -73,6 +79,29 @@ class WholeBankChoice:
     #: default keeps every existing caller on the byte-identical as-is path
     #: (:func:`kws.perfcopy.relocate_bank`).
     mode: ImportMode = ImportMode.AS_IS
+    #: Which import session this write belongs to: the source file and the
+    #: source bank within it. The app keeps the per-pass written-slot state
+    #: under this key, so a later ``n`` pass knows what is already placed.
+    session_key: str = ""
+    #: True when the write came from this screen's own gate keys, so the
+    #: app re-offers the screen with the pass state once the write lands.
+    #: Companion writes (``x``) leave it off: they are their own flow.
+    continue_pass: bool = False
+
+
+@dataclass(frozen=True)
+class ImportPassState:
+    """What the earlier passes of one import session already placed.
+
+    ``written`` maps each source performance slot to the target label the
+    pass wrote it into. It is the session's memory between passes: the
+    remainder a ``n`` pass offers is the contained slots *not* in here,
+    and the status line echoes the whole map so nothing is dropped
+    silently.
+    """
+
+    session_key: str = ""
+    written: Mapping[int, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -216,6 +245,7 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
         Binding("s", "source", "Source"),
         Binding("b", "target", "Target"),
         Binding("m", "mode", "Mode"),
+        Binding("n", "next_pass", "Next pass"),
         Binding("x", "spillover", "Companions"),
         Binding("w", "toggle_gate", "Gate"),
         Binding("ctrl+s", "write", "Write", priority=True),
@@ -231,6 +261,8 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
         gate: Optional[EditGate] = None,
         card_mode: Optional[str] = None,
         hcard_banks: Optional[Sequence[Any]] = None,
+        mode: Optional[ImportMode] = None,
+        pass_state: Optional[ImportPassState] = None,
     ) -> None:
         super().__init__()
         self._path = path
@@ -239,7 +271,11 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
         self._writable: list[Any] = list(kws_banks.writable_banks())
         self._target_index = 0
         self._gate = gate
-        self._mode = ImportMode.AS_IS
+        self._mode = ImportMode.AS_IS if mode is None else mode
+        #: The session's written-slot state for this source (plan R4 c).
+        self._pass_state = pass_state
+        #: Unique per screen visit; see _session_key.
+        self._session_token: Optional[str] = None
         self._audit: Optional[containment.ContainmentAudit] = None
         is_hcard = card_mode == "hcard" or hcard_banks is not None
         if is_hcard:
@@ -348,17 +384,87 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
             f"{banks_text} · ROM: {audit.rom_assisted}"
         )
 
-    def _self_contained_counts(self) -> Optional[Tuple[int, int]]:
-        """(written, skipped) performances for a self-contained mode."""
-        if self._audit is None:
+    def _written_slots(self) -> set[int]:
+        """The source slots earlier passes already wrote, or an empty set."""
+        if self._pass_state is None:
+            return set()
+        return {int(slot) for slot in self._pass_state.written}
+
+    def _session_key(self) -> str:
+        """The import session key: source file, source bank, screen visit.
+
+        The last component is unique to this screen instance (inherited
+        from the pass state on a re-offered screen), so a fresh import of
+        the same file starts over instead of continuing a dead session's
+        remainder. The app keys its per-pass written-slot state by this.
+        """
+        if self._pass_state is not None and self._pass_state.session_key:
+            return self._pass_state.session_key
+        if self._session_token is None:
+            self._session_token = uuid.uuid4().hex
+        try:
+            scope = str(self._source_bank().scope)
+        except (IndexError, AttributeError):
+            scope = ""
+        return f"{self._path}|{scope}|{self._session_token}"
+
+    def _remaining_slots(self) -> list[int]:
+        """The contained slots no earlier pass has written (plan R4 c)."""
+        audit = self._audit
+        if audit is None:
+            return []
+        return containment.remaining_performances(audit, self._written_slots())
+
+    def _remainder_audit(self) -> Optional[containment.ContainmentAudit]:
+        """The audit restricted to the not-yet-written contained slots."""
+        audit = self._audit
+        if audit is None:
             return None
-        return (self._audit.contained, self._audit.other_bank)
+        remaining = set(self._remaining_slots())
+        return replace(
+            audit,
+            performances=[
+                entry for entry in audit.performances if entry.slot in remaining
+            ],
+        )
+
+    def _pass_counts(self) -> Optional[Tuple[int, int, int, int]]:
+        """(this pass, whole bank, skipped, later passes) for the mode line.
+
+        The pass size is the partition's first chunk over the remainder, so
+        the statement before the gate says what *this* write will place.
+        The skip count stays relative to the whole source bank: the
+        non-contained performances are skipped in every pass, not only
+        this one.
+        """
+        audit = self._audit
+        if audit is None:
+            return None
+        total = audit.contained + audit.other_bank
+        skipped = audit.other_bank
+        remainder_audit = self._remainder_audit()
+        if remainder_audit is None or not remainder_audit.performances:
+            return (0, total, skipped, 0)
+        try:
+            passes = containment.partition_self_contained(
+                self._sources(), remainder_audit
+            )
+        except (IndexError, LookupError, ValueError, TypeError, AttributeError):
+            return (len(remainder_audit.performances), total, skipped, 0)
+        first = passes[0] if passes else None
+        if first is None:
+            return (len(remainder_audit.performances), total, skipped, 0)
+        later = len(remainder_audit.performances) - len(first.slots)
+        return (len(first.slots), total, skipped, later)
 
     def _mode_line(self) -> str:
         """What the selected mode writes and what it leaves out.
 
         Shown above the gate and repeated in the status line when ``m`` is
         pressed, so the choice is stated before the gate can be armed (R1).
+        With pass state on the screen the line names the continuation
+        pass: the remaining performances, with the skip count still
+        relative to the whole source bank.
         """
         label = MODE_LABELS[self._mode]
         if self._mode is ImportMode.AS_IS:
@@ -368,21 +474,38 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
                 f"move to the target, references to other writable banks and "
                 f"to ROM stay where they point"
             )
-        counts = self._self_contained_counts()
+        counts = self._pass_counts()
         if counts is None:
             return (
                 f"Mode: {label} · containment is not known for this bank, so "
                 f"the number of performances left out cannot be stated"
             )
-        written, skipped = counts
-        if self._mode is ImportMode.SELF_CONTAINED_1TO1:
+        this_pass, total, skipped, later = counts
+        continuation = bool(self._written_slots())
+        if self._mode is ImportMode.SELF_CONTAINED_1TO1 and not continuation:
             placement = "at their own slots"
         else:
-            placement = f"packed into slots 0-{max(written - 1, 0)}"
+            placement = f"packed into slots 0-{max(this_pass - 1, 0)}"
+        prefix = "next pass: writes " if continuation else "writes "
+        tail = f"; {later} more remain for later passes (n)" if later else ""
         return (
-            f"Mode: {label} · writes {written} of {written + skipped} "
+            f"Mode: {label} · {prefix}{this_pass} of {total} "
             f"performances {placement}, skipping {skipped} that reference "
-            f"another writable bank; ROM references stay in ROM"
+            f"another writable bank; ROM references stay in ROM{tail}"
+        )
+
+    def _pass_line(self) -> str:
+        """The status-line echo of what earlier passes already placed."""
+        state = self._pass_state
+        if state is None or not state.written:
+            return ""
+        seen: Dict[str, int] = {}
+        for target in state.written.values():
+            seen[target] = seen.get(target, 0) + 1
+        groups = ", ".join(f"{target}: {count}" for target, count in seen.items())
+        return (
+            f"pass so far: {len(state.written)} written ({groups}) · "
+            f"next pass: {len(self._remaining_slots())} remaining"
         )
 
     def _summary_text(self) -> str:
@@ -517,8 +640,8 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
             yield Static("", id=GATE_ID, classes="gate", markup=False)
             yield Static("", id=STATUS_ID, classes="status", markup=False)
             yield Static(
-                "s source · b target · m mode · x companions · w gate · "
-                "ctrl+s write · c cache · ? help · esc/q cancel",
+                "s source · b target · m mode · n next pass · x companions · "
+                "w gate · ctrl+s write · c cache · ? help · esc/q cancel",
                 classes="hint",
                 markup=False,
             )
@@ -536,6 +659,9 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
                 table.focus()
             except Exception:
                 _ = None
+            pass_line = self._pass_line()
+            if pass_line:
+                self._set_status(pass_line)
         else:
             self._set_status("No active performances in this bank.")
 
@@ -566,6 +692,50 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
         self._mode = MODE_ORDER[(index + 1) % len(MODE_ORDER)]
         self._update_mode()
         self._set_status(self._mode_line())
+
+    def action_next_pass(self) -> None:
+        """Offer the not-yet-written contained performances (plan R4 c)."""
+        if self._mode is ImportMode.AS_IS:
+            self._set_status("next pass needs a self-contained mode (press m)")
+            return
+        if self._audit is None:
+            self._set_status("containment is not known for this bank")
+            return
+        remaining = self._remaining_slots()
+        if not remaining:
+            self._set_status("no remaining performances")
+            return
+        if not self._writable:
+            self._set_status("no writable target banks")
+            return
+        self.app.push_screen(
+            TargetBankScreen(
+                "Next pass target", [str(w.label) for w in self._writable]
+            ),
+            self._next_pass_target_chosen,
+        )
+
+    def _next_pass_target_chosen(self, picked: Optional[int]) -> None:
+        """Dismiss with the next pass's write into the chosen target."""
+        if picked is None:
+            return
+        try:
+            target = self._writable[picked]
+        except (IndexError, TypeError):
+            return
+        if self._gate is not None and not self._gate.armed:
+            self._set_status("write gate is locked")
+            return
+        self.dismiss(
+            WholeBankChoice(
+                self._source_index,
+                str(target.id),
+                True,
+                self._mode,
+                self._session_key(),
+                True,
+            )
+        )
 
     def _spillover_companions(self) -> list[SpilloverCompanion]:
         """The file's other RAM banks, each with the RAM bank it would fill.
@@ -667,7 +837,12 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
             return
         self.dismiss(
             WholeBankChoice(
-                self._source_index, self._target_bank().id, True, self._mode
+                self._source_index,
+                self._target_bank().id,
+                True,
+                self._mode,
+                self._session_key(),
+                True,
             )
         )
 
@@ -685,6 +860,10 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
             "b  switch the target bank (RAM 1/2/3, Card)\n"
             "m  cycle the import mode: as-is, self-contained 1:1, "
             "self-contained packed\n"
+            "n  offer the next pass: the contained performances no earlier\n"
+            "   pass has written, into a fresh target (another card bank\n"
+            "   after a switch, or a RAM bank); each pass is its own gated\n"
+            "   write, and with nothing left it says so and writes nothing\n"
             "x  offer the file's companion banks, each writing into the RAM "
             "bank the source's parts name (one gated write per bank)\n"
             "w  arm/lock the write gate\n"
@@ -697,7 +876,9 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
             "ROM references stay in ROM.\n\n"
             "The self-contained modes write only the performances whose parts\n"
             "are all self or ROM: 1:1 keeps their own slots, packed re-slots\n"
-            "them 0..n-1 and defragments the patches beneath them.\n\n"
+            "them 0..n-1 and defragments the patches beneath them. A bank\n"
+            "that cannot hold them all splits into passes: each pass fills\n"
+            "one target, and n carries the remainder into the next one.\n\n"
             "A companion write is the same fenced whole-bank write as ctrl+s.\n"
             "It is one bank at a time: picking a companion writes that bank\n"
             "only, never the first one with it, and the target may be changed\n"

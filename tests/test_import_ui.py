@@ -2033,3 +2033,232 @@ async def test_whole_write_to_other_hcard_scope_refuses(
     assert saved == {}
     assert "CARD/07" not in app._sources
     assert any("CARD/07" in s and "CARD/08" in s for s in statuses)
+
+
+def _multipass_bank() -> Any:
+    """A source bank larger than one target: 55 contained, 2 external.
+
+    Every name is invented. The contained performances in slots 0-54 each
+    use their own patch slot (mod 35), so a packed pass cannot hold them
+    all: the partition splits them into bank-sized passes. Slots 56-57
+    name RAM 2 (bank number 1) and are skipped in every pass.
+    """
+    from tests.test_bankbuild import make_patch, make_performance
+
+    perfs = [_empty_perf() for _ in range(58)]
+    for slot in range(55):
+        perfs[slot] = make_performance(f"Pass Perf {slot:02d}", ((0, slot % 35),))
+    perfs[56] = make_performance("Outer One", ((1, 2),))
+    perfs[57] = make_performance("Outer Two", ((1, 3),))
+    patches = [make_patch(f"Basis {index:02d}") for index in range(35)]
+    bank = _make_bank(scope="RAM1")
+    bank.source.performances = perfs
+    bank.source.patches = patches
+    return bank
+
+
+def _pass_blob(device: DemoDevice, bank_id: str, kind: str) -> bytes:
+    return device._written[(bank_id, kind)]
+
+
+@pytest.mark.asyncio
+async def test_next_pass_needs_a_self_contained_mode() -> None:
+    app = KwsedApp(DemoDevice())
+    screen = WholeBankImportScreen(path="one.syx", banks=[_make_bank(scope="RAM1")])
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.push_screen(screen)
+        await _settle(pilot)
+        await pilot.press("n")
+        await _settle(pilot)
+        assert isinstance(app.screen, WholeBankImportScreen)
+        assert "self-contained mode" in _static_text(screen, "whole-bank-status")
+    assert app.device.bundle_write_count == 0
+
+
+def _pass_app(tmp_path: Any, monkeypatch: Any) -> KwsedApp:
+    """An armed hcard app with RAM 2 and CARD/07 targets ready to write."""
+    from kws import backup as _backup
+
+    app = KwsedApp(
+        DemoDevice(),
+        card_mode="hcard",
+        bankstore_dir=str(tmp_path / "store"),
+    )
+    app._sources["RAM2"] = _make_bank(scope="RAM2", active_slots=[]).source
+    app._sources["CARD/07"] = _make_bank(scope="CARD/07", active_slots=[]).source
+    app._write_gate = EditGate(armed=True)
+    app._active_card_scope = lambda: "CARD/07"  # type: ignore[method-assign]
+    app.notify_status = lambda *a, **k: None  # type: ignore[method-assign]
+
+    def _no_record(_result: Any) -> None:
+        return None
+
+    app._record_write = _no_record  # type: ignore[method-assign]
+    backup_dir = str(tmp_path / "backups")
+    os.makedirs(backup_dir, exist_ok=True)
+    monkeypatch.setattr(_backup, "default_dir", lambda root=None: backup_dir)
+    monkeypatch.setattr(bankstore, "save", lambda *a, **k: None)
+    return app
+
+
+async def _wait_for_writes(app: KwsedApp, pilot: Any, count: int) -> None:
+    for _ in range(200):
+        await pilot.pause()
+        if app.device.bundle_write_count == count:
+            break
+
+
+def _assert_two_pass_bytes(app: KwsedApp, bank: Any) -> None:
+    """Pass 1 fills RAM 2; pass 2 compacts the last five into CARD/07."""
+    source = bank.source
+    ram2 = banks.bank("RAM2").number
+    card = banks.bank("CARD").number
+    ram2_perf = _pass_blob(app.device, "RAM2", banks.Kind.PERFORMANCE)
+    for slot in range(50):
+        assert _perf_at(ram2_perf, slot) == _as_written(
+            source.performances[slot], {0: (ram2, slot % 35)}
+        )
+    card_perf = _pass_blob(app.device, "CARD", banks.Kind.PERFORMANCE)
+    for slot in range(5):
+        assert _perf_at(card_perf, slot) == _as_written(
+            source.performances[50 + slot], {0: (card, slot)}
+        )
+    for slot in range(5, 50):
+        assert _perf_at(card_perf, slot) == _clean_perf_record()
+    ram2_patch = _pass_blob(app.device, "RAM2", banks.Kind.PATCH)
+    for slot in range(35):
+        assert _patch_at(ram2_patch, slot) == source.patches[slot]
+    card_patch = _pass_blob(app.device, "CARD", banks.Kind.PATCH)
+    for slot in range(5):
+        assert _patch_at(card_patch, slot) == source.patches[15 + slot]
+    for slot in range(5, 35):
+        assert _patch_at(card_patch, slot) == bytes(PATCH_RECORD_SIZE)
+
+
+def _assert_pass_state(app: KwsedApp, bank: Any) -> None:
+    """The session's pass state: disjoint writes, union = contained."""
+    from kws import containment
+
+    keys = [k for k in app._import_passes if k.startswith("two.syx|RAM1|")]
+    assert len(keys) == 1
+    state = app._import_passes[keys[0]]
+    written = state["written"]
+    assert set(written) == set(range(55))
+    assert {slot for slot, t in written.items() if t == "RAM 2"} == set(range(50))
+    assert {slot for slot, t in written.items() if t == "CARD/07"} == set(range(50, 55))
+    audit = containment.audit_containment({"RAM1": bank.source}, "RAM1")
+    contained = {entry.slot for entry in audit.performances if entry.contained}
+    assert set(written) == contained
+    assert 56 not in written and 57 not in written
+
+
+@pytest.mark.asyncio
+async def test_two_pass_import_splits_disjoint_targets(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """Pass 1 fills RAM 2; ``n`` carries the remainder into CARD/07.
+
+    Each pass is its own fenced write. The union of the written source
+    slots is exactly the contained performances, the two targets hold
+    disjoint sets, the non-contained performances are skipped in both
+    passes, and an empty remainder is reported without writing.
+    """
+    app = _pass_app(tmp_path, monkeypatch)
+    bank = _multipass_bank()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        first = WholeBankImportScreen(
+            path="two.syx", banks=[bank], gate=app._write_gate, card_mode="hcard"
+        )
+        app.push_screen(
+            first,
+            lambda picked: app._import_whole_bank_chosen([bank], picked, "two.syx"),
+        )
+        await _settle(pilot)
+        await pilot.press("m")
+        await _settle(pilot)
+        await pilot.press("m")  # self-contained packed
+        await _settle(pilot)
+        line = _static_text(first, "whole-bank-mode")
+        # The statement before the gate names this pass, the whole bank,
+        # and what is left for later passes.
+        assert "writes 50 of 57 performances packed into slots 0-49" in line
+        assert "skipping 2" in line
+        assert "5 more remain for later passes" in line
+        await pilot.press("b")  # target RAM 2
+        await _settle(pilot)
+        await pilot.press("ctrl+s")
+        await _wait_for_writes(app, pilot, 1)
+        second = app.screen
+        assert isinstance(second, WholeBankImportScreen)
+        assert second is not first
+        await _settle(pilot)
+        # The pass state is echoed in the status line, and the skip count
+        # stays relative to the whole source bank.
+        assert "pass so far: 50 written (RAM 2: 50)" in _static_text(
+            second, "whole-bank-status"
+        )
+        mode_line = _static_text(second, "whole-bank-mode")
+        assert "next pass: writes 5 of 57" in mode_line
+        assert "skipping 2" in mode_line
+
+        await pilot.press("n")
+        await _settle(pilot)
+        assert isinstance(app.screen, TargetBankScreen)
+        for _ in range(11):  # RAM 1..3, Card, CARD/00..07
+            await pilot.press("down")
+        await pilot.press("enter")
+        await _wait_for_writes(app, pilot, 2)
+        await _settle(pilot)
+        assert app.device.bundle_write_count == 2
+        third = app.screen
+        assert isinstance(third, WholeBankImportScreen)
+        # An empty remainder is reported, and nothing further is written.
+        await pilot.press("n")
+        await _settle(pilot)
+        assert "no remaining performances" in _static_text(third, "whole-bank-status")
+        assert app.device.bundle_write_count == 2
+
+    _assert_two_pass_bytes(app, bank)
+    _assert_pass_state(app, bank)
+
+
+@pytest.mark.asyncio
+async def test_self_contained_sessions_are_independent(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """A repeated self-contained import starts over, spills pollute nothing."""
+    app, _recorded = _armed_app(tmp_path, monkeypatch)
+    app.notify_status = lambda *a, **k: None
+    monkeypatch.setattr(bankstore, "save", lambda *a, **k: None)
+    bank = _mixed_bank()
+    app._sources["RAM1"] = bank.source
+    writes: list[dict[str, Any]] = []
+
+    def fake_write(*a: Any, **k: Any) -> dict[str, Any]:
+        writes.append(dict(k))
+        return {"verified": True}
+
+    app.device.write_bank_bundle = fake_write
+
+    def write(key: str) -> None:
+        app._import_whole_bank_write(
+            bank,
+            WholeBankChoice(
+                0, "RAM3", True, perfcopy.ImportMode.SELF_CONTAINED_PACKED, key, True
+            ),
+        )
+
+    write("session-one")
+    assert len(writes) == 1
+    first = writes[0]["performances"]
+    # A companion-style write carries no session key and records nothing.
+    write("")
+    assert len(writes) == 2
+    assert writes[1]["performances"] == first
+    # A new session key starts over with the full contained set, not a
+    # remainder, and a repeat of the first session continues nowhere.
+    write("session-two")
+    assert len(writes) == 3
+    assert writes[2]["performances"] == first

@@ -98,7 +98,7 @@ from kwsed.gate import EditGate
 from kwsed.file_picker import FilePickerScreen
 from kwsed.import_companions import find_companions, unique_equivalent_companions
 from kwsed.import_screen import BankImportScreen
-from kwsed.import_bank import WholeBankImportScreen
+from kwsed.import_bank import ImportPassState, WholeBankImportScreen
 from kwsed.import_single import SingleImportScreen
 from kwsed.import_source import (
     SourceEntry,
@@ -2979,6 +2979,10 @@ class KwsedApp(App[None]):
         self._import_folder = ""
         self._import_cursor = 0
         self._sources: Dict[str, deps.Source] = {}
+        #: Whole-bank import pass state (plan R4 c), keyed by import
+        #: session ("path|source scope"): which source slots earlier passes
+        #: wrote into which target. A later `n` pass offers what is left.
+        self._import_passes: Dict[str, Dict[str, Any]] = {}
         self._active_physical = (
             _physical.active(physical_path) if physical_path else None
         )
@@ -5309,7 +5313,7 @@ class KwsedApp(App[None]):
                 gate=self._write_gate,
                 card_mode=self._card_mode,
             ),
-            lambda picked: self._import_whole_bank_chosen(whole_banks, picked),
+            lambda picked: self._import_whole_bank_chosen(whole_banks, picked, origin),
         )
 
     def _load_unit_source(self, scope: str, label: str) -> Optional[deps.Source]:
@@ -5350,7 +5354,7 @@ class KwsedApp(App[None]):
                     gate=self._write_gate,
                     card_mode=self._card_mode,
                 ),
-                lambda choice: self._import_whole_bank_chosen(banks_list, choice),
+                lambda choice: self._import_whole_bank_chosen(banks_list, choice, path),
             )
             return
         self._open_source_chooser(path, banks_list)
@@ -5389,7 +5393,9 @@ class KwsedApp(App[None]):
             msg += "; multisets not cached"
         self.notify_status(msg)
 
-    def _import_whole_bank_chosen(self, banks_list: Sequence[Any], choice: Any) -> None:
+    def _import_whole_bank_chosen(
+        self, banks_list: Sequence[Any], choice: Any, path: str = ""
+    ) -> None:
         if choice is None:
             # Back to the file picker, not the browser.
             self._import_kind_chosen(0)
@@ -5403,7 +5409,7 @@ class KwsedApp(App[None]):
         if not getattr(choice, "write_to_unit", False):
             self._save_imported_bank(bank)
             return
-        self._import_whole_bank_write(bank, choice)
+        self._import_whole_bank_write(bank, choice, banks_list=banks_list, path=path)
 
     def _whole_bank_bytes(
         self,
@@ -5411,6 +5417,7 @@ class KwsedApp(App[None]):
         sources: Mapping[str, deps.Source],
         target: Any,
         mode: Any,
+        written: Optional[Mapping[int, str]] = None,
     ) -> Any:
         """The bytes a whole-bank write sends, chosen by the import mode.
 
@@ -5418,6 +5425,14 @@ class KwsedApp(App[None]):
         the self-contained modes plan the chosen source's contained
         performances into the target and build them. Both build the one
         target bank and nothing else (plan R5).
+
+        A self-contained write places one pass at a time (plan R4 c): the
+        partition splits the not-yet-written contained performances into
+        bank-sized passes, and this write carries the first of them into
+        ``target`` — packed through ``Pass.perf_slot_map`` for a
+        continuation pass, the mode's own placement for the first one.
+        ``written`` is the session's source-slot → target map from the
+        earlier passes.
         """
         if mode is perfcopy.ImportMode.AS_IS:
             return perfcopy.relocate_bank(bank.source, target)
@@ -5428,7 +5443,32 @@ class KwsedApp(App[None]):
         plan_sources = dict(sources)
         plan_sources[bank.scope] = bank.source
         audit = containment.audit_containment(plan_sources, bank.scope)
-        plan = perfcopy.plan_self_contained(plan_sources, audit, target, mode)
+        written_map = dict(written or {})
+        remainder = containment.remaining_performances(audit, written_map)
+        if not remainder:
+            raise ValueError("no remaining performances")
+        remaining = set(remainder)
+        remainder_audit = replace(
+            audit,
+            performances=[
+                entry for entry in audit.performances if entry.slot in remaining
+            ],
+        )
+        passes = containment.partition_self_contained(bank.source, remainder_audit)
+        first = passes[0]
+        pass_slots = set(first.slots)
+        pass_audit = replace(
+            audit,
+            performances=[
+                entry for entry in audit.performances if entry.slot in pass_slots
+            ],
+        )
+        perf_slots: Optional[Mapping[int, int]] = (
+            first.perf_slot_map if written_map else None
+        )
+        plan = perfcopy.plan_self_contained(
+            plan_sources, pass_audit, target, mode, perf_slots=perf_slots
+        )
         if not plan.fits:
             raise ValueError("; ".join(plan.rejected))
         return perfcopy.build_self_contained(plan_sources, plan)
@@ -5461,7 +5501,14 @@ class KwsedApp(App[None]):
                 target_source = self._read_source_offline(target.id)
         return target_source
 
-    def _import_whole_bank_write(self, bank: Any, choice: Any) -> None:
+    def _import_whole_bank_write(
+        self,
+        bank: Any,
+        choice: Any,
+        *,
+        banks_list: Optional[Sequence[Any]] = None,
+        path: str = "",
+    ) -> None:
         if not self._write_gate.armed:
             self.notify_status("write gate is locked", refused=True)
             return
@@ -5482,6 +5529,11 @@ class KwsedApp(App[None]):
         sources = self._sources_with_store()
         label = getattr(bank, "label", "")
         mode = getattr(choice, "mode", perfcopy.ImportMode.AS_IS)
+        # Only a pass flow (ctrl+s / n) carries a session key. Companion
+        # writes leave it empty so they neither continue nor pollute a
+        # session: repeating a self-contained import starts over.
+        session_key = str(getattr(choice, "session_key", "") or "")
+        written = self._import_pass_written(session_key) if session_key else {}
         conflict = self._preaudit_conflicting_slots(
             target,
             range(_banks.PERFORMANCES_PER_BANK),
@@ -5492,7 +5544,7 @@ class KwsedApp(App[None]):
             target_source = self._read_target_source_for_write(
                 sources, target_scope, target
             )
-            built = self._whole_bank_bytes(bank, sources, target, mode)
+            built = self._whole_bank_bytes(bank, sources, target, mode, written=written)
             before = self._before_blocks(target_source, target)
             result = self.device.write_bank_bundle(
                 target.number,
@@ -5512,6 +5564,12 @@ class KwsedApp(App[None]):
             self._import_whole_bank_written(
                 label, target, built, write_result, conflict, target_scope=target_scope
             )
+            if mode is perfcopy.ImportMode.AS_IS:
+                return
+            if session_key:
+                self._import_pass_after_write(
+                    choice, session_key, built, into, banks_list, path, mode
+                )
 
         into = target_scope if target_scope != target.id else target.label
         status = f"writing {label} into {into}..."
@@ -5519,6 +5577,72 @@ class KwsedApp(App[None]):
             status = f"warning: this import overwrites {conflict} — writing anyway"
         self.notify_status(status, warn=bool(conflict))
         self._device_worker(work, done, f"importing {label} into {into}")
+
+    def _import_pass_after_write(
+        self,
+        choice: Any,
+        key: str,
+        built: Any,
+        into: str,
+        banks_list: Optional[Sequence[Any]],
+        path: str,
+        mode: Any,
+    ) -> None:
+        """Book-keep and re-offer the screen after a self-contained pass."""
+        self._record_import_pass(key, built, into)
+        if (
+            getattr(choice, "continue_pass", False)
+            and banks_list
+            and getattr(self, "is_running", False)
+        ):
+            self._reopen_whole_bank_import(banks_list, path, key, mode)
+
+    def _import_pass_written(self, key: str) -> Dict[int, str]:
+        """The session's written source-slot → target map for one import."""
+        state = self._import_passes.get(key)
+        if not state:
+            return {}
+        written = state.get("written") or {}
+        return {int(slot): str(target) for slot, target in written.items()}
+
+    def _record_import_pass(self, key: str, built: Any, into: str) -> None:
+        """Remember which source slots this self-contained pass placed.
+
+        The plan's allocations are exactly what the write put where: each
+        one names the source performance slot and the target slot it
+        landed in. The session keeps them under the import key so the
+        next ``n`` pass offers only the remainder.
+        """
+        plan = getattr(built, "plan", None)
+        allocations = getattr(plan, "allocations", None) or []
+        if not allocations:
+            return
+        state = self._import_passes.setdefault(key, {"written": {}, "targets": []})
+        written: Dict[int, str] = state.setdefault("written", {})
+        for allocation in allocations:
+            written[int(allocation.source_perf.number)] = into
+        targets: list[str] = state.setdefault("targets", [])
+        if into not in targets:
+            targets.append(into)
+
+    def _reopen_whole_bank_import(
+        self, banks_list: Sequence[Any], path: str, key: str, mode: Any
+    ) -> None:
+        """Offer the next pass on the screen, with the session's pass state."""
+        self.push_screen(
+            WholeBankImportScreen(
+                path=path,
+                banks=banks_list,
+                gate=self._write_gate,
+                card_mode=self._card_mode,
+                mode=mode,
+                pass_state=ImportPassState(
+                    session_key=key,
+                    written=self._import_pass_written(key),
+                ),
+            ),
+            lambda picked: self._import_whole_bank_chosen(banks_list, picked, path),
+        )
 
     def _import_whole_bank_written(
         self,
