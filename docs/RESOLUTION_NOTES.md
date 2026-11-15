@@ -791,3 +791,68 @@ were removed rather than left behind as a function that reads system
 parameters and calls them a name. Card identity is the content digest
 (`kws.cards.content_digest`), with first-slot fingerprints as the weaker
 fallback -- a signal that never depended on the name we cannot read.
+
+---
+
+## 17. Self-contained whole-bank import: the 2026-11-14 diagnosis
+
+On 2026-11-14 a two-bank ALL-data file was imported whole into the Card.
+The result sounded wrong: performances whose parts named the other RAM bank
+still named it after the write, so those slots pointed at whatever the Card
+held there instead of the intended patches.
+
+**Cause.** `kws.perfcopy.relocate_bank` moves **self-references only** — by
+design, and matching the unit's own bank move (§15). References to another
+writable bank (RAM 1-3 or the Card) and to ROM stay where they point. A
+whole-bank import into the Card of a bank whose performances span two RAM
+banks therefore does not become self-contained; it becomes a bank that
+still references RAM banks the Card does not have. Nothing was lost — the
+failure mode on the instrument is silent slots, not lost data — but nothing
+sounded as authored either.
+
+**Verification sequence.**
+
+1. The card cache, read back after the import, matched `relocate_bank`'s
+   output byte for byte. The write did exactly what the code promised; the
+   code was not buggy, the expectation was.
+2. A fresh capture of the same card bank (the one taken after C) was
+   byte-identical to the import. The unit did not rewrite anything behind
+   the write's back.
+3. The RAM 1 labels seen before that capture did not come from the imported
+   card bank. They came from other card archives captured the same day
+   (`CARD/01`, `CARD/02`), whose performances genuinely reference RAM 1.
+   Those archives were mistaken for the imported bank because they were
+   captured in the same session.
+
+**Conclusion.** `relocate_bank` is left untouched — its self-references-only
+behaviour is correct and matches the device. The work that followed (the
+containment audit, the as-is / self-contained 1:1 / self-contained packed
+modes, companion spill-over, and the multi-pass remainder flow) is
+information plus real self-contained modes, not an implicit second write and
+not automatic repointing. Automatic repointing of cross-bank references
+remains an opt-in helper only (plan D2).
+
+---
+
+## 18. Whole-bank import: a fence fix and the 2026-11-15 verification
+
+**Bug fixed.** The whole-bank write used to hand the bridge a before-block
+built from the cached bank. The bridge skips kinds that match a before-block,
+so re-importing a bank whose cache matched sent no SysEx at all while the
+status reported success, and the backup recorded cache bytes instead of what
+was on the unit. It now lets the bridge read the unit first, so every kind
+is read from hardware, written when it differs, and verified against the
+read-back.
+
+**Verification, 2026-11-15.** A two-bank ALL-data file was imported into a
+freshly formatted Card, with RAM 3 as the patches-only overflow bank, and
+both banks were read back. Every kind matched the intended bytes. The
+Card's parts then named the Card (93), RAM 3 (109) and ROM 11 (10). No
+performance was dropped. The strict self-contained split of the same file
+needs three banks — the contained 16 performances fit the Card with 25
+patches, while the other 34 need 56 patches in total — so it was not used
+for that run.
+
+**Staging note.** That run wrote into RAM 3, the bank named by
+`preaudit_target_patches`; the screen warned about overwriting those staging
+patch slots before it wrote, and the backup covered them.

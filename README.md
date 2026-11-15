@@ -431,7 +431,10 @@ sequence memory, when the plan needs wave sequences, is written as a whole
 bank -- and when a unit does not take the single-patch write, the staging
 falls back to one whole patch bank. Those whole-bank writes need **memory
 protect off**; with protect on the unit refuses the dump. The ordinary
-`ctrl+s` import needs no audition and is unaffected.
+`ctrl+s` import needs no audition and is unaffected. A whole-bank import
+into `RAM 3` overwrites the same patch slots named by
+`preaudit_target_patches`; the import screen warns about them before it
+writes.
 
 ### Multisets and multi-card staging
 
@@ -530,7 +533,20 @@ opens `WholeBankImportScreen`:
   bank;
 - `s` switches source bank when the file holds several (ZIP, IMG, all-banks
   `.syx`);
-- `b` chooses the destination (`RAM 1`, `RAM 2`, `RAM 3`, `Card`);
+- `b` chooses the destination (`RAM 1`, `RAM 2`, `RAM 3`, `Card` — the four
+  physical writable banks; archived card banks are never targets);
+- `m` cycles the import mode: as-is, self-contained 1:1, self-contained
+  packed;
+- `o` overflows what the target cannot hold, in two kinds: patches only
+  (every performance stays on the target and the patches it names in other
+  writable banks go to a RAM bank, repointed there), or a self-contained
+  split (the performances that point outside the target move to the RAM bank
+  with all their patches, so both banks are self-contained; a split that
+  needs more banks than the one offered is refused and nothing is written);
+- `n` offers the next pass: the contained performances no earlier pass has
+  written, into a fresh target;
+- `x` offers the file's companion banks, each writing into the RAM bank the
+  source's parts name;
 - `w` arms the write gate; `c` saves to the local cache only; `ctrl+s` writes
   the whole bank to the unit in one fenced bundle;
 - interior `PartRef`/`WaveRef` bank numbers are relocated to the destination

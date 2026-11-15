@@ -1,3 +1,8 @@
+<!--
+SPDX-License-Identifier: GPL-2.0-or-later
+SPDX-FileCopyrightText: Copyright (C) 2026  kwsed contributors
+-->
+
 # Import UX & SysEx Transfer Optimization Plan
 
 ## 1. Root-Cause Diagnosis
@@ -165,6 +170,147 @@ To make single and multi-performance import into populated banks work reliably w
 - Wire `y` (`action_copy_performance`) to use the slot-preserving planner and pass `before_blocks` to `write_bank_bundle` (or open `SingleImportScreen` pre-populated with the selected performance).
 - Update `kwscli copy-perf` to use the slot-preserving planner and support `--slot TARGET_SLOT` for explicit slot placement/overwrite.
 - Update `README.md` and run the full quality gate (`pytest`, `mypy`, `quality/check_mypy.py`, `ruff`).
+
+---
+
+## 6. Self-contained whole-bank import (2026-11-14)
+
+Self-contained import is a whole-bank write that makes a bank sound as
+authored when its performances reference only itself and ROM. It was added
+because `kws.perfcopy.relocate_bank` moves **self-references only** — by
+design, matching the unit's own bank move — so a performance whose parts
+name another writable bank keeps naming it after the write, and lands on a
+slot that holds something else. The whole-bank write still touches exactly
+one bank; the fix is information plus real self-contained modes, not an
+implicit second write.
+
+### 6.1 Containment audit (`kws/containment.py`)
+
+`audit_containment(sources, source_scope)` classifies every non-empty
+performance in the source bank by where its used parts point. Empty (init)
+slots are ignored. Three counts are reported, and they add up to the bank's
+non-empty performances:
+
+- **contained** — performances with no reference to another writable bank.
+  This is the plan's D1: self-plus-ROM counts as contained, because ROM
+  banks are always present on the instrument. ROM-assisted performances are
+  included here.
+- **other bank** — performances that reference at least one other writable
+  bank (RAM 1-3 or the Card). `parts_per_bank` counts how many used parts
+  name each such bank, so the screen can say which.
+- **ROM** (`rom_assisted`) — the subset of `contained` whose parts also
+  point at ROM. Reported separately so ROM references are never hidden
+  behind the contained total.
+
+The screen prints this as
+`contained: N · other bank: M (banks …) · ROM: K`.
+
+### 6.2 The three modes (`kws/perfcopy.py::ImportMode`)
+
+`m` cycles them in this order: as-is, self-contained 1:1, self-contained
+packed.
+
+- **as-is** — the existing `relocate_bank` path, byte for byte. Writes the
+  whole bank (every performance, patch and wave sequence), skipping
+  nothing. Self-references move to the target; references to other writable
+  banks and to ROM stay where they point.
+- **self-contained 1:1** — writes only the contained performances, each at
+  its own source slot; every other slot is cleaned. Patches are pinned to
+  what is used; ROM references stay in ROM.
+- **self-contained packed** — the same contained performances, re-slotted
+  `0..n-1` in source order, with patch slots compacted and deduplicated in
+  first-use order (one slot per distinct source patch). Wave sequences and
+  step links are relocated. ROM references stay in ROM.
+
+Both self-contained modes skip the performances that reference another
+writable bank. A bank that cannot hold them all splits into passes (§6.4).
+
+### 6.3 Companion spill-over (`x`)
+
+When the file holds more than one bank, `x` offers the writable RAM
+companions, one at a time. Each is the same fenced whole-bank write as
+`ctrl+s`, into the RAM bank the source's parts actually name (plan D2) by
+default; the suggested target may be changed before writing. ROM and Card
+companions are not offered — ROM cannot be written, and card targets belong
+to the HCard work. Nothing is repointed automatically: `repoint_external_refs`
+exists as an opt-in helper and is never applied by a companion write.
+
+### 6.4 Multi-pass remainder (`n`)
+
+After a self-contained write, `n` offers the contained performances no
+earlier pass has written, into a fresh target — another card bank after a
+switch, or a RAM bank. `partition_self_contained` greedily splits the
+remainder into bank-sized passes by performance count (50) and distinct
+patch count (35); a performance that alone exceeds the patch budget still
+gets its own pass. The first pass keeps source slots under 1:1;
+continuation passes pack through `Pass.perf_slot_map`.
+
+Pass state lives in the session under a per-visit key: `_session_key` carries
+a fresh token per screen visit, so re-importing the same file starts over
+instead of continuing a dead session's remainder, while a re-offered screen
+inherits the earlier passes' written-slot map. The status line echoes
+`pass so far: N written (target: count) · next pass: M remaining`. With
+nothing left, `n` says so and writes nothing.
+
+Card targets carry a slot guard: a write to `CARD/xx` is refused unless the
+unit's card slot actually holds that card, so a pass cannot overwrite the
+wrong physical card while being filed under the requested archive scope.
+
+### 6.5 Key bindings
+
+`WholeBankImportScreen.BINDINGS` (quoted as coded):
+
+- `escape` / `q` — cancel
+- `s` — source bank
+- `b` — target bank
+- `m` — mode
+- `o` — overflow (patches only, or a self-contained split)
+- `n` — next pass
+- `x` — companions
+- `w` — toggle gate
+- `ctrl+s` — write
+- `c` — cache
+- `?` — help
+
+The target list is the four physical writable banks only (RAM 1-3 and the
+Card); archived card banks are never targets, because the unit has one card
+slot.
+
+The on-screen hint reads
+`s source · b target · m mode · o overflow · n next pass · x companions · w gate · ctrl+s write · c cache · ? help · esc/q cancel`.
+
+### 6.6 Overflow kinds behind `o`
+
+After the RAM bank is chosen (`o` is only offered when parts name another
+writable bank), two kinds are planned:
+
+- **patches only** — the target keeps every performance and the patches
+  they name in their own bank; the patches they name in other writable
+  banks go to the overflow bank, and the parts are repointed there. The
+  overflow bank is written first, then the target, so a performance that
+  names it finds its patches in place.
+- **self-contained split** — the performances whose parts leave their own
+  bank move to the overflow bank together with every patch they name;
+  patches used by performances in both banks are duplicated so each bank is
+  self-contained. The target keeps the contained performances.
+
+### 6.7 Partition rule for the self-contained split
+
+The split is planned over the target plus the offered RAM bank with
+`partition_self_contained_split`. It is partitioned across as many banks
+as it needs, greedily, by performance count (50) and distinct patch count
+(35); a performance whose patch set alone exceeds the patch budget still
+gets its own pass. If the banks offered cannot hold it, the write is
+refused with the number of banks needed and nothing is written. The
+patches-only kind is a single-bank overflow and is never refused on size.
+
+### 6.8 Whole-bank write and the cached bank
+
+Whole-bank writes pass no `before_blocks` to the bridge, so the bridge
+reads the unit first. Handing it a before-block built from the cached bank
+let the bridge skip kinds that matched, which on a cache hit sent no SysEx
+at all while the status reported success, and recorded cache bytes instead
+of the unit's in the backup. See `docs/RESOLUTION_NOTES.md` §18.
 
 ---
 
