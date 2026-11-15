@@ -2447,7 +2447,7 @@ async def test_as_is_write_ends_in_a_popup_for_the_carried_companion(
         await _settle(pilot)
         assert popup is not None, "the popup was not shown"
         body = _static_text(popup, "dangling-body")
-        assert "2 parts name RAM 2" in body
+        assert "2 parts of the performances in Main bank name RAM 2" in body
         assert "Main bank only" in body
         hint = _static_text(popup, "dangling-hint")
         assert "write the file's RAM 2 bank" in hint
@@ -3761,3 +3761,44 @@ async def test_x_writes_the_whole_bank_when_the_performances_are_all_init(
     assert "performances" in app.device.bundle_writes[0]["kinds"]
     assert ("RAM2", banks.Kind.PERFORMANCE) in app.device._written
     assert recorded
+
+
+@pytest.mark.asyncio
+async def test_preflight_asks_even_when_the_unit_already_has_the_patches(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """The question is predictable: it does not vanish after one import.
+
+    Suppressing it when the unit already matched made the same keys behave
+    differently from one import to the next, which is indistinguishable
+    from the feature being missing.
+    """
+    from kwsed.import_bank import PreflightImportScreen
+
+    app, _recorded = _preflight_app(tmp_path, monkeypatch)
+    file_banks = _two_bank_file()
+    # The unit already holds exactly the file's RAM 2 bank.
+    app._sources["RAM2"] = file_banks[1].source
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.push_screen(
+            WholeBankImportScreen(
+                path="two.syx", banks=file_banks, gate=app._write_gate
+            ),
+            lambda picked: app._import_whole_bank_chosen(file_banks, picked, "two.syx"),
+        )
+        await _settle(pilot)
+        await pilot.press("b")
+        await pilot.press("b")  # target RAM 3
+        await pilot.press("ctrl+s")
+        for _ in range(100):
+            await pilot.pause()
+            if isinstance(app.screen, PreflightImportScreen):
+                break
+        await _settle(pilot)
+        modal = app.screen
+        assert isinstance(modal, PreflightImportScreen)
+        body = _static_text(modal, "preflight-body")
+        assert "2 parts of the performances in Main bank name RAM 2" in body
+        assert "already holds those patches" in body
+        assert app.device.bundle_write_count == 0

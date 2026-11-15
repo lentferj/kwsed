@@ -5757,7 +5757,12 @@ class KwsedApp(App[None]):
         return not str(getattr(choice, "overflow_bank", "") or "")
 
     def _companions_named_by_parts(
-        self, bank: Any, banks_list: Sequence[Any], source_index: int
+        self,
+        bank: Any,
+        banks_list: Sequence[Any],
+        source_index: int,
+        *,
+        require_missing: bool = True,
     ) -> List[Tuple[int, int, Any]]:
         """``(part count, file index, bank)`` for companions the parts name.
 
@@ -5788,8 +5793,11 @@ class KwsedApp(App[None]):
             slots = audit.patch_records.get(companion.number, ())
             # ``companion`` is the bank table's entry; the file's records are
             # on the imported bank, which is what the unit must match.
+            # The preflight asks even when the unit already matches, so the
+            # question is predictable; the post-write fallback only asks
+            # when something is actually missing.
             file_source = getattr(entry, "source", None)
-            if self._unit_matches(companion, file_source, slots):
+            if require_missing and self._unit_matches(companion, file_source, slots):
                 continue
             named.append((count, index, companion))
         return named
@@ -5872,7 +5880,12 @@ class KwsedApp(App[None]):
             source_index = int(getattr(choice, "source_index", 0) or 0)
         except (LookupError, TypeError, ValueError):
             return None
-        named = self._companions_named_by_parts(bank, banks_list, source_index)
+        # Ask even when the unit already holds those patches: whether the
+        # bank was loaded before is exactly the kind of thing a person
+        # should be told before a write, not inferred for them.
+        named = self._companions_named_by_parts(
+            bank, banks_list, source_index, require_missing=False
+        )
         if not named:
             return None
         count, index, companion = max(named, key=lambda item: (item[0], -item[1]))
@@ -5892,10 +5905,19 @@ class KwsedApp(App[None]):
         if banks_list is None:
             return
         count, index, companion = named
+        already = self._preflight_companion_is_loaded(
+            bank, banks_list, index, companion
+        )
+        state = (
+            f"{companion.label} already holds those patches, so writing them "
+            "again changes nothing."
+            if already
+            else f"{companion.label} does not hold those patches yet."
+        )
         body = (
             f"{count} parts of the performances in {getattr(bank, 'label', '')} "
             f"name {companion.label}, and this file carries that bank too. "
-            "Nothing has been written yet."
+            f"{state} Nothing has been written yet."
         )
         choices = (
             f"Write both: this bank, plus {companion.label}'s patches and "
@@ -5920,6 +5942,24 @@ class KwsedApp(App[None]):
             index,
             companion,
         )
+
+    def _preflight_companion_is_loaded(
+        self, bank: Any, banks_list: Sequence[Any], index: int, companion: Any
+    ) -> bool:
+        """Whether the unit already holds the patches this companion names."""
+        from kws import containment
+
+        try:
+            scope = str(bank.scope)
+            sources = dict(self._sources_with_store())
+            sources[scope] = bank.source
+            audit = containment.audit_containment(sources, scope)
+            entry = banks_list[index] if index < len(banks_list) else None
+            file_source = getattr(entry, "source", None)
+            slots = audit.patch_records.get(companion.number, ())
+            return self._unit_matches(companion, file_source, slots)
+        except (LookupError, IndexError, ValueError, TypeError, AttributeError):
+            return False
 
     def _push_preflight(
         self,
