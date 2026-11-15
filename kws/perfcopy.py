@@ -58,6 +58,10 @@ __all__ = [
     "build_overflow_import",
     "SplitPlan",
     "SplitBuilt",
+    "SplitGroup",
+    "SplitPartition",
+    "partition_self_contained_split",
+    "build_split_partition",
     "plan_self_contained_split",
     "build_split_import",
     "build_self_contained",
@@ -1184,6 +1188,32 @@ class SplitBuilt:
     overflow_patches: int
 
 
+@dataclass
+class SplitGroup:
+    """One bank's worth of a partitioned self-contained split.
+
+    ``target_bank`` is the bank this group is written to. ``performances``
+    holds the source performance slots (in source order) that live in it.
+    ``plan`` is filled in by :func:`partition_self_contained_split`.
+    """
+
+    target_bank: banks.Bank
+    performances: Tuple[int, ...] = ()
+    plan: Optional[AtomicPlan] = None
+
+
+@dataclass
+class SplitPartition:
+    """A self-contained split spread across as many banks as it needs."""
+
+    groups: List[SplitGroup] = field(default_factory=list)
+    rejected: List[str] = field(default_factory=list)
+
+    @property
+    def fits(self) -> bool:
+        return not self.rejected
+
+
 #: A planning budget with no ceiling. The split plans each group against
 #: it so the totals are the group's real needs, not what fit before the
 #: planner gave up; whether those needs fit the bank is the separate,
@@ -1324,6 +1354,144 @@ def build_split_import(
         destination_patches=plan.destination.patch_count,
         overflow_patches=plan.overflow.patch_count,
     )
+
+
+def _pack_performance_groups(
+    sources: Mapping[str, deps.Source],
+    source_scope: str,
+    slots: Sequence[int],
+    bank: banks.Bank,
+    mode: ImportMode,
+    budget: bankbuild.Budget,
+) -> List[List[int]]:
+    """Greedy pack ``slots`` into the fewest groups that fit ``budget``.
+
+    A candidate group is planned with :func:`plan_atomic_bank` on an
+    unbounded budget; it is kept only when its real totals fit ``budget``.
+    A performance that cannot join the current group starts a new one; one
+    that cannot fit even alone still gets its own group, so nothing is
+    dropped. Groups and their slots stay in source order.
+    """
+    groups: List[List[int]] = []
+    current: List[int] = []
+    for slot in slots:
+        candidate = current + [slot]
+        _made, rejections = _plan_split_group(
+            sources, source_scope, candidate, bank, mode, budget
+        )
+        if not rejections:
+            current = candidate
+            continue
+        if current:
+            groups.append(current)
+            current = [slot]
+        else:
+            groups.append([slot])
+            current = []
+    if current:
+        groups.append(current)
+    return groups
+
+
+def partition_self_contained_split(
+    sources: Mapping[str, deps.Source],
+    source_scope: str,
+    banks_in_order: Sequence[banks.Bank],
+    *,
+    mode: ImportMode = ImportMode.SELF_CONTAINED_PACKED,
+    budget: bankbuild.Budget = _DEFAULT_BUDGET,
+) -> SplitPartition:
+    """Partition a self-contained split across as many banks as it needs.
+
+    ``banks_in_order`` is ordered: the first bank receives the contained
+    performances, the rest are overflow banks in the user's chosen order.
+    Contained performances go to the first bank only; if they do not fit,
+    the partition is rejected, naming how many banks the content needs.
+    Non-contained performances are greedily packed, in source order, into
+    the remaining banks, each group carrying every patch it names so that
+    each output bank is self-contained. A performance that alone exceeds a
+    bank's budget still gets its own group and a rejection naming it.
+    """
+    if mode is ImportMode.AS_IS:
+        mode = ImportMode.SELF_CONTAINED_1TO1
+
+    bank_list = list(banks_in_order)
+    audit = containment.audit_containment(sources, source_scope)
+    contained_slots = [entry.slot for entry in audit.performances if entry.contained]
+    non_contained_slots = [
+        entry.slot for entry in audit.performances if not entry.contained
+    ]
+
+    partition = SplitPartition()
+    placeholder_bank = bank_list[0] if bank_list else banks.bank("CARD")
+
+    # Contained performances: first bank only.
+    if bank_list and contained_slots:
+        first_bank = bank_list[0]
+        contained_made, contained_rejections = _plan_split_group(
+            sources, source_scope, contained_slots, first_bank, mode, budget
+        )
+        contained_group = SplitGroup(
+            target_bank=first_bank,
+            performances=tuple(contained_slots),
+            plan=contained_made,
+        )
+        partition.groups.append(contained_group)
+        if contained_rejections:
+            needed = len(
+                _pack_performance_groups(
+                    sources, source_scope, contained_slots, first_bank, mode, budget
+                )
+            )
+            needed = max(needed, 1)
+            partition.rejected.append(f"contained performances need {needed} banks")
+            partition.rejected.extend(contained_rejections)
+
+    # Non-contained performances: greedy pack into the remaining banks.
+    available = bank_list[1:]
+    packed = _pack_performance_groups(
+        sources, source_scope, non_contained_slots, placeholder_bank, mode, budget
+    )
+    for index, slots in enumerate(packed):
+        if index < len(available):
+            target_bank = available[index]
+        elif available:
+            target_bank = available[-1]
+        else:
+            target_bank = placeholder_bank
+        made, rejections = _plan_split_group(
+            sources, source_scope, slots, target_bank, mode, budget
+        )
+        partition.groups.append(
+            SplitGroup(
+                target_bank=target_bank,
+                performances=tuple(slots),
+                plan=made,
+            )
+        )
+        partition.rejected.extend(rejections)
+
+    if len(packed) > len(available):
+        needed_total = 1 + len(packed)
+        partition.rejected.append(f"needs {needed_total} banks")
+
+    return partition
+
+
+def build_split_partition(
+    sources: Mapping[str, deps.Source],
+    partition: SplitPartition,
+) -> List[AtomicBuilt]:
+    """Build every group of a partition. Refuses a plan that does not fit."""
+    if not partition.fits:
+        raise ValueError("; ".join(partition.rejected))
+    srcs = dict(sources)
+    built: List[AtomicBuilt] = []
+    for group in partition.groups:
+        if group.plan is None:
+            raise ValueError("partition group has no plan")
+        built.append(build_atomic_bank(srcs, group.plan))
+    return built
 
 
 def active_performances(source: deps.Source) -> List[int]:

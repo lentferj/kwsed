@@ -517,3 +517,131 @@ class TestSelfContainedSplit:
         )
         with pytest.raises(ValueError, match="Card"):
             perfcopy.build_split_import(sources, plan)
+
+
+class TestSplitPartition:
+    """One split spread across as many banks as it needs."""
+
+    def _sources(self, groups):
+        """A source bank whose performances name ``groups`` of patches.
+
+        ``groups`` is a list of lists of (bank, patch) tuples, one per
+        performance. Every patch record is distinct, so a group's patch
+        count is its distinct content count.
+        """
+        performances = []
+        patches: list[bytes] = []
+        for index, parts in enumerate(groups):
+            performances.append(make_performance(f"Split {index}", tuple(parts)))
+        for index in range(40):
+            patches.append(make_patch(f"Part {index}"))
+        return {
+            "RAM1": deps.Source(
+                scope_id="RAM1",
+                performances=performances,
+                patches=patches,
+                waveseq=make_waveseq({})[0],
+            ),
+            "RAM2": deps.Source(
+                scope_id="RAM2",
+                performances=[],
+                patches=list(patches),
+                waveseq=make_waveseq({})[0],
+            ),
+        }
+
+    def test_groups_are_ordered_and_each_is_self_contained(self):
+        # Six performances, each naming four own patches plus one RAM 2
+        # patch. Two banks hold 35 patches each, so the non-contained set
+        # needs more than one overflow bank.
+        groups = []
+        for index in range(6):
+            parts = [(0, index * 4 + k) for k in range(4)]
+            parts.append((1, index))
+            groups.append(parts)
+        sources = self._sources(groups)
+        offered = [banks.bank("CARD"), banks.bank("RAM3"), banks.bank("RAM2")]
+        partition = perfcopy.partition_self_contained_split(
+            sources, "RAM1", offered, mode=MODE_1TO1
+        )
+        assert partition.fits, partition.rejected
+        seen = [slot for group in partition.groups for slot in group.performances]
+        assert seen == sorted(seen)  # source order across the whole split
+        for group in partition.groups:
+            assert group.plan is not None
+            built = perfcopy.build_atomic_bank(sources, group.plan)
+            for slot in group.performances:
+                at = slot * r.PERFORMANCE_SIZE
+                for part in _used_parts(
+                    built.performances[at : at + r.PERFORMANCE_SIZE]
+                ):
+                    assert (
+                        part.bank in (group.target_bank.number,)
+                        or not banks.bank(part.bank).writable
+                    )
+        # Nothing here is contained, so the first group is an overflow
+        # group and the offered order is respected.
+        assert partition.groups[0].target_bank.id == "RAM3"
+        # A contained performance takes the destination bank instead.
+        groups[0] = [(0, 34)]
+        sources = self._sources(groups)
+        partition = perfcopy.partition_self_contained_split(
+            sources, "RAM1", offered, mode=MODE_1TO1
+        )
+        assert partition.fits, partition.rejected
+        assert partition.groups[0].target_bank.id == "CARD"
+        assert partition.groups[0].performances == (0,)
+
+    def test_a_patch_shared_by_two_groups_is_duplicated(self):
+        # Two performances share a RAM 2 patch and differ only in their own
+        # patches, so they land in different groups; the shared patch must
+        # exist in both banks.
+        groups = [[(0, 0), (1, 30)], [(0, 1), (1, 30)]]
+        for index in range(2, 34):
+            groups.append([(0, index)])
+        sources = self._sources(groups)
+        offered = [banks.bank("CARD"), banks.bank("RAM3"), banks.bank("RAM2")]
+        partition = perfcopy.partition_self_contained_split(
+            sources, "RAM1", offered, mode=MODE_1TO1
+        )
+        assert partition.fits, partition.rejected
+        built = perfcopy.build_split_partition(sources, partition)
+        holders = []
+        for group, bytes_built in zip(partition.groups, built):
+            names = set()
+            for slot in group.performances:
+                at = slot * r.PERFORMANCE_SIZE
+                for part in _used_parts(
+                    bytes_built.performances[at : at + r.PERFORMANCE_SIZE]
+                ):
+                    if part.bank == group.target_bank.number:
+                        names.add(part.patch)
+            holders.append(names)
+        assert len(holders) >= 2
+        assert holders[0] & holders[1] or len(holders) == 1
+
+    def test_contained_overflow_is_rejected_with_the_bank_count(self):
+        groups = [[(0, 0)] for _ in range(60)]  # 60 self-only performances
+        sources = self._sources(groups)
+        partition = perfcopy.partition_self_contained_split(
+            sources, "RAM1", [banks.bank("CARD"), banks.bank("RAM3")], mode=MODE_1TO1
+        )
+        assert not partition.fits
+        assert any("need" in text and "banks" in text for text in partition.rejected)
+
+    def test_every_group_fits_a_bank(self):
+        """Packing never leaves a group over the budget it must fit."""
+        groups = [[(0, index)] for index in range(34)]
+        groups += [[(0, index), (1, index)] for index in range(34, 40)]
+        sources = self._sources(groups)
+        partition = perfcopy.partition_self_contained_split(
+            sources,
+            "RAM1",
+            [banks.bank("CARD"), banks.bank("RAM3"), banks.bank("RAM2")],
+            mode=MODE_1TO1,
+        )
+        assert partition.fits, partition.rejected
+        for group in partition.groups:
+            assert group.plan is not None
+            assert group.plan.patch_count <= banks.PATCHES_PER_BANK
+            assert len(group.performances) <= banks.PERFORMANCES_PER_BANK
