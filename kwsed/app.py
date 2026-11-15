@@ -98,7 +98,12 @@ from kwsed.gate import EditGate
 from kwsed.file_picker import FilePickerScreen
 from kwsed.import_companions import find_companions, unique_equivalent_companions
 from kwsed.import_screen import BankImportScreen
-from kwsed.import_bank import ImportPassState, WholeBankImportScreen
+from kwsed.import_bank import (
+    OVERFLOW_PATCHES,
+    OVERFLOW_SELF_CONTAINED,
+    ImportPassState,
+    WholeBankImportScreen,
+)
 from kwsed.import_single import SingleImportScreen
 from kwsed.import_source import (
     SourceEntry,
@@ -5548,8 +5553,16 @@ class KwsedApp(App[None]):
                 range(_banks.PATCHES_PER_BANK),
             )
             conflict = "; ".join(part for part in (conflict, overflow_conflict) if part)
+        split_plan, proceed = self._split_choice_plan(
+            bank, sources, target, mode, choice
+        )
+        if not proceed:
+            return
+        split_statement = self._split_statement(split_plan)
 
         def work() -> Any:
+            if split_plan is not None:
+                return self._write_split_banks(split_plan, _backup.default_dir())
             if overflow_id:
                 return self._write_with_overflow(
                     bank, sources, target, mode, _backup.default_dir(), overflow_id
@@ -5583,11 +5596,29 @@ class KwsedApp(App[None]):
             )
 
         into = target_scope if target_scope != target.id else target.label
-        status = f"writing {label} into {into}..."
-        if conflict:
-            status = f"warning: this import overwrites {conflict} — writing anyway"
+        status = self._whole_write_status(label, into, conflict, split_statement)
         self.notify_status(status, warn=bool(conflict))
         self._device_worker(work, done, f"importing {label} into {into}")
+
+    @staticmethod
+    def _whole_write_status(
+        label: str, into: str, conflict: str, split_statement: str
+    ) -> str:
+        """What is about to be written, per bank when it is a split.
+
+        The plain and patches-only wordings are unchanged: ``writing X into
+        Y...``, and the same line behind the pre-audit warning. A
+        self-contained split replaces the destination with each bank's
+        share, because one destination name would hide the second write.
+        """
+        if split_statement:
+            status = f"writing {label} as a self-contained split — {split_statement}"
+        else:
+            status = f"writing {label} into {into}..."
+        if conflict:
+            suffix = status if split_statement else "writing anyway"
+            return f"warning: this import overwrites {conflict} — {suffix}"
+        return status
 
     def _whole_write_done(
         self,
@@ -5608,6 +5639,12 @@ class KwsedApp(App[None]):
             return
         into = target_scope if target_scope != target.id else target.label
         overflow_id = str(getattr(choice, "overflow_bank", "") or "")
+        overflow_kind = str(
+            getattr(choice, "overflow_kind", OVERFLOW_PATCHES) or OVERFLOW_PATCHES
+        )
+        if overflow_id and overflow_kind == OVERFLOW_SELF_CONTAINED:
+            self._split_written(result, label)
+            return
         if overflow_id:
             self._overflow_written(result, label, into, target, target_scope)
             return
@@ -5719,6 +5756,144 @@ class KwsedApp(App[None]):
                 )
             except OSError:
                 pass
+
+    def _self_contained_split(
+        self,
+        bank: Any,
+        sources: Mapping[str, deps.Source],
+        target: Any,
+        mode: Any,
+        overflow_id: str,
+    ) -> Tuple[Dict[str, deps.Source], Any]:
+        """Partition the source over the target plus the overflow bank.
+
+        The bank list is ordered as the partition expects: the target
+        first, because it receives the contained performances, then the
+        chosen overflow bank, which receives the performances that point
+        outside the target with every patch they name. The result is the
+        engineer's :class:`kws.perfcopy.SplitPartition`; ``fits`` says
+        whether the two banks are enough.
+        """
+        from kws import banks as _banks
+
+        overflow = _banks.bank(overflow_id)
+        plan_sources = dict(sources)
+        # The file the bank came from is not necessarily in the session,
+        # so the planner sees it under its own scope.
+        plan_sources[bank.scope] = bank.source
+        partition = perfcopy.partition_self_contained_split(
+            plan_sources, bank.scope, [target, overflow], mode=mode
+        )
+        return plan_sources, partition
+
+    def _split_choice_plan(
+        self,
+        bank: Any,
+        sources: Mapping[str, deps.Source],
+        target: Any,
+        mode: Any,
+        choice: Any,
+    ) -> Tuple[Optional[Tuple[Dict[str, deps.Source], Any]], bool]:
+        """The self-contained split this choice asks for, and whether to write.
+
+        ``(None, True)`` for a plain or patches-only write. For the
+        self-contained kind it returns the partition, or ``(None, False)``
+        after stating the engine's rejections when the target plus the one
+        overflow bank cannot hold it -- nothing is written in that case.
+        """
+        kind = str(
+            getattr(choice, "overflow_kind", OVERFLOW_PATCHES) or OVERFLOW_PATCHES
+        )
+        overflow_id = str(getattr(choice, "overflow_bank", "") or "")
+        if not overflow_id or kind != OVERFLOW_SELF_CONTAINED:
+            return None, True
+        split_plan = self._self_contained_split(
+            bank, sources, target, mode, overflow_id
+        )
+        if not split_plan[1].fits:
+            self.notify_status(
+                "self-contained split does not fit: "
+                + "; ".join(split_plan[1].rejected),
+                refused=True,
+            )
+            return None, False
+        return split_plan, True
+
+    @staticmethod
+    def _counted(count: int, singular: str, plural: str) -> str:
+        """``1 patch`` / ``2 patches``: a count with the word it agrees with."""
+        return f"{count} {singular if count == 1 else plural}"
+
+    @staticmethod
+    def _split_statement(split_plan: Any) -> str:
+        """What each bank of a self-contained split will receive, or ""."""
+        if split_plan is None:
+            return ""
+        parts: list[str] = []
+        for group in split_plan[1].groups:
+            patches = 0 if group.plan is None else group.plan.patch_count
+            performances = KwsedApp._counted(
+                len(group.performances), "performance", "performances"
+            )
+            parts.append(
+                f"{group.target_bank.label} gets {performances} and "
+                f"{KwsedApp._counted(patches, 'patch', 'patches')}"
+            )
+        return "; ".join(parts)
+
+    def _write_split_banks(
+        self,
+        split_plan: Tuple[Dict[str, deps.Source], Any],
+        backup_dir: str,
+    ) -> Any:
+        """Build every group and write it as its own fenced bundle.
+
+        One ``write_bank_bundle`` per bank, in partition order (the target
+        first, then the overflow bank): each is a separate backup, a
+        separate read-back verification and a separate undo point. The
+        banks of a self-contained split do not reference each other, so
+        the order is the partition's own, not a dependency.
+        """
+        plan_sources, partition = split_plan
+        built = perfcopy.build_split_partition(plan_sources, partition)
+        written: list[Tuple[Any, Any, Any]] = []
+        for group, payload in zip(partition.groups, built):
+            result = self.device.write_bank_bundle(
+                group.target_bank.number,
+                performances=payload.performances,
+                patches=payload.patches,
+                waveseq=payload.waveseq,
+                backup_dir=backup_dir,
+                before_blocks=None,
+            )
+            written.append((group, payload, result))
+        return written
+
+    def _split_written(self, result: Any, label: str) -> None:
+        """Book-keeping after every bank of a self-contained split landed."""
+        summary: list[str] = []
+        for group, built, write_result in result:
+            scope = getattr(group.target_bank, "id", str(group.target_bank))
+            self._import_whole_bank_written(
+                label,
+                group.target_bank,
+                built,
+                write_result,
+                "",
+                target_scope=scope,
+            )
+            patches = 0 if group.plan is None else group.plan.patch_count
+            performances = self._counted(
+                len(group.performances), "performance", "performances"
+            )
+            summary.append(
+                f"{group.target_bank.label}: {performances}"
+                f", {self._counted(patches, 'patch', 'patches')}"
+            )
+        self.notify_status(
+            f"imported {label} as a self-contained split — "
+            f"{len(result)} banks: " + "; ".join(summary)
+        )
 
     def _import_pass_after_write(
         self,

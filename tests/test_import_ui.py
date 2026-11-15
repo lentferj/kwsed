@@ -2316,10 +2316,14 @@ async def test_overflow_choice_carries_the_bank_and_keeps_the_target() -> None:
         assert banks.bank("RAM2").label not in labels  # the target itself
         await pilot.press("enter")
         await _settle(pilot)
+        assert isinstance(app.screen, ImportMenuScreen)
+        await pilot.press("enter")  # the patches-only kind, still the default
+        await _settle(pilot)
     choice = captured[0]
     assert choice.overflow_bank in ("RAM1", "RAM3")
     assert choice.target_bank == "RAM2"
     assert choice.mode is perfcopy.ImportMode.AS_IS
+    assert choice.overflow_kind == "patches"
 
 
 @pytest.mark.asyncio
@@ -2370,3 +2374,235 @@ async def test_overflow_writes_the_ram_bank_first_then_the_target(
     assert all(k["before_blocks"] is None for _n, k in writes)
     # The status names both banks and the patches that moved.
     assert any("RAM 3" in s and "patches" in s for s in statuses), statuses
+
+
+def _split_file_banks() -> list[Any]:
+    """The mixed RAM 1 source and the RAM 2 bank its parts name.
+
+    The two non-contained performances name RAM 2 patch 2, so the
+    self-contained split can carry that patch only when the bank is part
+    of the file. The patch name is invented, like every other fixture.
+    """
+    from tests.test_bankbuild import make_patch
+
+    ram2 = _make_bank(scope="RAM2", active_slots=[2])
+    ram2.source.patches[2] = make_patch("Harbour Slate")
+    return [_mixed_bank(), ram2]
+
+
+@pytest.mark.asyncio
+async def test_overflow_kind_menu_offers_both_kinds() -> None:
+    """``o`` picks the bank, then asks which kind of overflow to plan."""
+    app = KwsedApp(DemoDevice())
+    captured: list[Any] = []
+    screen = WholeBankImportScreen(
+        path="mixed.syx", banks=_split_file_banks(), gate=EditGate(armed=True)
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.push_screen(screen, captured.append)
+        await _settle(pilot)
+        await pilot.press("o")
+        await _settle(pilot)
+        assert isinstance(app.screen, TargetBankScreen)
+        await pilot.press("enter")  # the first overflow bank: RAM 2
+        await _settle(pilot)
+        menu = app.screen
+        assert isinstance(menu, ImportMenuScreen)
+        assert menu._choices == [
+            "Only the patches it cannot hold (performances stay on the target)",
+            "The performances that point outside it, with all their patches "
+            "(both banks self-contained)",
+        ]
+        await pilot.press("down")
+        await _settle(pilot)
+        await pilot.press("enter")
+        await _settle(pilot)
+    assert captured, "choosing a kind dismisses with a write choice"
+    choice = captured[0]
+    assert choice.overflow_bank == banks.bank("RAM2").id
+    assert choice.overflow_kind == "self_contained"
+    # Merely picking the kinds writes nothing.
+    assert app.device.bundle_write_count == 0
+
+
+@pytest.mark.asyncio
+async def test_self_contained_split_writes_each_bank_once_with_its_own_backup(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """Target first, overflow second, one fenced bundle each.
+
+    The order is the partition's own -- the target receives the contained
+    performances, the overflow bank the rest -- and each output bank is
+    self-contained, so no bank depends on another being written first.
+    Every bundle gets its own backup and its own read-back verification.
+    """
+    from kws import backup as _backup
+
+    app = _make_app(tmp_path, bankstore_dir=str(tmp_path / "store"))
+    file_banks = _split_file_banks()
+    bank = file_banks[0]
+    ram2 = file_banks[1].source
+    app._sources["RAM3"] = _make_bank(scope="RAM3", active_slots=[]).source
+    app._sources["RAM2"] = ram2
+    app._write_gate = EditGate(armed=True)
+    statuses: list[str] = []
+    app.notify_status = lambda msg, *a, **k: statuses.append(str(msg))  # type: ignore[method-assign]
+    backup_dir = str(tmp_path / "backups")
+    os.makedirs(backup_dir, exist_ok=True)
+    monkeypatch.setattr(_backup, "default_dir", lambda root=None: backup_dir)
+    monkeypatch.setattr(bankstore, "save", lambda *a, **k: None)
+    recorded: list[Any] = []
+    app._record_write = recorded.append  # type: ignore[method-assign]
+
+    app._import_whole_bank_write(
+        bank,
+        WholeBankChoice(
+            0,
+            "RAM3",
+            True,
+            perfcopy.ImportMode.AS_IS,
+            "",
+            True,
+            "RAM2",
+            "self_contained",
+        ),
+    )
+
+    # The statement before the write says what each bank will receive.
+    statement = next(s for s in statuses if "RAM 3 gets" in s)
+    assert "self-contained split" in statement
+    assert "RAM 3 gets 2 performances and 1 patch" in statement
+    assert "RAM 2 gets 2 performances and 1 patch" in statement
+    assert statuses[-1].startswith(
+        "imported Bank RAM1 as a self-contained split — 2 banks"
+    )
+    assert "RAM 3: 2 performances, 1 patch" in statuses[-1]
+    assert "RAM 2: 2 performances, 1 patch" in statuses[-1]
+
+    # One write per bank, in partition order, each its own complete bundle.
+    assert [w["bank"] for w in app.device.bundle_writes] == [
+        banks.bank("RAM3").label,
+        banks.bank("RAM2").label,
+    ]
+    assert app.device.bundle_write_count == 2
+    assert set(app.device._written) == {
+        ("RAM3", banks.Kind.PERFORMANCE),
+        ("RAM3", banks.Kind.PATCH),
+        ("RAM2", banks.Kind.PERFORMANCE),
+        ("RAM2", banks.Kind.PATCH),
+    }
+    # Two undo records, two backup envelopes: the fence is per bank.
+    assert len(recorded) == 2
+    for result in recorded:
+        backup_path = result["backup"]
+        assert isinstance(backup_path, str) and os.path.exists(backup_path)
+        assert result["verified"] is True
+
+    source = bank.source
+    ram3 = banks.bank("RAM3").number
+    ram2_bank = banks.bank("RAM2").number
+    target_perfs = _pass_blob(app.device, "RAM3", banks.Kind.PERFORMANCE)
+    assert _perf_at(target_perfs, 2) == _as_written(
+        source.performances[2], {0: (ram3, 0)}
+    )
+    assert _perf_at(target_perfs, 5) == _as_written(
+        source.performances[5], {0: (ram3, 0)}
+    )
+    # The target holds the contained performances only: the two that name
+    # RAM 2 are clean slots, not relocated copies.
+    for slot in range(50):
+        if slot in (2, 5):
+            continue
+        assert _perf_at(target_perfs, slot) == _clean_perf_record()
+    target_patches = _pass_blob(app.device, "RAM3", banks.Kind.PATCH)
+    assert _patch_at(target_patches, 0) == source.patches[0]
+    for slot in range(1, 35):
+        assert _patch_at(target_patches, slot) == bytes(PATCH_RECORD_SIZE)
+
+    # The overflow bank holds the external performances, repointed at its
+    # own bank number, with the patch they name carried across.
+    overflow_perfs = _pass_blob(app.device, "RAM2", banks.Kind.PERFORMANCE)
+    assert _perf_at(overflow_perfs, 7) == _as_written(
+        source.performances[7], {0: (ram2_bank, 0)}
+    )
+    assert _perf_at(overflow_perfs, 9) == _as_written(
+        source.performances[9], {0: (ram2_bank, 0)}
+    )
+    for slot in range(50):
+        if slot in (7, 9):
+            continue
+        assert _perf_at(overflow_perfs, slot) == _clean_perf_record()
+    overflow_patches = _pass_blob(app.device, "RAM2", banks.Kind.PATCH)
+    assert _patch_at(overflow_patches, 0) == ram2.patches[2]
+    for slot in range(1, 35):
+        assert _patch_at(overflow_patches, slot) == bytes(PATCH_RECORD_SIZE)
+    # Both banks are now the session's idea of what is on the unit.
+    assert app._sources["RAM3"].performances[2] == _perf_at(target_perfs, 2)
+    assert app._sources["RAM2"].performances[7] == _perf_at(overflow_perfs, 7)
+
+
+@pytest.mark.asyncio
+async def test_self_contained_split_needing_more_banks_is_refused_at_the_screen() -> (
+    None
+):
+    """The screen says how many banks the split needs and writes nothing."""
+    app = KwsedApp(DemoDevice())
+    captured: list[Any] = []
+    screen = WholeBankImportScreen(
+        path="big.syx", banks=[_multipass_bank()], gate=EditGate(armed=True)
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.push_screen(screen, captured.append)
+        await _settle(pilot)
+        await pilot.press("o")
+        await _settle(pilot)
+        assert isinstance(app.screen, TargetBankScreen)
+        await pilot.press("enter")
+        await _settle(pilot)
+        assert isinstance(app.screen, ImportMenuScreen)
+        await pilot.press("down")  # the self-contained kind
+        await _settle(pilot)
+        await pilot.press("enter")
+        await _settle(pilot)
+        # Still open: a split that cannot fit is refused, not dismissed.
+        still = app.screen
+        assert isinstance(still, WholeBankImportScreen)
+        assert still is screen
+        status = _static_text(screen, "whole-bank-status")
+        assert "self-contained split does not fit" in status
+        assert "contained performances need 2 banks" in status
+        assert "nothing is written" in status
+        assert "x, one bank per write" in status
+    assert captured == []
+    assert app.device.bundle_write_count == 0
+
+
+@pytest.mark.asyncio
+async def test_self_contained_split_refusal_at_the_app_writes_nothing(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """A split the two banks cannot hold is refused with its reasons."""
+    app, _recorded = _armed_app(tmp_path, monkeypatch)
+    statuses: list[str] = []
+    app.notify_status = lambda msg, *a, **k: statuses.append(str(msg))
+    monkeypatch.setattr(bankstore, "save", lambda *a, **k: None)
+
+    app._import_whole_bank_write(
+        _multipass_bank(),
+        WholeBankChoice(
+            0,
+            "RAM3",
+            True,
+            perfcopy.ImportMode.AS_IS,
+            "",
+            True,
+            "RAM2",
+            "self_contained",
+        ),
+    )
+
+    assert app.device.bundle_write_count == 0
+    assert any("self-contained split does not fit" in s for s in statuses), statuses
+    assert any("need 2 banks" in s for s in statuses), statuses

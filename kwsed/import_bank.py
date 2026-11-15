@@ -29,7 +29,7 @@ from textual.widgets import DataTable, Static
 
 from kws import banks as kws_banks
 from kws import containment, dumps, records
-from kws.perfcopy import ImportMode
+from kws.perfcopy import ImportMode, SplitPartition, partition_self_contained_split
 from kwsed.gate import EditGate
 from kwsed.target_bank import ImportMenuScreen, TargetBankScreen
 from vinsynlib.ui.report import ReportScreen
@@ -67,6 +67,20 @@ MODE_LABELS: Dict[ImportMode, str] = {
     ImportMode.SELF_CONTAINED_PACKED: "self-contained packed",
 }
 
+#: The two kinds of overflow ``o`` offers after the bank is picked.
+#: ``PATCHES`` keeps every performance on the target and sends only the
+#: patches it cannot hold elsewhere; ``SELF_CONTAINED`` moves the
+#: performances that point outside the target into the overflow bank,
+#: with every patch they name, so both banks are self-contained.
+OVERFLOW_PATCHES = "patches"
+OVERFLOW_SELF_CONTAINED = "self_contained"
+
+OVERFLOW_KIND_CHOICES: Tuple[str, ...] = (
+    "Only the patches it cannot hold (performances stay on the target)",
+    "The performances that point outside it, with all their patches "
+    "(both banks self-contained)",
+)
+
 
 @dataclass(frozen=True)
 class WholeBankChoice:
@@ -89,6 +103,13 @@ class WholeBankChoice:
     #: a plain write. The app writes this bank first and repoints the
     #: target's parts at it.
     overflow_bank: str = ""
+    #: Which kind of overflow to plan (option ``o``): ``"patches"`` keeps
+    #: every performance on the target and sends the patches it cannot hold
+    #: to ``overflow_bank``; ``"self_contained"`` moves the performances
+    #: that point outside the target into it, patches included, so both
+    #: banks are self-contained. The default keeps every existing caller on
+    #: the patches-only split.
+    overflow_kind: str = OVERFLOW_PATCHES
 
 
 @dataclass(frozen=True)
@@ -445,7 +466,8 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
         where = banks[0].label if banks else "a RAM bank"
         return (
             f" · {parts} parts name another bank: press o to send those "
-            f"patches to {where} and repoint them"
+            f"patches to {where} and repoint them, or to move those "
+            f"performances with all their patches there"
         )
 
     def _overflow_banks(self) -> list[Any]:
@@ -472,7 +494,7 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
         return candidates
 
     def action_overflow(self) -> None:
-        """Offer to send the patches that point elsewhere into a RAM bank."""
+        """Offer to move what the target cannot hold into a RAM bank."""
         if not self._overflow_parts():
             self._set_status(
                 "this bank's parts name no other bank, so there is nothing to overflow"
@@ -490,16 +512,73 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
     def _overflow_bank_chosen(
         self, banks: Sequence[Any], picked: Optional[int]
     ) -> None:
-        """Dismiss with a write choice that also carries the overflow bank."""
+        """After the bank, ask which kind of overflow to plan."""
         if picked is None:
             return
         try:
             overflow = banks[picked]
         except (IndexError, TypeError):
             return
+        self.app.push_screen(
+            ImportMenuScreen("Overflow kind", list(OVERFLOW_KIND_CHOICES)),
+            lambda index: self._overflow_kind_chosen(overflow, index),
+        )
+
+    def _split_preview(self, overflow: Any) -> Optional[SplitPartition]:
+        """The self-contained split over the target plus this overflow bank.
+
+        The same call the app makes before writing, so a refusal here is
+        the refusal the write would give -- stated while the screen is
+        still open, not after a dismissal that could drop performances.
+        """
+        try:
+            bank = self._source_bank()
+            scope = str(bank.scope)
+            sources = dict(self._sources())
+            sources[scope] = bank.source
+            return partition_self_contained_split(
+                sources,
+                scope,
+                [self._target_bank(), overflow],
+                mode=self._mode,
+            )
+        except (IndexError, LookupError, ValueError, TypeError, AttributeError):
+            return None
+
+    def _split_refusal(self, overflow: Any, partition: SplitPartition) -> str:
+        """Why the split needs more banks than the one offered, in words.
+
+        The engine's own rejections name the bank and the count (for
+        example ``contained performances need 2 banks``), so they are
+        repeated verbatim instead of being re-derived here.
+        """
+        reasons = "; ".join(partition.rejected)
+        return (
+            f"self-contained split does not fit {self._target_bank().label} "
+            f"plus {overflow.label}: {reasons} — nothing is written; split "
+            f"it with x, one bank per write, or carry the remainder with n"
+        )
+
+    def _overflow_kind_chosen(self, overflow: Any, index: Optional[int]) -> None:
+        """Dismiss with the overflow bank and the kind that was picked."""
+        if index is None:
+            return
         if self._gate is not None and not self._gate.armed:
             self._set_status("write gate is locked")
             return
+        kind = OVERFLOW_PATCHES if index == 0 else OVERFLOW_SELF_CONTAINED
+        if kind == OVERFLOW_SELF_CONTAINED:
+            partition = self._split_preview(overflow)
+            if partition is None:
+                self._set_status(
+                    "containment is not known for this bank, so the "
+                    "self-contained split cannot be planned"
+                )
+                return
+            if not partition.fits:
+                # Never dismiss on a split that would drop performances.
+                self._set_status(self._split_refusal(overflow, partition))
+                return
         self.dismiss(
             WholeBankChoice(
                 self._source_index,
@@ -509,6 +588,7 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
                 self._session_key(),
                 True,
                 str(overflow.id),
+                kind,
             )
         )
 
@@ -695,7 +775,8 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
             yield Static("", id=GATE_ID, classes="gate", markup=False)
             yield Static("", id=STATUS_ID, classes="status", markup=False)
             yield Static(
-                "s source · b target · m mode · o overflow · n next pass · "
+                "s source · b target · m mode · o overflow (patches only, or "
+                "a self-contained split of both banks) · n next pass · "
                 "x companions · "
                 "w gate · ctrl+s write · c cache · ? help · esc/q cancel",
                 classes="hint",
@@ -916,9 +997,13 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
             "b  switch the target bank (RAM 1/2/3, Card)\n"
             "m  cycle the import mode: as-is, self-contained 1:1, "
             "self-contained packed\n"
-            "o  send the patches whose parts name another bank into a RAM\n"
-            "   bank and repoint those parts at it; the target keeps the\n"
-            "   performances and the patches they name in their own bank\n"
+            "o  overflow what the target cannot hold, in either of two kinds:\n"
+            "   only the patches its parts name in another bank, repointed at\n"
+            "   a RAM bank while every performance stays on the target; or the\n"
+            "   performances that point outside it, with all their patches,\n"
+            "   so the target and the RAM bank are each self-contained\n"
+            "   (a split needing more than the one offered bank is refused;\n"
+            "   x sequences it one bank per write)\n"
             "n  offer the next pass: the contained performances no earlier\n"
             "   pass has written, into a fresh target (another card bank\n"
             "   after a switch, or a RAM bank); each pass is its own gated\n"
