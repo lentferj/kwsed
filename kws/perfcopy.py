@@ -56,6 +56,10 @@ __all__ = [
     "OverflowBuilt",
     "plan_overflow_import",
     "build_overflow_import",
+    "SplitPlan",
+    "SplitBuilt",
+    "plan_self_contained_split",
+    "build_split_import",
     "build_self_contained",
     "active_performances",
     "copy_into_bank",
@@ -210,6 +214,13 @@ def _collect_unique_patches(
     bank; ``external`` holds the rest, in first-use order, so a caller can
     heap them into another bank and repoint them afterwards. Without it,
     every patch is carried and ``external`` is empty.
+
+    A part whose bank is not writable is a ROM reference and is neither
+    carried nor external: the ROM banks are always on the instrument, so
+    the patch stays where it is and costs no destination slot. Treating
+    one as external would copy a ROM patch record into the overflow bank
+    when a ROM source happens to be loaded, and reject with "not loaded"
+    when it is not -- though nothing needs copying either way.
     """
     parts = [p for p in rec.performance_parts(record) if p.used]
     local_map: Dict[relations.PatchId, int] = {}
@@ -217,6 +228,8 @@ def _collect_unique_patches(
     external: List[relations.PatchId] = []
     seen_external: Set[relations.PatchId] = set()
     for part in parts:
+        if not banks.bank(part.bank).writable:
+            continue
         patch_scope = relations.resolve_part_scope(part.bank, scope)
         pid = relations.PatchId(patch_scope, part.patch)
         if local_bank_number is not None and part.bank != local_bank_number:
@@ -1132,6 +1145,184 @@ def build_overflow_import(
         overflow_waveseq=waveseq,
         repointed_parts=moved,
         patch_count=len(plan.patch_slots),
+    )
+
+
+@dataclass
+class SplitPlan:
+    """One source bank split into two self-contained banks.
+
+    The destination receives the performances that are already contained
+    (self or ROM only); the overflow bank receives every performance that
+    names another writable bank. Each group is planned against its own
+    bank with every referenced patch carried and rewritten, so the rule
+    holds in each output bank: every used part of every performance
+    names that bank or ROM. Content used by performances that land in
+    both banks is duplicated, because a patch must not be shared across
+    banks.
+    """
+
+    destination_bank: banks.Bank
+    overflow_bank: banks.Bank
+    source_scope: str
+    destination: AtomicPlan
+    overflow: AtomicPlan
+    rejected: List[str] = field(default_factory=list)
+
+    @property
+    def fits(self) -> bool:
+        return not self.rejected
+
+
+@dataclass
+class SplitBuilt:
+    """The bytes of both banks of a split, and how many patches each holds."""
+
+    destination: AtomicBuilt
+    overflow: AtomicBuilt
+    destination_patches: int
+    overflow_patches: int
+
+
+#: A planning budget with no ceiling. The split plans each group against
+#: it so the totals are the group's real needs, not what fit before the
+#: planner gave up; whether those needs fit the bank is the separate,
+#: bank-naming check in :func:`_split_group_rejections`.
+_UNBOUNDED = bankbuild.Budget(
+    performances=10**6, patches=10**6, sequences=10**6, steps=10**6
+)
+
+
+def _split_group_rejections(
+    bank: banks.Bank,
+    group: Sequence[relations.PerfId],
+    made: AtomicPlan,
+    budget: bankbuild.Budget,
+) -> List[str]:
+    """One sentence per budget dimension a whole group exceeds.
+
+    The message names the bank and the group size, so the caller can see
+    which side of the split is over and by how much, rather than one
+    performance's shortfall at the moment the planner ran out.
+    """
+    size = len(group)
+    out: List[str] = []
+    if size > budget.performances:
+        out.append(
+            f"{bank.label}: {size} performances do not fit "
+            f"{budget.performances} performance slots"
+        )
+    if made.patch_count > budget.patches:
+        out.append(
+            f"{bank.label}: {size} performances with {made.patch_count} "
+            f"patches do not fit {budget.patches} patch slots"
+        )
+    if len(made.sequence_map) > budget.sequences:
+        out.append(
+            f"{bank.label}: {size} performances with "
+            f"{len(made.sequence_map)} wave sequences do not fit "
+            f"{budget.sequences} wave sequence slots"
+        )
+    if made.steps_used > budget.steps:
+        out.append(
+            f"{bank.label}: {size} performances with {made.steps_used} "
+            f"steps do not fit {budget.steps} steps"
+        )
+    return out
+
+
+def _plan_split_group(
+    sources: Mapping[str, deps.Source],
+    source_scope: str,
+    slots: Sequence[int],
+    bank: banks.Bank,
+    mode: ImportMode,
+    budget: bankbuild.Budget,
+) -> Tuple[AtomicPlan, List[str]]:
+    """Plan one group of the split into ``bank``; report its rejections.
+
+    Every referenced patch is carried (ROM parts stay in ROM), and
+    ``share_patches`` packs the group so one source patch takes one
+    target slot. ``slots`` are source slots; ``mode`` decides whether
+    each performance keeps its own or is re-slotted 0..n-1.
+    """
+    chosen = [relations.PerfId(source_scope, slot) for slot in slots]
+    made = plan_atomic_bank(
+        sources,
+        chosen,
+        destination_bank=bank,
+        budget=_UNBOUNDED,
+        share_patches=True,
+        carry_external=True,
+    )
+    targets = _target_perf_slots(slots, mode, None)
+    for alloc in made.allocations:
+        alloc.target_perf_slot = targets[alloc.source_perf.number]
+    rejections = _split_group_rejections(bank, chosen, made, budget)
+    rejections.extend(made.rejected)
+    return made, rejections
+
+
+def plan_self_contained_split(
+    sources: Mapping[str, deps.Source],
+    source_scope: str,
+    destination_bank: banks.Bank,
+    overflow_bank: banks.Bank,
+    *,
+    mode: ImportMode = ImportMode.SELF_CONTAINED_PACKED,
+    budget: bankbuild.Budget = _DEFAULT_BUDGET,
+) -> SplitPlan:
+    """Plan a self-contained split of one source bank across two banks.
+
+    A performance the containment audit calls contained -- every used
+    part points at its own bank or at ROM -- goes to
+    ``destination_bank``; every other performance goes to
+    ``overflow_bank``. Each group is planned against its own bank, which
+    copies all referenced patches, rewrites all parts to that bank,
+    relocates wave sequences and rewrites patch sequence refs.
+
+    ``mode`` chooses placement per group: 1:1 keeps each performance's
+    source slot; packed re-slots each group 0..n-1. ``AS_IS`` means 1:1
+    here, the same convention :func:`plan_overflow_import` uses.
+    """
+    if destination_bank.number == overflow_bank.number:
+        raise ValueError("the overflow bank is the destination bank")
+    if mode is ImportMode.AS_IS:
+        mode = ImportMode.SELF_CONTAINED_1TO1
+    audit = containment.audit_containment(sources, source_scope)
+    destination_slots = [entry.slot for entry in audit.performances if entry.contained]
+    overflow_slots = [entry.slot for entry in audit.performances if not entry.contained]
+    destination, destination_rejections = _plan_split_group(
+        sources, source_scope, destination_slots, destination_bank, mode, budget
+    )
+    overflow, overflow_rejections = _plan_split_group(
+        sources, source_scope, overflow_slots, overflow_bank, mode, budget
+    )
+    return SplitPlan(
+        destination_bank=destination_bank,
+        overflow_bank=overflow_bank,
+        source_scope=source_scope,
+        destination=destination,
+        overflow=overflow,
+        rejected=destination_rejections + overflow_rejections,
+    )
+
+
+def build_split_import(
+    sources: Mapping[str, deps.Source],
+    plan: SplitPlan,
+) -> SplitBuilt:
+    """Build both banks of a split. Refuses a plan that does not fit."""
+    if not plan.fits:
+        raise ValueError("; ".join(plan.rejected))
+    srcs = dict(sources)
+    destination = build_atomic_bank(srcs, plan.destination)
+    overflow = build_atomic_bank(srcs, plan.overflow)
+    return SplitBuilt(
+        destination=destination,
+        overflow=overflow,
+        destination_patches=plan.destination.patch_count,
+        overflow_patches=plan.overflow.patch_count,
     )
 
 

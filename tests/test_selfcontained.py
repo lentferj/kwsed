@@ -17,7 +17,8 @@
 
 import pytest
 
-from kws import banks, containment, deps, dumps, perfcopy
+from kws import bankbuild as bb
+from kws import banks, containment, deps, dumps, perfcopy, relations
 from kws import records as r
 from tests.test_bankbuild import make_patch, make_performance, make_waveseq
 
@@ -350,3 +351,169 @@ def _as_wave_bank(record, bank):
         if wave.is_sequence:
             r.set_patch_wave(out, wave.index, bank=bank, wave=wave.wave)
     return bytes(out)
+
+
+ROM_BANK = banks.bank(3)  # ROM 4: display number 3, never writable
+OVERFLOW = banks.bank("RAM3")
+
+
+def _assert_self_contained(built, bank):
+    """Every used part of every performance names ``bank`` or ROM.
+
+    This is the self-containment invariant of a split output: no part may
+    still point at a *writable* bank other than the one the performance
+    lives in, because nothing guarantees what that bank holds.
+    """
+    for slot in range(banks.PERFORMANCES_PER_BANK):
+        record = _performance(built, slot)
+        if perfcopy.is_empty_performance(record):
+            continue
+        for part in _used_parts(record):
+            ok = part.bank == bank.number or not banks.bank(part.bank).writable
+            assert ok, f"slot {slot} part {part.index} -> bank {part.bank}"
+
+
+class TestRomPartsStayInRom:
+    """A ROM part is neither carried nor external; it costs no slot."""
+
+    def _sources(self):
+        return {
+            "RAM1": _source(
+                performances=[
+                    make_performance("Mixed Reach", ((0, 0), (ROM_BANK.number, 0))),
+                    make_performance("Rom Only", ((4, 2),)),
+                ],
+                patches=[make_patch("Tide Gate")],
+            )
+        }
+
+    def test_planning_with_the_rom_source_absent_reports_no_external(self):
+        sources = self._sources()
+        for carry in (True, False):
+            plan = perfcopy.plan_atomic_bank(
+                sources,
+                [relations.PerfId("RAM1", 0)],
+                destination_bank=CARD,
+                carry_external=carry,
+            )
+            assert plan.fits, plan.rejected
+            assert plan.external_patches == []
+            assert plan.patch_count == 1
+
+    def test_a_rom_only_part_points_at_its_rom_bank_when_built(self):
+        sources = self._sources()
+        plan = perfcopy.plan_atomic_bank(
+            sources, [relations.PerfId("RAM1", 1)], destination_bank=CARD
+        )
+        assert plan.fits, plan.rejected
+        assert plan.patch_count == 0
+        built = perfcopy.build_atomic_bank(sources, plan)
+        part = _used_parts(_performance(built, 0))[0]
+        assert part.bank == 4  # ROM 5's display number, as authored
+        assert not banks.bank(part.bank).writable
+
+    def test_overflow_import_carries_no_rom_patches(self):
+        sources = self._sources()
+        plan = perfcopy.plan_overflow_import(
+            sources, "RAM1", CARD, OVERFLOW, mode=MODE_1TO1
+        )
+        assert plan.fits, plan.rejected
+        assert plan.atomic.external_patches == []
+        built = perfcopy.build_overflow_import(sources, plan)
+        assert built.patch_count == 0
+
+
+class TestSelfContainedSplit:
+    """Contained performances go to the destination; the rest overflow."""
+
+    def _sources(self):
+        # RAM 2's patch names a wave sequence that lives in RAM 2's own
+        # wave-sequence bank, so the overflow copy must relocate it.
+        seq_bank, _starts = make_waveseq({0: [50, 51]})
+        shared = make_patch("Harbor Slow")
+        own_reef = make_patch("Harbor Reef")
+        foreign = bytearray(make_patch("Tide Cross"))
+        r.set_patch_wave(foreign, 0, bank=1, wave=0)
+        performances = [
+            make_performance("Solo Shore", ((0, 0),)),  # self only
+            make_performance("Cross Reach", ((0, 0), (1, 0))),  # own + RAM 2
+            make_performance("Rom Drift", ((ROM_BANK.number, 0),)),  # ROM only
+            make_performance("Solo Reef", ((0, 1),)),  # self only, own patch
+        ]
+        sources = {
+            "RAM1": _source(performances=performances, patches=[shared, own_reef]),
+            "RAM2": deps.Source(
+                scope_id="RAM2",
+                performances=[],
+                patches=[bytes(foreign)],
+                waveseq=seq_bank,
+            ),
+        }
+        return sources, shared
+
+    def test_split_places_each_group_and_duplicates_shared_content(self):
+        sources, shared = self._sources()
+        plan = perfcopy.plan_self_contained_split(
+            sources, "RAM1", CARD, OVERFLOW, mode=MODE_PACKED
+        )
+        assert plan.fits, plan.rejected
+        built = perfcopy.build_split_import(sources, plan)
+
+        assert [alloc.name for alloc in plan.destination.allocations] == [
+            "Solo Shore",
+            "Rom Drift",
+            "Solo Reef",
+        ]
+        assert [alloc.name for alloc in plan.overflow.allocations] == ["Cross Reach"]
+        assert built.destination_patches == 2
+        assert built.overflow_patches == 2
+
+        _assert_self_contained(built.destination, CARD)
+        _assert_self_contained(built.overflow, OVERFLOW)
+
+        # The shared own patch exists in both banks: content used by
+        # performances that land in both groups is duplicated.
+        assert _patch(built.destination, 0) == shared
+        assert _patch(built.overflow, 0) == shared
+
+        # The overflow patch's sequence lives in the overflow bank's
+        # wave-sequence bank and its reference was rewritten there.
+        wave = r.patch_waves(_patch(built.overflow, 1))[0]
+        assert wave.is_sequence
+        assert (wave.bank, wave.wave) == (OVERFLOW.number, 0)
+        assert built.overflow.waveseq is not None
+        chain = deps.walk_sequence(built.overflow.waveseq, 0, scope_id=OVERFLOW.id)
+        waves = [r.step(built.overflow.waveseq, step)["wave"] for step in chain.steps]
+        assert waves == [50, 51]
+
+    def test_as_is_keeps_each_source_slot(self):
+        sources, _shared = self._sources()
+        plan = perfcopy.plan_self_contained_split(
+            sources, "RAM1", CARD, OVERFLOW, mode=perfcopy.ImportMode.AS_IS
+        )
+        assert plan.fits, plan.rejected
+        assert [alloc.target_perf_slot for alloc in plan.destination.allocations] == [
+            0,
+            2,
+            3,
+        ]
+        assert [alloc.target_perf_slot for alloc in plan.overflow.allocations] == [1]
+
+    def test_the_same_bank_twice_is_refused(self):
+        sources, _shared = self._sources()
+        with pytest.raises(ValueError, match="overflow bank is the destination"):
+            perfcopy.plan_self_contained_split(sources, "RAM1", CARD, CARD)
+
+    def test_a_group_that_cannot_fit_is_rejected_naming_the_bank(self):
+        sources, _shared = self._sources()
+        tight = bb.Budget(patches=1)
+        plan = perfcopy.plan_self_contained_split(
+            sources, "RAM1", CARD, OVERFLOW, budget=tight
+        )
+        assert not plan.fits
+        assert any(
+            "Card" in message and "do not fit 1 patch slots" in message
+            for message in plan.rejected
+        )
+        with pytest.raises(ValueError, match="Card"):
+            perfcopy.build_split_import(sources, plan)

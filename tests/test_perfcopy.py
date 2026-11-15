@@ -133,16 +133,21 @@ class TestCrossBankLocalization:
         perf_id = relations.PerfId("CARD/07", 0)
         plan = perfcopy.plan_atomic_bank(sources, [perf_id], destination_bank=RAM3)
         built = perfcopy.build_atomic_bank(sources, plan)
-        assert plan.patch_count == 3
+        # A ROM part stays in ROM: it is neither carried nor external, so
+        # only the RAM 1 and CARD/07 patches cost a slot.
+        assert plan.patch_count == 2
         assert len(plan.allocations) == 1
         alloc = plan.allocations[0]
-        assert alloc.part_patch_slots == {0: 0, 1: 1, 2: 2}
+        assert alloc.part_patch_slots == {0: 0, 2: 1}
         # decode built performance
         rec0 = built.performances[0 * r.PERFORMANCE_SIZE : 1 * r.PERFORMANCE_SIZE]
         for part in r.performance_parts(rec0):
             if part.used:
+                if part.index == 1:
+                    assert part.bank == 3  # ROM 4: left where it lives
+                    continue
                 assert part.bank == RAM3.number  # 2
-                assert 0 <= part.patch <= 2
+                assert 0 <= part.patch <= 1
         # patch bytes from right source banks: first patch name starts R
         assert built.patches[0] == ord("R")
 
