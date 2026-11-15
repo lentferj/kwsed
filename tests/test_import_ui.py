@@ -1752,3 +1752,197 @@ class TestBankCopyUi:
         assert mismatch.kind == "ram"
         assert "Warm Pad" in mismatch.text
         assert "Something Else" in mismatch.text
+
+
+async def _settle(pilot: Any, times: int = 20) -> None:
+    for _ in range(times):
+        await pilot.pause()
+
+
+def _static_text(screen: Any, widget_id: str) -> str:
+    return str(screen.query_one(f"#{widget_id}", Static).content)
+
+
+def _spillover_banks(*, rom_companion: bool = False) -> list[Any]:
+    """A file of invented banks: RAM 1 as the main source, RAM 2 beside it.
+
+    The main bank's slot 4 names RAM 2 (bank number 1) in one part, so the
+    audit's per-bank total is what the spill-over suggestion must follow.
+    With ``rom_companion`` a ROM 4 bank joins the file: it is present, but
+    it is not writable and must never be offered.
+    """
+    from tests.test_bankbuild import make_patch, make_performance
+
+    perfs = [_empty_perf() for _ in range(50)]
+    perfs[1] = make_performance("Copper Ledge", ((0, 0),))
+    perfs[4] = make_performance("Willow Span", ((1, 3),))
+    main = deps.Source(
+        scope_id="RAM1",
+        performances=perfs,
+        patches=[make_patch("Slate Underlay")] + [bytes(PATCH_RECORD_SIZE)] * 34,
+        waveseq=None,
+    )
+    out: list[Any] = [
+        importers.ImportedBank(
+            label="Main bank", scope="RAM1", format="sysex", source=main
+        ),
+        _make_bank(scope="RAM2", active_slots=[2]),
+    ]
+    if rom_companion:
+        out.append(_make_bank(scope="ROM4", active_slots=[6]))
+    return out
+
+
+@pytest.mark.asyncio
+async def test_spillover_list_appears_only_for_a_multi_bank_file() -> None:
+    app = KwsedApp(DemoDevice())
+    single = WholeBankImportScreen(path="one.syx", banks=[_make_bank(scope="RAM1")])
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.push_screen(single)
+        await _settle(pilot)
+        await pilot.press("x")
+        await _settle(pilot)
+        assert isinstance(app.screen, WholeBankImportScreen)
+        assert "only one source bank" in _static_text(single, "whole-bank-status")
+
+        many = WholeBankImportScreen(path="two.syx", banks=_spillover_banks())
+        app.push_screen(many)
+        await _settle(pilot)
+        await pilot.press("x")
+        await _settle(pilot)
+        assert isinstance(app.screen, ImportMenuScreen)
+        choices = app.screen._choices
+        assert len(choices) == 1
+        assert "Bank RAM2" in choices[0]
+    # Merely offering the companions writes nothing.
+    assert app.device.bundle_write_count == 0
+
+
+@pytest.mark.asyncio
+async def test_spillover_suggests_the_audited_ram_bank_and_skips_rom() -> None:
+    app = KwsedApp(DemoDevice())
+    many = WholeBankImportScreen(
+        path="many.syx", banks=_spillover_banks(rom_companion=True)
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.push_screen(many)
+        await _settle(pilot)
+        audit = many._audit
+        assert audit is not None
+        assert audit.parts_per_bank == {banks.bank("RAM2").number: 1}
+
+        await pilot.press("x")
+        await _settle(pilot)
+        assert isinstance(app.screen, ImportMenuScreen)
+        choices = app.screen._choices
+        # ROM 4 is in the file but cannot be written, so it is not offered.
+        assert len(choices) == 1
+        assert "→ RAM 2" in choices[0]
+        assert "1 part names it" in choices[0]
+
+        await pilot.press("enter")
+        await _settle(pilot)
+        assert isinstance(app.screen, TargetBankScreen)
+        targets = app.screen._choices
+        assert targets[0] == banks.bank("RAM2").label
+        assert targets[1:] == [banks.bank("RAM1").label, banks.bank("RAM3").label]
+        assert banks.bank("CARD").label not in targets
+        assert not any(t.startswith("ROM") for t in targets)
+    assert app.device.bundle_write_count == 0
+
+
+@pytest.mark.asyncio
+async def test_spillover_carries_the_current_mode() -> None:
+    """The spill choice is a normal whole-bank choice, mode included."""
+    app = KwsedApp(DemoDevice())
+    captured: list[Any] = []
+    many = WholeBankImportScreen(
+        path="two.syx", banks=_spillover_banks(), gate=EditGate(armed=True)
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.push_screen(many, captured.append)
+        await _settle(pilot)
+        await pilot.press("m")
+        await _settle(pilot)
+        await pilot.press("x")
+        await _settle(pilot)
+        await pilot.press("enter")
+        await _settle(pilot)
+        await pilot.press("enter")
+        await _settle(pilot)
+    choice = captured[0]
+    assert isinstance(choice, WholeBankChoice)
+    assert choice.source_index == 1
+    assert choice.target_bank == banks.bank("RAM2").id
+    assert choice.write_to_unit is True
+    assert choice.mode is perfcopy.ImportMode.SELF_CONTAINED_1TO1
+
+
+@pytest.mark.asyncio
+async def test_spillover_is_one_fenced_write_to_the_audited_bank(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    app, recorded = _armed_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(bankstore, "save", lambda *a, **k: None)
+    file_banks = _spillover_banks()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.push_screen(
+            WholeBankImportScreen(
+                path="two.syx", banks=file_banks, gate=app._write_gate
+            ),
+            lambda picked: app._import_whole_bank_chosen(file_banks, picked),
+        )
+        await _settle(pilot)
+        await pilot.press("x")
+        await _settle(pilot)
+        await pilot.press("enter")
+        await _settle(pilot)
+        assert isinstance(app.screen, TargetBankScreen)
+        await pilot.press("enter")
+        for _ in range(100):
+            await pilot.pause()
+            if app.device.bundle_write_count:
+                break
+        await _settle(pilot)
+
+    assert app.device.bundle_write_count == 1
+    assert app.device.bundle_writes[0]["bank"] == banks.bank("RAM2").label
+    assert set(app.device._written) == {
+        ("RAM2", banks.Kind.PERFORMANCE),
+        ("RAM2", banks.Kind.PATCH),
+    }
+    assert recorded, "the write is recorded, exactly once"
+    backup_path = recorded[0]["backup"]
+    assert isinstance(backup_path, str) and os.path.exists(backup_path)
+
+
+@pytest.mark.asyncio
+async def test_spillover_requires_the_write_gate(tmp_path: Any) -> None:
+    app = _make_app(tmp_path, bankstore_dir=str(tmp_path / "store"))
+    app._write_gate = EditGate(armed=False)
+    app.notify_status = lambda *a, **k: None  # type: ignore[method-assign]
+    file_banks = _spillover_banks()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.push_screen(
+            WholeBankImportScreen(
+                path="two.syx", banks=file_banks, gate=app._write_gate
+            ),
+            lambda picked: app._import_whole_bank_chosen(file_banks, picked),
+        )
+        await _settle(pilot)
+        await pilot.press("x")
+        await _settle(pilot)
+        await pilot.press("enter")
+        await _settle(pilot)
+        assert isinstance(app.screen, TargetBankScreen)
+        await pilot.press("enter")
+        await _settle(pilot)
+        # Still on the screen: nothing was dismissed, so nothing was written.
+        assert isinstance(app.screen, WholeBankImportScreen)
+        assert "write gate is locked" in _static_text(app.screen, "whole-bank-status")
+    assert app.device.bundle_write_count == 0

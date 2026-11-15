@@ -30,12 +30,13 @@ from kws import banks as kws_banks
 from kws import containment, dumps, records
 from kws.perfcopy import ImportMode
 from kwsed.gate import EditGate
+from kwsed.target_bank import ImportMenuScreen, TargetBankScreen
 from vinsynlib.ui.report import ReportScreen
 
 if TYPE_CHECKING:
     from kws.importers import ImportedBank
 
-__all__ = ["WholeBankChoice", "WholeBankImportScreen"]
+__all__ = ["SpilloverCompanion", "WholeBankChoice", "WholeBankImportScreen"]
 
 TABLE_ID = "whole-bank-table"
 PATH_ID = "whole-bank-path"
@@ -72,6 +73,27 @@ class WholeBankChoice:
     mode: ImportMode = ImportMode.AS_IS
 
 
+@dataclass(frozen=True)
+class SpilloverCompanion:
+    """One companion bank of the file, and the RAM bank it is aimed at.
+
+    Plan R3 (option b): a file that holds more than one bank can also carry
+    the banks the main source's performances reference. ``index`` is the
+    companion's position in the file -- the same index a
+    :class:`WholeBankChoice` carries. ``target`` is the suggested RAM bank,
+    the bank the main source's parts name (plan D2), matched by bank
+    number; the chooser lets the person replace it. ``named_parts`` is how
+    many of the main source's parts point at that bank, so a companion the
+    performances do not reference says so instead of implying otherwise.
+    """
+
+    index: int
+    label: str
+    bank_number: int
+    target: str
+    named_parts: int = 0
+
+
 def _escape(text: str) -> str:
     return text.replace("[", "\\[")
 
@@ -104,6 +126,51 @@ def _is_empty_performance(record: Sequence[int]) -> bool:
     return True
 
 
+def _ram_banks() -> list[kws_banks.Bank]:
+    """The writable RAM banks a companion can be spilled into.
+
+    The Card is writable too, but plan R3 names a RAM bank for each
+    companion; card targets belong to the HCard work, not here.
+    """
+    return [b for b in kws_banks.writable_banks() if b.id.startswith("RAM")]
+
+
+def _entry_bank_number(entry: Any) -> Optional[int]:
+    """The real bank number behind one loaded file bank, or ``None``.
+
+    A file bank carries its scope (``RAM2``, ``CARD/import0``); a session
+    alias carries the number on its ``Source`` instead. Anything else --
+    a malformed fixture, an unknown scope -- has no number and is not
+    offered as a companion.
+    """
+    source = getattr(entry, "source", None)
+    number = getattr(source, "bank_number", None)
+    if number is not None:
+        try:
+            return int(number)
+        except (TypeError, ValueError):
+            return None
+    scope = getattr(entry, "scope", None)
+    if not isinstance(scope, str):
+        return None
+    if scope == "CARD" or scope.startswith("CARD/"):
+        return kws_banks.bank("CARD").number
+    try:
+        return kws_banks.bank(scope).number
+    except LookupError:
+        return None
+
+
+def _entry_bank(entry: Any) -> Optional[kws_banks.Bank]:
+    number = _entry_bank_number(entry)
+    if number is None:
+        return None
+    try:
+        return kws_banks.bank(number)
+    except LookupError:
+        return None
+
+
 class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
     DEFAULT_CSS = """
     WholeBankImportScreen { align: center middle; }
@@ -129,6 +196,7 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
         Binding("s", "source", "Source"),
         Binding("b", "target", "Target"),
         Binding("m", "mode", "Mode"),
+        Binding("x", "spillover", "Companions"),
         Binding("w", "toggle_gate", "Gate"),
         Binding("ctrl+s", "write", "Write", priority=True),
         Binding("c", "cache", "Cache"),
@@ -405,8 +473,8 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
             yield Static("", id=GATE_ID, classes="gate", markup=False)
             yield Static("", id=STATUS_ID, classes="status", markup=False)
             yield Static(
-                "s source · b target · m mode · w gate · ctrl+s write · c cache · "
-                "? help · esc/q cancel",
+                "s source · b target · m mode · x companions · w gate · "
+                "ctrl+s write · c cache · ? help · esc/q cancel",
                 classes="hint",
                 markup=False,
             )
@@ -455,6 +523,100 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
         self._update_mode()
         self._set_status(self._mode_line())
 
+    def _spillover_companions(self) -> list[SpilloverCompanion]:
+        """The file's other RAM banks, each with the RAM bank it would fill.
+
+        The main source is the bank selected now; its containment audit is
+        what says which banks its parts name (plan D2). A ROM companion is
+        left out -- it cannot be written -- and so is the Card, because
+        spill targets are RAM banks. The main source itself is not a
+        companion: ``ctrl+s`` is how it is written.
+        """
+        audit = self._audit
+        out: list[SpilloverCompanion] = []
+        for index, entry in enumerate(self._banks):
+            if index == self._source_index:
+                continue
+            bank = _entry_bank(entry)
+            if bank is None or not bank.writable or not bank.id.startswith("RAM"):
+                continue
+            named = 0 if audit is None else audit.parts_per_bank.get(bank.number, 0)
+            out.append(
+                SpilloverCompanion(
+                    index=index,
+                    label=str(getattr(entry, "label", bank.label)),
+                    bank_number=bank.number,
+                    target=bank.id,
+                    named_parts=named,
+                )
+            )
+        return out
+
+    @staticmethod
+    def _spillover_choices(companions: Sequence[SpilloverCompanion]) -> list[str]:
+        """One line per companion: what it is, and the RAM bank it fills."""
+        out: list[str] = []
+        for companion in companions:
+            target = kws_banks.bank(companion.target).label
+            named = companion.named_parts
+            if named == 0:
+                note = "no part names it"
+            elif named == 1:
+                note = "1 part names it"
+            else:
+                note = f"{named} parts name it"
+            out.append(f"{_escape(companion.label)} → {target} · {note}")
+        return out
+
+    def action_spillover(self) -> None:
+        """Offer the file's companion banks, one explicit write each (R3)."""
+        if len(self._banks) <= 1:
+            self._set_status("only one source bank in this file")
+            return
+        companions = self._spillover_companions()
+        if not companions:
+            self._set_status("no writable RAM companion bank in this file")
+            return
+        self.app.push_screen(
+            ImportMenuScreen("Companion bank", self._spillover_choices(companions)),
+            lambda index: self._companion_chosen(companions, index),
+        )
+
+    def _companion_chosen(
+        self, companions: Sequence[SpilloverCompanion], index: Optional[int]
+    ) -> None:
+        """After the companion is picked, offer its RAM target (D2 default)."""
+        if index is None:
+            return
+        try:
+            companion = companions[index]
+        except (IndexError, TypeError):
+            return
+        suggested = kws_banks.bank(companion.target)
+        targets = [suggested] + [b for b in _ram_banks() if b.id != suggested.id]
+        self.app.push_screen(
+            TargetBankScreen("Spill target", [b.label for b in targets]),
+            lambda picked: self._spill_target_chosen(companion, targets, picked),
+        )
+
+    def _spill_target_chosen(
+        self,
+        companion: SpilloverCompanion,
+        targets: Sequence[kws_banks.Bank],
+        picked: Optional[int],
+    ) -> None:
+        """Dismiss with the companion's own whole-bank write, gate first."""
+        if picked is None:
+            return
+        try:
+            target = targets[picked]
+        except (IndexError, TypeError):
+            return
+        if self._gate is not None and not self._gate.armed:
+            self._set_status("write gate is locked")
+            return
+        self.dismiss(WholeBankChoice(companion.index, target.id, True, self._mode))
+
     def action_write(self) -> None:
         if self._gate is not None and not self._gate.armed:
             self._set_status("write gate is locked")
@@ -479,6 +641,8 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
             "b  switch the target bank (RAM 1/2/3, Card)\n"
             "m  cycle the import mode: as-is, self-contained 1:1, "
             "self-contained packed\n"
+            "x  offer the file's companion banks, each writing into the RAM "
+            "bank the source's parts name (one gated write per bank)\n"
             "w  arm/lock the write gate\n"
             "c  save the bank to the local cache only (no unit write)\n"
             "ctrl+s  write the whole bank to the target (gate must be armed)\n"
@@ -489,7 +653,11 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
             "ROM references stay in ROM.\n\n"
             "The self-contained modes write only the performances whose parts\n"
             "are all self or ROM: 1:1 keeps their own slots, packed re-slots\n"
-            "them 0..n-1 and defragments the patches beneath them."
+            "them 0..n-1 and defragments the patches beneath them.\n\n"
+            "A companion write is the same fenced whole-bank write as ctrl+s.\n"
+            "It is one bank at a time: picking a companion writes that bank\n"
+            "only, never the first one with it, and the target may be changed\n"
+            "from the suggested bank. Nothing is repointed automatically."
         )
         self.app.push_screen(ReportScreen("Whole bank import", text))
 
