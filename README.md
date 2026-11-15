@@ -541,9 +541,12 @@ opens `WholeBankImportScreen`:
   (every performance stays on the target and the patches it names in other
   writable banks go to a RAM bank, repointed there), or a self-contained
   split (the performances that point outside the target move to the RAM bank
-  with all their patches, so both banks are self-contained; a split that
-  needs more banks than the one offered is refused and nothing is written);
-- `n` offers the next pass: the contained performances no earlier pass has
+  with all their patches, so both banks are self-contained; when the split
+  needs more banks than the one offered, the groups that fit are written and
+  the rest wait for the next card);
+- `n` offers the next pass: for a split, switch the card on the unit (select
+  it on the HCard and press C) and press n to write the next group onto that
+  card; otherwise it offers the contained performances no earlier pass has
   written, into a fresh target;
 - `x` offers the file's companion banks, each writing into the RAM bank the
   source's parts name;

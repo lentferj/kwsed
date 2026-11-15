@@ -300,9 +300,15 @@ The split is planned over the target plus the offered RAM bank with
 `partition_self_contained_split`. It is partitioned across as many banks
 as it needs, greedily, by performance count (50) and distinct patch count
 (35); a performance whose patch set alone exceeds the patch budget still
-gets its own pass. If the banks offered cannot hold it, the write is
-refused with the number of banks needed and nothing is written. The
-patches-only kind is a single-bank overflow and is never refused on size.
+gets its own pass. A partition never assigns two groups to one bank. When
+the banks offered cannot hold every group, the groups that fit are written,
+the unwritten source slots are kept in the import session, and the screen
+asks for the card to be switched: `n` then packs one more group into
+whatever card is in the slot, repeating until nothing remains. Nothing is
+dropped and no earlier group is overwritten. A split that cannot be planned
+at all (a patch it names is not loaded, or one performance alone exceeds a
+bank) is refused before any write. The patches-only kind is a single-bank
+overflow and is never refused on size.
 
 ### 6.8 Whole-bank write and the cached bank
 
