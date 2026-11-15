@@ -410,3 +410,80 @@ async def test_capture_caches_bankstore(tmp_path):
         assert loaded.waveseq is not None
         assert len(loaded.waveseq) == rec.WAVESEQ_BANK_SIZE
         assert loaded.waveseq == src.waveseq
+
+
+class TestSearchCaptured:
+    """A captured bank's names are findable, though they are not the catalog."""
+
+    def _bank(self, performances=None, patches=None):
+        return cards.CapturedBank(
+            number=29,
+            name="",
+            captured_at="2026-11-15T00:00:00+00:00",
+            performances=(
+                {3: "Harbour Slate", 24: "Ultrasynth Bass"}
+                if performances is None
+                else performances
+            ),
+            patches=(
+                {0: "Anchor Pad", 12: "Ultrasynth Lead"} if patches is None else patches
+            ),
+        )
+
+    def test_both_kinds_match_case_insensitively(self):
+        rows = cards.search_captured(self._bank(), "ultrasynth", label="Card 29")
+        assert rows == [
+            ("Card 29", banks.Kind.PERFORMANCE, 24, "Ultrasynth Bass"),
+            ("Card 29", banks.Kind.PATCH, 12, "Ultrasynth Lead"),
+        ]
+
+    def test_the_label_is_the_callers(self):
+        rows = cards.search_captured(self._bank(), "harbour", label="Beige card")
+        assert rows == [("Beige card", banks.Kind.PERFORMANCE, 3, "Harbour Slate")]
+
+    def test_an_empty_needle_matches_nothing(self):
+        assert cards.search_captured(self._bank(), "   ", label="Card 29") == []
+
+    def test_unnamed_slots_never_match(self):
+        bank = self._bank(performances={3: "", 24: "Ultrasynth Bass"})
+        rows = cards.search_captured(bank, "", label="Card 29")
+        assert rows == []
+
+
+def test_search_hits_include_a_captured_card_next_to_the_catalog():
+    """A name on a captured card is listed even when another bank matches."""
+    catalog = cat.Catalog(
+        [cat.Entry("RAM1", 24, "Ultrasynth Bass", banks.Kind.PERFORMANCE)]
+    )
+    app = KwsedApp(DemoDevice(), catalog=catalog)
+    app._archive = {
+        29: cards.CapturedBank(
+            number=29,
+            name="",
+            captured_at="2026-11-15T00:00:00+00:00",
+            performances={24: "Ultrasynth Bass"},
+            patches={},
+        )
+    }
+    hits = app._search_hits("Ultrasynth")
+    assert ("RAM1", banks.Kind.PERFORMANCE, 24, "Ultrasynth Bass") in hits
+    assert ("Card 29", banks.Kind.PERFORMANCE, 24, "Ultrasynth Bass") in hits
+
+
+def test_the_active_cards_row_is_not_repeated_from_the_archive():
+    catalog = cat.Catalog(
+        [cat.Entry("CARD", 24, "Ultrasynth Bass", banks.Kind.PERFORMANCE)]
+    )
+    app = KwsedApp(DemoDevice(), catalog=catalog)
+    app._active_card = 29
+    app._archive = {
+        29: cards.CapturedBank(
+            number=29,
+            name="",
+            captured_at="2026-11-15T00:00:00+00:00",
+            performances={24: "Ultrasynth Bass"},
+            patches={},
+        )
+    }
+    hits = app._search_hits("Ultrasynth")
+    assert hits == [("CARD", banks.Kind.PERFORMANCE, 24, "Ultrasynth Bass")]

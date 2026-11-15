@@ -318,7 +318,28 @@ def _cmd_list(_device: Any, args: argparse.Namespace) -> None:
 
 def _cmd_find(_device: Any, args: argparse.Namespace) -> None:
     catalog = _catalog(args)
-    hits = catalog.search(args.name)
+    hits = list(catalog.search(args.name))
+    # Captured card banks are not in the catalog; their names live in the
+    # archive, and a name on a captured card is as findable as any other.
+    from kws import cards as _cards
+
+    # The active card's names are already in the catalog under CARD; its
+    # archive row would say the same thing a second time.
+    active = _cards.load_active()
+    seen = set(hits)
+    for number, captured in sorted(_cards.load().items()):
+        for row in _cards.search_captured(
+            captured, args.name, label=f"Card {number:02d}"
+        ):
+            if number == active and any(
+                bank_id == "CARD" and (kind, num, name) == (row[1], row[2], row[3])
+                for bank_id, kind, num, name in hits
+            ):
+                continue
+            if row in seen:
+                continue
+            seen.add(row)
+            hits.append(row)
     if not hits:
         print(f"nothing matching {args.name!r}", file=sys.stderr)
         return

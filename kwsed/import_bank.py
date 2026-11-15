@@ -314,6 +314,7 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
         hcard_banks: Optional[Sequence[Any]] = None,
         mode: Optional[ImportMode] = None,
         pass_state: Optional[ImportPassState] = None,
+        notice: str = "",
     ) -> None:
         super().__init__()
         self._path = path
@@ -329,6 +330,10 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
             self._source_index = pass_state.source_index
         #: Unique per screen visit; see _session_key.
         self._session_token: Optional[str] = None
+        #: One focused line that wins over the pass line on mount: the app
+        #: re-opened the screen after a write that left work to finish here
+        #: (a write whose parts name a bank the same file also carries).
+        self._notice = notice
         self._audit: Optional[containment.ContainmentAudit] = None
         #: The bank the excess patches go to (option b), or "" for none.
         self._overflow_index: Optional[int] = None
@@ -1022,6 +1027,12 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
                 table.focus()
             except Exception:
                 _ = None
+        if self._notice:
+            # The notice wins over the pass line once: this visit exists to
+            # finish a write, and that one line is the whole point of it.
+            self._set_status(self._notice)
+            return
+        if slots:
             pass_line = self._pass_line()
             if pass_line:
                 self._set_status(pass_line)

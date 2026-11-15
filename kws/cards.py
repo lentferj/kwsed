@@ -62,6 +62,7 @@ __all__ = [
     "cards",
     "card",
     "card_words",
+    "search_captured",
     "is_user",
     "bank_numbers",
     "count_for",
@@ -224,6 +225,32 @@ def is_user(number: int) -> bool:
 def bank_numbers() -> List[int]:
     """00-39, in order."""
     return [entry.number for entry in CARDS]
+
+
+def search_captured(
+    bank: Any, needle: str, *, label: str
+) -> List[Tuple[str, str, int, str]]:
+    """Search one captured bank's slot names.
+
+    Returns ``(label, kind, number, name)`` rows, the same shape
+    :meth:`vinsynlib.catalog.Catalog.search` returns, so a caller can put
+    them in one list. Card archives are not part of the catalog -- a
+    captured bank's names live in the archive file -- and searching only
+    the catalog made a performance on a captured card unfindable by name.
+    """
+    wanted = needle.strip().lower()
+    if not wanted:
+        return []
+    out: List[Tuple[str, str, int, str]] = []
+    for kind, names in (
+        (Kind.PERFORMANCE, getattr(bank, "performances", {}) or {}),
+        (Kind.PATCH, getattr(bank, "patches", {}) or {}),
+    ):
+        for number in sorted(names):
+            name = str(names[number] or "")
+            if name and wanted in name.lower():
+                out.append((label, kind, int(number), name))
+    return out
 
 
 def card_words(captured: bool, needs_pcm: Optional[str]) -> str:

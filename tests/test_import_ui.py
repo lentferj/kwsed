@@ -41,7 +41,11 @@ from kwsed.app import (
 from kwsed.demo import DemoDevice
 from kwsed.file_picker import FilePickerScreen
 from kwsed.gate import EditGate
-from kwsed.import_bank import WholeBankChoice, WholeBankImportScreen
+from kwsed.import_bank import (
+    OVERFLOW_PATCHES,
+    WholeBankChoice,
+    WholeBankImportScreen,
+)
 from kwsed.import_companions import Companion
 from kwsed.import_screen import BankImportScreen
 from kwsed.import_single import SingleImportChoice, SingleImportScreen
@@ -2377,6 +2381,142 @@ async def test_overflow_writes_the_ram_bank_first_then_the_target(
     assert all(k["before_blocks"] is None for _n, k in writes)
     # The status names both banks and the patches that moved.
     assert any("RAM 3" in s and "patches" in s for s in statuses), statuses
+
+
+def _two_bank_file() -> list[Any]:
+    """A two-bank file: the main bank's performances name RAM 2.
+
+    Every name is invented. Slots 2 and 6 spend one part each on RAM 2
+    (bank number 1), so an as-is write leaves two parts pointing at a bank
+    the unit has not been given -- while the file carries that bank. The
+    RAM 2 bank holds the patches those parts name, so an overflow plan can
+    move them.
+    """
+    from tests.test_bankbuild import make_patch, make_performance
+
+    perfs = [_empty_perf() for _ in range(50)]
+    perfs[2] = make_performance("Harbor Gate", ((1, 2),))
+    perfs[6] = make_performance("Lantern Field", ((1, 5),))
+    main = deps.Source(
+        scope_id="RAM1",
+        performances=perfs,
+        patches=[make_patch("Quarry Seam")] + [bytes(PATCH_RECORD_SIZE)] * 34,
+        waveseq=None,
+    )
+    ram2 = _make_bank(scope="RAM2", active_slots=[])
+    ram2.source.patches[2] = make_patch("Tide Chart")
+    ram2.source.patches[5] = make_patch("Gull Wing")
+    return [
+        importers.ImportedBank(
+            label="Main bank", scope="RAM1", format="sysex", source=main
+        ),
+        ram2,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_as_is_write_reopens_for_the_carried_companion(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """The as-is write ends, then the screen comes back with the one line.
+
+    Two parts name RAM 2 and the file carries RAM 2, so the write leaves
+    them pointing at an empty unit bank. The re-opened screen says how to
+    finish: write the companion with ``x``, or repoint with ``o``.
+    """
+    app, recorded = _armed_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(bankstore, "save", lambda *a, **k: None)
+    file_banks = _two_bank_file()
+    choice = WholeBankChoice(
+        0, "RAM3", True, perfcopy.ImportMode.AS_IS, "as-is-session", True
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._import_whole_bank_write(
+            file_banks[0], choice, banks_list=file_banks, path="two.syx"
+        )
+        screen = None
+        for _ in range(100):
+            await pilot.pause()
+            open_screens = [
+                s for s in app.screen_stack if isinstance(s, WholeBankImportScreen)
+            ]
+            if open_screens:
+                screen = open_screens[-1]
+                break
+        await _settle(pilot)
+        assert screen is not None, "the import screen was not re-opened"
+        status = _static_text(screen, "whole-bank-status")
+        assert "press x" in status
+        assert "2 parts" in status
+        assert "RAM 2" in status
+    # The write itself is unchanged: exactly one bundle, backed up.
+    assert app.device.bundle_write_count == 1
+    assert recorded, "the as-is write is recorded, exactly once"
+    backup_path = recorded[0]["backup"]
+    assert isinstance(backup_path, str) and os.path.exists(backup_path)
+
+
+@pytest.mark.asyncio
+async def test_patches_only_overflow_write_reopens_nothing(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """A patches-only overflow repoints the parts itself: nothing to finish."""
+    from kws import backup as _backup
+
+    app = _make_app(tmp_path, bankstore_dir=str(tmp_path / "store"))
+    file_banks = _two_bank_file()
+    app._sources["RAM2"] = file_banks[1].source
+    app._sources["CARD"] = _make_bank(scope="CARD", active_slots=[]).source
+    app._write_gate = EditGate(armed=True)
+    app.notify_status = lambda *a, **k: None  # type: ignore[method-assign]
+    backup_dir = str(tmp_path / "backups")
+    os.makedirs(backup_dir, exist_ok=True)
+    monkeypatch.setattr(_backup, "default_dir", lambda root=None: backup_dir)
+    monkeypatch.setattr(bankstore, "save", lambda *a, **k: None)
+
+    def _no_record(_result: Any) -> None:
+        return None
+
+    app._record_write = _no_record  # type: ignore[method-assign]
+    choice = WholeBankChoice(
+        0,
+        "CARD",
+        True,
+        perfcopy.ImportMode.AS_IS,
+        "overflow-session",
+        True,
+        "RAM3",
+        OVERFLOW_PATCHES,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._import_whole_bank_write(
+            file_banks[0], choice, banks_list=file_banks, path="two.syx"
+        )
+        await _settle(pilot, times=60)
+    # The overflow bank went out first, then the target; no screen returned.
+    assert app.device.bundle_write_count == 2
+    assert not any(isinstance(s, WholeBankImportScreen) for s in app.screen_stack)
+
+
+@pytest.mark.asyncio
+async def test_as_is_write_of_a_one_bank_file_reopens_nothing(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """Without the companion in the file there is nothing to offer."""
+    app, _recorded = _armed_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(bankstore, "save", lambda *a, **k: None)
+    bank = _mixed_bank()
+    choice = WholeBankChoice(
+        0, "RAM3", True, perfcopy.ImportMode.AS_IS, "one-bank-session", True
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._import_whole_bank_write(bank, choice, banks_list=[bank], path="one.syx")
+        await _settle(pilot, times=60)
+    assert app.device.bundle_write_count == 1
+    assert not any(isinstance(s, WholeBankImportScreen) for s in app.screen_stack)
 
 
 def _split_file_banks() -> list[Any]:

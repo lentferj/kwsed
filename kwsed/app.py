@@ -104,6 +104,7 @@ from kwsed.import_bank import (
     OVERFLOW_SELF_CONTAINED,
     ImportPassState,
     WholeBankImportScreen,
+    _entry_bank,
 )
 from kwsed.import_single import SingleImportScreen
 from kwsed.import_source import (
@@ -5692,9 +5693,101 @@ class KwsedApp(App[None]):
         mode = getattr(choice, "mode", perfcopy.ImportMode.AS_IS)
         session_key = str(getattr(choice, "session_key", "") or "")
         if mode is perfcopy.ImportMode.AS_IS or not session_key:
+            # An as-is (or sessionless) write leaves every part pointing
+            # where the file points; the file may carry the bank they name.
+            self._offer_companions_after_write(choice, None, banks_list, path)
             return
         self._import_pass_after_write(
             choice, session_key, built, into, banks_list, path, mode
+        )
+
+    @staticmethod
+    def _import_left_dangling(choice: Any) -> bool:
+        """Whether this write left parts pointing at another bank."""
+        kind = str(
+            getattr(choice, "overflow_kind", OVERFLOW_PATCHES) or OVERFLOW_PATCHES
+        )
+        if kind in (OVERFLOW_SELF_CONTAINED, OVERFLOW_CARDS_ONLY):
+            # The performances that pointed outside travelled with all
+            # their patches: both banks are self-contained already.
+            return False
+        # A patches-only overflow wrote the patches and repointed the
+        # parts at them: complete as well.
+        return not str(getattr(choice, "overflow_bank", "") or "")
+
+    def _companions_named_by_parts(
+        self, bank: Any, banks_list: Sequence[Any], source_index: int
+    ) -> List[Tuple[int, int, Any]]:
+        """``(part count, file index, bank)`` for companions the parts name."""
+        from kws import containment
+
+        try:
+            scope = str(bank.scope)
+            sources = dict(self._sources_with_store())
+            sources[scope] = bank.source
+            audit = containment.audit_containment(sources, scope)
+        except (LookupError, ValueError, TypeError, AttributeError):
+            return []
+        named: List[Tuple[int, int, Any]] = []
+        for index, entry in enumerate(banks_list):
+            if index == source_index or entry is bank:
+                continue
+            companion = _entry_bank(entry)
+            if companion is None:
+                continue
+            count = audit.parts_per_bank.get(companion.number, 0)
+            if count:
+                named.append((count, index, companion))
+        return named
+
+    def _offer_companions_after_write(
+        self,
+        choice: Any,
+        bank: Any,
+        banks_list: Optional[Sequence[Any]],
+        path: str,
+    ) -> None:
+        """Re-offer the import screen when the file carries the named bank.
+
+        An as-is write sends every part pointing where the file points, and
+        the screen that said so is gone by the time ctrl+s lands. When a
+        part names a bank the unit has not been given -- but the same file
+        also carries -- those performances are dead until the companion is
+        written too, so the screen comes back with one focused line: press
+        ``x`` to write the companion bank, or ``o`` for a self-contained
+        pass that repoints the parts.
+        """
+        if not self._import_left_dangling(choice):
+            return
+        if not getattr(self, "is_running", False) or not banks_list or not path:
+            return
+        try:
+            source_index = int(getattr(choice, "source_index", 0) or 0)
+        except (TypeError, ValueError):
+            return
+        if bank is None:
+            try:
+                bank = banks_list[source_index]
+            except (IndexError, TypeError):
+                return
+        named = self._companions_named_by_parts(bank, banks_list, source_index)
+        if not named:
+            return
+        count, _index, companion = max(named, key=lambda item: (item[0], -item[1]))
+        notice = (
+            f"{count} parts name {companion.label}, and this file carries "
+            "that bank too — press x to write it, or o for a self-contained "
+            "pass that repoints them"
+        )
+        mode = getattr(choice, "mode", perfcopy.ImportMode.AS_IS)
+        session_key = str(getattr(choice, "session_key", "") or "")
+        if session_key:
+            # The screen comes back showing the bank that was written, so
+            # ``x`` offers the companions of the same source.
+            state = self._import_passes.setdefault(session_key, {})
+            state.setdefault("source_index", source_index)
+        self._reopen_whole_bank_import(
+            banks_list, path, session_key, mode, notice=notice
         )
 
     def _write_with_overflow(
@@ -6311,9 +6404,19 @@ class KwsedApp(App[None]):
             targets.append(into)
 
     def _reopen_whole_bank_import(
-        self, banks_list: Sequence[Any], path: str, key: str, mode: Any
+        self,
+        banks_list: Sequence[Any],
+        path: str,
+        key: str,
+        mode: Any,
+        notice: str = "",
     ) -> None:
-        """Offer the next pass on the screen, with the session's pass state."""
+        """Offer the next pass on the screen, with the session's pass state.
+
+        ``notice`` is one plain line the screen shows instead of its pass
+        line once: how to finish a write that left parts pointing at a bank
+        the file also carries.
+        """
         state = self._import_passes.get(key) or {}
         pass_kind = str(state.get("pass_kind") or "")
         split_state = pass_kind in ("split", OVERFLOW_CARDS_ONLY)
@@ -6338,6 +6441,7 @@ class KwsedApp(App[None]):
                     split_kind=pass_kind if split_state else "split",
                     source_index=int(state.get("source_index") or 0),
                 ),
+                notice=notice,
             ),
             lambda picked: self._import_whole_bank_chosen(banks_list, picked, path),
         )
@@ -9906,11 +10010,49 @@ class KwsedApp(App[None]):
                 return
             self.action_scan_device()
 
+    def _search_hits(self, text: str) -> List[Tuple[str, str, int, str]]:
+        """Every name matching ``text``: catalog, HCard and physical cards.
+
+        The catalog carries the printed list and the live names of the
+        resident banks. A captured card bank's names live in the archive
+        instead, so searching only the catalog made a performance on a
+        captured card unfindable by name. Archive rows are labelled with
+        the card, and a slot the catalog already answered is not repeated.
+        """
+        rows: List[Tuple[str, str, int, str]] = list(self.catalog.search(text))
+        # A slot the catalog already answered for the active card must not
+        # be repeated under the archive's label; every other match is its
+        # own bank's row, however similar the names are.
+        seen = set(rows)
+        for number in sorted(self._archive):
+            captured = self._archive[number]
+            for row in _cards.search_captured(
+                captured, text, label=f"Card {number:02d}"
+            ):
+                if number == self._active_card and any(
+                    bank_id == "CARD" and (kind, num, name) == (row[1], row[2], row[3])
+                    for bank_id, kind, num, name in rows
+                ):
+                    continue
+                if row in seen:
+                    continue
+                seen.add(row)
+                rows.append(row)
+        for card_id in sorted(self._physical):
+            card = self._physical[card_id]
+            label = getattr(card, "label", "") or card_id
+            for row in _cards.search_captured(card, text, label=label):
+                if row in seen:
+                    continue
+                seen.add(row)
+                rows.append(row)
+        return rows
+
     def action_search(self) -> None:
         def done(text: Optional[str]) -> None:
             if not text:
                 return
-            hits = self.catalog.search(text)
+            hits = self._search_hits(text)
             if not hits:
                 self.notify_status(f"nothing matching {text!r}")
                 return
