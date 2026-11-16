@@ -30,6 +30,13 @@ thing must fingerprint identically; any change that alters what is written
 must change the fingerprint. The canonical encoding is versioned, sorted and
 length-prefixed so a rename, a reordering or a concatenation ambiguity cannot
 make two different plans look alike.
+
+**One approval, one sequence.** A minted approval covers exactly one
+finalized sequence: the ordered write list of one :class:`WholeBankIntent`
+(an overflow bank plus its target, a split's groups in order, or the single
+plain, companion or continuation write). A chain of companion writes
+answered one at a time is not one approval -- each answer finalizes its own
+plan and mints its own token for it.
 """
 
 from __future__ import annotations
@@ -61,6 +68,7 @@ __all__ = [
     "OVERFLOW_PATCHES",
     "OVERFLOW_SELF_CONTAINED",
     "source_digest",
+    "sources_digest",
     "canonical_bytes",
     "fingerprint",
     "digest_map",
@@ -125,7 +133,24 @@ class BankWriteIntent:
 
 @dataclass(frozen=True)
 class WholeBankIntent:
-    """A finalized whole-bank request: source, choices, and ordered writes."""
+    """A finalized whole-bank request: source, choices, and ordered writes.
+
+    Token granularity: one approval covers exactly the ordered
+    ``writes`` list this intent carries, and nothing else. When a
+    companion chain is answered one choice at a time, each answer is a
+    finalized plan of its own and mints its own token; no single token
+    covers writes the person has not yet been shown and answered for.
+
+    ``source_digest`` digests the selected source's own records.
+    ``sources_digest`` digests every source the planners plan from --
+    including the sibling banks whose patch and wave-sequence records an
+    overflow or split copies into its writes -- so a sibling record
+    cannot change what is written while the fingerprint stands still.
+    ``skipped_banks`` records the physical ids an earlier partial
+    attempt already landed, so a retry's token is a different plan from
+    the first attempt's even where the write list is the same: the
+    first attempt's consumed token cannot be replayed for the remainder.
+    """
 
     source_id: str
     source_digest: str
@@ -135,6 +160,15 @@ class WholeBankIntent:
     preflight_answer: str = ""
     session_id: str = ""
     pass_slots: Tuple[int, ...] = ()
+    sources_digest: str = ""
+    skipped_banks: Tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        # A retry's skipped set is a set of banks, not a sequence: the
+        # same attempt recorded in a different order is the same plan.
+        object.__setattr__(
+            self, "skipped_banks", tuple(sorted(set(self.skipped_banks)))
+        )
 
 
 @dataclass(frozen=True)
@@ -181,6 +215,33 @@ def source_digest(
     return hashlib.sha256(_length_prefixed(parts)).hexdigest()
 
 
+def sources_digest(sources: Mapping[str, deps.Source]) -> str:
+    """A stable digest of every source record the planners plan from.
+
+    An overflow or split copies sibling banks' patch and wave-sequence
+    records into its writes, so the selected source's own digest does
+    not cover everything the bytes depend on: a sibling record edited
+    while the selected bank stayed put would change what is written
+    without changing the old fingerprint. This digests every scope in
+    the map -- each scope's records through :func:`source_digest`,
+    scopes sorted, the scope name length-prefixed with its digest -- so
+    the same records in a differently ordered dict digest the same, and
+    a changed record anywhere, or a scope added or renamed, changes it.
+    """
+    parts: list[bytes] = []
+    for scope in sorted(sources):
+        source = sources[scope]
+        per_source = source_digest(
+            getattr(source, "performances", ()) or (),
+            getattr(source, "patches", ()) or (),
+            getattr(source, "waveseq", None),
+        )
+        parts.append(
+            _length_prefixed((str(scope).encode("utf-8"), bytes.fromhex(per_source)))
+        )
+    return hashlib.sha256(_length_prefixed(parts)).hexdigest()
+
+
 def _bank_dict(bank: BankWriteIntent) -> Dict[str, Any]:
     return {
         "bank_id": bank.bank_id,
@@ -198,11 +259,15 @@ def _intent_dict(intent: WholeBankIntent) -> Dict[str, Any]:
         "schema": INTENT_SCHEMA,
         "source_id": intent.source_id,
         "source_digest": intent.source_digest,
+        "sources_digest": intent.sources_digest,
         "mode": intent.mode,
         "overflow_kind": intent.overflow_kind,
         "preflight_answer": intent.preflight_answer,
         "session_id": intent.session_id,
         "pass_slots": list(intent.pass_slots),
+        # A retry that already landed some banks is a different plan
+        # from the first attempt, and from a retry that skipped others.
+        "skipped_banks": list(intent.skipped_banks),
         # Write order is part of the plan: companions before the source
         # is a different request from the source before them.
         "writes": [_bank_dict(bank) for bank in intent.writes],
@@ -596,6 +661,7 @@ def build_intent(
     pass_slots: Sequence[int] = (),
     companion_only: bool = False,
     companion_all_init: bool = False,
+    skipped_banks: Sequence[str] = (),
 ) -> WholeBankIntent:
     """The finalized intent behind one whole-bank choice, from the planners.
 
@@ -622,6 +688,29 @@ def build_intent(
 
     A plan the planners refuse raises with their own reasons; nothing is
     approved for a write that cannot be planned.
+
+    Token granularity: one approval is one ordered write list -- the
+    sequence this builder returns, and nothing else. When a companion
+    chain is answered one choice at a time, each answer finalizes one
+    plan here and mints its own token for it; the next answer finalizes
+    and mints the next.
+
+    ``skipped_banks`` names the physical banks an earlier partial
+    attempt already landed; the app's session state and the screen's
+    pass state both carry it, so a retry's mint and the write
+    boundary's rebuild derive the same set. The banks stay in
+    ``writes`` -- the write list is the choice's plan -- but the retry's
+    token differs from the first attempt's, so a consumed token cannot
+    be replayed for the remainder, and the app can see which banks the
+    retry is not writing again. Ordering does not matter here: the
+    builder normalises them sorted.
+
+    The intent's digests cover every record the bytes depend on:
+    ``source_digest`` is the selected source's own records;
+    ``sources_digest`` covers every scope in ``sources`` -- a sibling
+    bank's patch or wave-sequence record an overflow or split copies
+    into its writes is planned input too, and changing it changes the
+    fingerprint even where the write digests stand still.
     """
     mode_name = _mode_name(mode)
     import_mode = (
@@ -669,10 +758,12 @@ def build_intent(
         source_digest=source_digest(
             source.performances, source.patches, source.waveseq
         ),
+        sources_digest=sources_digest(sources),
         mode=mode_name,
         writes=writes,
         overflow_kind=recorded_kind,
         preflight_answer=preflight_answer,
         session_id=session_id,
         pass_slots=slots,
+        skipped_banks=tuple(str(bank) for bank in skipped_banks),
     )

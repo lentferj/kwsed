@@ -4948,11 +4948,13 @@ async def test_overflow_failure_on_the_target_keeps_the_overflow_bank(
         "RAM3",
         OVERFLOW_PATCHES,
     )
+    # The first attempt's token, held so the replay refusal can use it.
+    first = _approved(choice, bank, [bank], "two.syx")
     async with app.run_test() as pilot:
         await pilot.pause()
         app._import_whole_bank_write(
             bank,
-            _approved(choice, bank, [bank], "two.syx"),
+            first,
             banks_list=[bank],
             path="two.syx",
         )
@@ -4985,16 +4987,42 @@ async def test_overflow_failure_on_the_target_keeps_the_overflow_bank(
         assert app._import_passes["overflow-partial"]["overflow_written"] == "RAM3"
 
         # The retry: the target only, and the status says so up front.
+        # The app mints the retry token from its own session state (P7b):
+        # it names the landed overflow bank in ``skipped_banks``, which
+        # is exactly what the boundary rebuilds, so the token validates.
         fails["armed"] = False
+        retry_approval = app._mint_whole_bank_approval(bank, choice, [bank], "two.syx")
+        assert retry_approval is not None
         app._import_whole_bank_write(
             bank,
-            # A retry is a new approved request: the first token was spent.
-            _approved(choice, bank, [bank], "two.syx"),
+            replace(choice, approval=retry_approval),
             banks_list=[bank],
             path="two.syx",
         )
         await _wait_for_writes(app, pilot, 2)
         await _settle(pilot)
+
+        # A token minted without the skip state is refused for that
+        # retry: the first attempt's plan is not the remainder's plan,
+        # and a mint that ignores the session's landed banks is a
+        # different fingerprint from the rebuild.
+        stale = _approved(choice, bank, [bank], "two.syx")
+        before = len(calls)
+        app._import_whole_bank_write(bank, stale, banks_list=[bank], path="two.syx")
+        assert len(calls) == before, "a skip-less mint must not reach the unit"
+        assert any(
+            "the plan approval does not match this write" in s for s in statuses
+        ), statuses
+        assert stale.approval is not None
+        assert stale.approval.nonce not in app._consumed_plan_nonces, (
+            "a refused mint spends no nonce"
+        )
+
+        # The replayed first token is refused too: it was spent on the
+        # first attempt, and its plan names no skipped bank anyway.
+        before = len(calls)
+        app._import_whole_bank_write(bank, first, banks_list=[bank], path="two.syx")
+        assert len(calls) == before, "the first token must not authorize the retry"
 
     assert calls == [ram3_no, card_no]
     assert any(
@@ -5655,6 +5683,203 @@ async def test_whole_write_approval_nonce_is_one_shot(
         assert calls == [1]
         assert len(recorded) == 1
         assert any("already used" in s for s in statuses), statuses
+
+
+@pytest.mark.asyncio
+async def test_screen_mint_and_app_rebuild_agree_on_skipped_banks(
+    tmp_path: Any,
+) -> None:
+    """The screen's retry token and the boundary's rebuild carry the same skips.
+
+    The screen mints from the pass state the app handed it; the app
+    derives the same set from its own session state at the boundary.
+    Both must land on the same ``skipped_banks``, or every retry of a
+    partial attempt would be refused (P7b).
+    """
+    from kwsed.import_bank import ImportPassState
+    from kwsed.import_intent import approval_matches
+
+    app = KwsedApp(DemoDevice())
+    bank = _mixed_bank()
+    key = "two.syx|RAM1|skip-agree"
+    # The session state the partial overflow recorded: the landed bank.
+    app._import_passes[key] = {"overflow_written": "RAM3"}
+    assert app._skipped_banks_for(key) == ("RAM3",)
+    assert app._skipped_banks_for("") == (), "a sessionless write skips nothing"
+    choice = WholeBankChoice(
+        0,
+        "CARD",
+        True,
+        perfcopy.ImportMode.AS_IS,
+        key,
+        True,
+        "RAM3",
+        OVERFLOW_PATCHES,
+    )
+    screen = WholeBankImportScreen(
+        path="two.syx",
+        banks=[bank],
+        gate=app._write_gate,
+        pass_state=ImportPassState(session_key=key, skipped_banks=("RAM3",)),
+    )
+    approval = screen._mint_for_choice(choice)
+    assert approval is not None
+    intent_and_sources = app._whole_bank_intent(
+        bank, replace(choice, approval=approval), [bank], "two.syx"
+    )
+    assert intent_and_sources is not None
+    intent, _sources = intent_and_sources
+    assert intent.skipped_banks == ("RAM3",)
+    assert approval_matches(approval, intent), "mint and rebuild agree"
+    # The nonce is consumed by the validated boundary, exactly once.
+    assert approval.nonce in app._consumed_plan_nonces
+    # A companion choice carries no session key: it skips nothing, even
+    # on a screen whose session has landed banks.
+    companion = WholeBankChoice(
+        0, "RAM3", True, perfcopy.ImportMode.AS_IS, "", companion_only=True
+    )
+    assert screen._mint_skipped_banks(companion) == ()
+
+
+@pytest.mark.asyncio
+async def test_whole_write_plans_from_the_snapshot_taken_at_the_boundary(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """The worker plans from the frozen snapshot, not the live sources (P7b).
+
+    The session's source bank is mutated after the approval is checked
+    but before the worker plans; the bytes written must still be the
+    approved plan's, built from the records the approval covered.
+    """
+    from kws import backup as _backup
+    from tests.test_bankbuild import make_patch, make_performance
+
+    app = _make_app(tmp_path, bankstore_dir=str(tmp_path / "store"))
+    app._write_gate = EditGate(armed=True)
+    monkeypatch.setattr(bankstore, "save", lambda *a, **k: None)
+    backup_dir = str(tmp_path / "backups")
+    os.makedirs(backup_dir, exist_ok=True)
+    monkeypatch.setattr(_backup, "default_dir", lambda root=None: backup_dir)
+    bank = _mixed_bank()
+    original_perfs = list(bank.source.performances)
+    original_patches = list(bank.source.patches)
+    # The approved plan, built from the records as they were validated.
+    expected = perfcopy.relocate_bank(bank.source, banks.bank("RAM3"))
+    mutated: dict[str, bool] = {"on": False}
+    statuses: list[str] = []
+
+    def _mutate_and_record(msg: str) -> None:
+        statuses.append(msg)
+        if not mutated["on"]:
+            # The pre-write status is the last main-thread step before
+            # the worker runs: mutating here is exactly the window the
+            # snapshot must close.
+            mutated["on"] = True
+            bank.source.performances[2] = make_performance("Late Arrival", ((0, 1),))
+            bank.source.patches[0] = make_patch("Late Patch")
+
+    app.notify_status = lambda msg, *a, **k: _mutate_and_record(str(msg))  # type: ignore[method-assign]
+    writes: list[dict[str, Any]] = []
+    original = app.device.write_bank_bundle
+
+    def recording(bank_number: int, **k: Any) -> dict[str, Any]:
+        writes.append(dict(k))
+        return cast(dict[str, Any], original(bank_number, **k))
+
+    app.device.write_bank_bundle = recording
+    app._record_write = lambda result: None  # type: ignore[method-assign,misc]
+    app._import_whole_bank_write(
+        bank,
+        _approved(WholeBankChoice(0, "RAM3", True, perfcopy.ImportMode.AS_IS), bank),
+        banks_list=[bank],
+        path="one.syx",
+    )
+    assert mutated["on"], "the mutation ran inside the boundary-to-worker window"
+    assert len(writes) == 1
+    assert writes[0]["performances"] == expected.performances
+    assert writes[0]["patches"] == expected.patches
+    assert writes[0]["waveseq"] == expected.waveseq
+    # The device stored the approved plan's bytes, not the mutated ones.
+    written = _written_perfs(app.device)
+    ram3 = banks.bank("RAM3").number
+    assert _perf_at(written, 2) == _as_written(original_perfs[2], {0: (ram3, 0)})
+    assert _patch_at(_written_patches(app.device), 0) == original_patches[0]
+
+
+@pytest.mark.asyncio
+async def test_c_saves_to_the_cache_without_minting_or_touching_the_unit(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """``c`` is cache-only: no token minted, no device calls (P7b).
+
+    A bank whose unit write cannot be planned still saves: the cache key
+    dismisses without minting, and the app takes the
+    ``write_to_unit=False`` branch before any approval check. The bank
+    here is genuinely unplannable for a unit write -- its performance
+    names its own bank's patch 0 and the file carries no patch bank, so
+    the planners refuse a self-contained write.
+    """
+    from kwsed import import_intent
+
+    app = KwsedApp(DemoDevice())
+    app._backup_dir = str(tmp_path / "backups")
+    store_dir = str(tmp_path / "store")
+    app._bankstore_dir = store_dir
+    saved: list[dict[str, Any]] = []
+
+    def fake_save(
+        scope_id: Any,
+        *,
+        performances: Any = None,
+        patches: Any = None,
+        waveseq: Any = None,
+        directory: Any = None,
+    ) -> None:
+        saved.append(
+            {
+                "scope": scope_id,
+                "performances": performances,
+                "patches": patches,
+                "waveseq": waveseq,
+                "directory": directory,
+            }
+        )
+
+    monkeypatch.setattr(bankstore, "save", fake_save)
+    statuses: list[str] = []
+    app.notify_status = lambda msg, *a, **k: statuses.append(str(msg))  # type: ignore[method-assign]
+    bank = _make_bank(scope="RAM1", active_slots=[3])
+    bank.source.patches = []
+    # The unit write really cannot be planned: the planners refuse it.
+    with pytest.raises(ValueError):
+        import_intent.build_intent(
+            source_id="one.syx|RAM1",
+            source_scope="RAM1",
+            sources={"RAM1": bank.source},
+            source=bank.source,
+            target=banks.bank("RAM3"),
+            mode=perfcopy.ImportMode.SELF_CONTAINED_1TO1,
+        )
+    file_banks = [bank]
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.push_screen(
+            WholeBankImportScreen(
+                path="one.syx", banks=file_banks, gate=app._write_gate
+            ),
+            lambda picked: app._import_whole_bank_chosen(file_banks, picked, "one.syx"),
+        )
+        await _settle(pilot)
+        await pilot.press("m")  # a self-contained mode: the unit write refuses
+        await pilot.press("c")
+        await _settle(pilot)
+    assert len(saved) == 1
+    assert saved[0]["scope"] == "RAM1"
+    assert saved[0]["directory"] == store_dir, "the cache path is unchanged"
+    assert saved[0]["performances"] is not None
+    assert app.device.bundle_write_count == 0
+    assert app.device.bundle_writes == []
+    assert any("cache RAM1" in s for s in statuses), statuses
 
 
 @pytest.mark.asyncio

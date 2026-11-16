@@ -976,8 +976,13 @@ async def test_companion_mints_an_approval_for_its_own_bank() -> None:
 
 
 @pytest.mark.asyncio
-async def test_cache_only_mints_an_approval_without_the_gate() -> None:
-    """``c`` caches only; it still carries the plan it was taken under."""
+async def test_cache_only_mints_no_approval_and_still_carries_the_choice() -> None:
+    """``c`` caches only: it writes no unit bank, so it mints no approval.
+
+    A cache-only save must work even where a unit write cannot be
+    planned, so the key dismisses without minting (P7b); the app takes
+    the ``write_to_unit=False`` branch before any approval check.
+    """
     banks_list = _fake_banks()
     gate = EditGate(armed=False)
     screen = WholeBankImportScreen(
@@ -998,8 +1003,7 @@ async def test_cache_only_mints_an_approval_without_the_gate() -> None:
     choice = result.get("value")
     assert isinstance(choice, WholeBankChoice)
     assert choice.write_to_unit is False
-    assert isinstance(choice.approval, import_intent.PlanApproval)
-    assert approval_matches(choice.approval, _rebuild_intent(banks_list, choice))
+    assert choice.approval is None, "cache-only writes nothing, so mints nothing"
 
 
 @pytest.mark.asyncio

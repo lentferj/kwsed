@@ -556,12 +556,14 @@ opens `WholeBankImportScreen`:
   the whole bank to the unit in one fenced bundle;
 - a write needs two approvals, not one: the write gate (`w`, or `--allow-write`)
   only says the session may write at all, while a per-plan approval names the
-  exact physical banks and kinds that will be written and in what order. One
-  approval covers one finalized plan (for example an overflow bank followed by
-  its target); a preflight's companion banks, each continuation pass and the
-  source bank each carry their own token. `--allow-write` opens the broad gate,
-  never a plan. Every bank in a plan is still separately read, backed up and
-  verified;
+  exact physical banks and kinds that will be written and in what order. Token
+  granularity follows the plan, not the wire: an overflow or split sequence is
+  approved as one ordered plan — one token covers, for example, the overflow
+  bank followed by its target, not one token per physical write — while a
+  companion chain is answered one choice at a time and mints one token per
+  answer, and each continuation pass (`n`) is its own approved request.
+  `--allow-write` opens the broad gate, never a plan. Every bank in a plan is
+  still separately read, backed up and verified;
 - interior `PartRef`/`WaveRef` bank numbers are relocated to the destination
   bank automatically; ROM references stay in ROM;
 - the reference rule is the same in all three modes: self-references move to

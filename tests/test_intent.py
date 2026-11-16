@@ -41,6 +41,7 @@ from kwsed.import_intent import (
     fingerprint,
     new_approval,
     source_digest,
+    sources_digest,
 )
 from tests.test_bankbuild import make_patch, make_performance
 
@@ -106,6 +107,19 @@ class TestEveryMaterialChangeChangesTheFingerprint:
         assert self._changed(source_id="file:other")
         assert self._changed(source_digest="e" * 64)
 
+    def test_the_whole_source_map_and_the_skipped_banks(self):
+        assert self._changed(sources_digest="f" * 64)
+        assert self._changed(skipped_banks=("CARD",))
+
+    def test_skipped_banks_are_order_insensitive(self):
+        assert fingerprint(_intent(skipped_banks=("CARD", "RAM2"))) == fingerprint(
+            _intent(skipped_banks=("RAM2", "CARD"))
+        )
+        # A bank listed twice is recorded once.
+        assert fingerprint(_intent(skipped_banks=("CARD", "CARD"))) == fingerprint(
+            _intent(skipped_banks=("CARD",))
+        )
+
     def test_mode_and_choices(self):
         assert self._changed(mode="self_contained_packed")
         assert self._changed(overflow_kind="self_contained")
@@ -169,6 +183,51 @@ class TestSourceDigest:
         assert source_digest([b"a"], [], None) != source_digest([b"b"], [], None)
         assert source_digest([], [b"p"], None) != source_digest([], [], None)
         assert source_digest([], [], None) != source_digest([], [], b"w")
+
+
+class TestSourcesDigest:
+    """The map the planners plan from, not only the selected bank (P7a)."""
+
+    def _map(self) -> Dict[str, deps.Source]:
+        sources, _source = _file()
+        return sources
+
+    def test_scope_order_does_not_matter(self):
+        sources = self._map()
+        reordered = {scope: sources[scope] for scope in reversed(list(sources))}
+        assert sources_digest(reordered) == sources_digest(sources)
+
+    def test_a_changed_sibling_record_changes_it(self):
+        sources = self._map()
+        changed = dict(sources)
+        changed["RAM2"] = deps.Source(
+            scope_id="RAM2",
+            performances=[],
+            patches=[make_patch("Dry Dock Grey")],
+            waveseq=None,
+        )
+        assert sources_digest(changed) != sources_digest(sources)
+
+    def test_a_changed_waveseq_record_changes_it(self):
+        sources = self._map()
+        changed = dict(sources)
+        changed["RAM2"] = deps.Source(
+            scope_id="RAM2",
+            performances=[],
+            patches=[make_patch("Quay Slate")],
+            waveseq=b"\x01" + bytes(r.WAVESEQ_BANK_SIZE - 1),
+        )
+        assert sources_digest(changed) != sources_digest(sources)
+
+    def test_a_renamed_scope_changes_it(self):
+        sources = self._map()
+        renamed = {"RAM9": sources.pop("RAM2"), "RAM1": sources["RAM1"]}
+        assert sources_digest(renamed) != sources_digest(self._map())
+
+    def test_a_missing_scope_changes_it(self):
+        assert sources_digest({"RAM1": self._map()["RAM1"]}) != sources_digest(
+            self._map()
+        )
 
 
 class TestApproval:
@@ -266,6 +325,8 @@ class TestBuildIntent:
         assert intent.source_digest == source_digest(
             args["source"].performances, args["source"].patches, None
         )
+        assert intent.sources_digest == sources_digest(args["sources"])
+        assert intent.skipped_banks == ()
 
     def test_patches_overflow_writes_the_overflow_bank_first(self):
         intent = build_intent(
@@ -457,6 +518,84 @@ class TestBuildIntent:
         )
         for variant in variants:
             assert fingerprint(build_intent(**variant)) != fingerprint(base)
+
+    def test_a_sibling_patch_change_changes_the_overflow_fingerprint(self):
+        """The planner copies the sibling's patches; their content counts.
+
+        The write digests name patch *slots*, not contents, so two files
+        whose plans are byte-for-byte the same must still differ when the
+        sibling's patch record differs -- that is the whole reason the
+        map the planners read is digested, not just the selected bank.
+        """
+        args = self._args(
+            mode=ImportMode.SELF_CONTAINED_PACKED,
+            overflow_kind="patches",
+            overflow_bank="RAM2",
+        )
+        base = build_intent(**args)
+        changed_sources = dict(args["sources"])
+        changed_sources["RAM2"] = deps.Source(
+            scope_id="RAM2",
+            performances=[],
+            patches=[make_patch("Dry Dock Grey")],
+            waveseq=None,
+        )
+        changed = build_intent(**{**args, "sources": changed_sources})
+        # Same plan: the same two banks, the same slots, in the same order.
+        assert changed.writes == base.writes
+        assert fingerprint(changed) != fingerprint(base)
+
+    def test_a_sibling_record_change_changes_the_split_fingerprint(self):
+        args = self._args(overflow_kind="self_contained", overflow_bank="RAM2")
+        base = build_intent(**args)
+        changed_sources = dict(args["sources"])
+        changed_sources["RAM2"] = deps.Source(
+            scope_id="RAM2",
+            performances=[],
+            patches=[make_patch("Quay Slate")],
+            waveseq=b"\x01" + bytes(r.WAVESEQ_BANK_SIZE - 1),
+        )
+        changed = build_intent(**{**args, "sources": changed_sources})
+        assert fingerprint(changed) != fingerprint(base)
+
+    def test_changing_only_the_selected_source_still_changes_it(self):
+        args = self._args()
+        base = build_intent(**args)
+        changed_sources = dict(args["sources"])
+        changed_sources["RAM1"] = deps.Source(
+            scope_id="RAM1",
+            performances=args["source"].performances,
+            patches=[make_patch(f"Tidewater Tone {index:02d}") for index in range(4)],
+            waveseq=None,
+        )
+        changed = build_intent(
+            **{**args, "sources": changed_sources, "source": changed_sources["RAM1"]}
+        )
+        assert fingerprint(changed) != fingerprint(base)
+
+    def test_the_same_records_in_a_differently_ordered_dict_digest_the_same(self):
+        args = self._args()
+        sources = args["sources"]
+        reordered = {scope: sources[scope] for scope in reversed(list(sources))}
+        first = build_intent(**args)
+        second = build_intent(**{**args, "sources": reordered})
+        assert fingerprint(first) == fingerprint(second)
+
+    def test_skipped_banks_change_the_fingerprint_and_are_order_insensitive(self):
+        args = self._args(
+            overflow_kind="patches",
+            overflow_bank="RAM2",
+        )
+        plain = build_intent(**args)
+        first = build_intent(**args, skipped_banks=("RAM2", "CARD"))
+        second = build_intent(**args, skipped_banks=("CARD", "RAM2"))
+        assert fingerprint(first) != fingerprint(plain)
+        assert fingerprint(first) == fingerprint(second)
+        assert first.skipped_banks == ("CARD", "RAM2")
+        assert list(json.loads(canonical_bytes(first))["skipped_banks"]) == [
+            "CARD",
+            "RAM2",
+        ]
 
     def test_an_overflow_kind_without_a_bank_is_no_overflow(self):
         # The choice's default kind with no bank chosen is a plain write;

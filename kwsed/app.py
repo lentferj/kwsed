@@ -426,6 +426,22 @@ class MultiBankOutcome:
         return self.error == "" and self.failed_bank is None
 
 
+@dataclass(frozen=True)
+class _FrozenPlanBank:
+    """The worker's view of the source bank: its scope, label and records.
+
+    The write worker must never read the session's live sources: a plan
+    the approval covered is built from a snapshot taken at the write
+    boundary, and this frozen stand-in carries the snapshot of the
+    source bank's own records into the worker, which plans and builds
+    from it (and from the frozen map the snapshot belongs to) alone.
+    """
+
+    label: str
+    scope: str
+    source: deps.Source
+
+
 class PerformancePickerScreen(ModalScreen[Optional[Tuple[int, int]]]):
     """Choose a Performance for a Multiset channel, with the browser's filters.
 
@@ -5718,6 +5734,16 @@ class KwsedApp(App[None]):
                 preflight_answer=str(getattr(choice, "preflight", "") or ""),
                 session_id=str(getattr(choice, "session_key", "") or ""),
                 pass_slots=self._intent_pass_slots(choice, sources, str(bank.scope)),
+                # The banks this session already landed are part of the
+                # plan: a retry's token is a different plan from the
+                # first attempt's even where the write list is the same,
+                # so the first attempt's consumed token cannot be
+                # replayed for the remainder. The screen mints from the
+                # same derivation (its pass state carries
+                # ``skipped_banks``); both must agree.
+                skipped_banks=self._skipped_banks_for(
+                    str(getattr(choice, "session_key", "") or "")
+                ),
                 companion_only=bool(getattr(choice, "companion_only", False)),
                 companion_all_init=companion_all_init,
             )
@@ -5799,6 +5825,12 @@ class KwsedApp(App[None]):
                 preflight_answer=str(getattr(choice, "preflight", "") or ""),
                 session_id=str(getattr(choice, "session_key", "") or ""),
                 pass_slots=self._intent_pass_slots(choice, sources, str(bank.scope)),
+                # The same skipped-bank derivation the write boundary
+                # rebuilds with, so a mint made here can never disagree
+                # with the check that follows it.
+                skipped_banks=self._skipped_banks_for(
+                    str(getattr(choice, "session_key", "") or "")
+                ),
                 companion_only=bool(getattr(choice, "companion_only", False)),
                 companion_all_init=companion_all_init,
             )
@@ -5808,6 +5840,64 @@ class KwsedApp(App[None]):
             )
             return None
         return import_intent.new_approval(intent)
+
+    def _frozen_source(self, source: deps.Source) -> deps.Source:
+        """A copy of ``source`` whose records no other code can change.
+
+        The record *lists* are what the planners walk (a session source's
+        list can be re-pointed by any later load), and each record and the
+        wave-sequence blob are copied as immutable ``bytes``, so a mutable
+        fixture record cannot be edited under the snapshot either.
+        ``bank_number`` travels with the copy: ``relocate_bank`` needs it
+        to recognise the source bank's own references.
+        """
+        return deps.Source(
+            scope_id=source.scope_id,
+            performances=[bytes(record) for record in source.performances or ()],
+            patches=[bytes(record) for record in source.patches or ()],
+            waveseq=None if source.waveseq is None else bytes(source.waveseq),
+            bank_number=source.bank_number,
+        )
+
+    def _frozen_plan_sources(
+        self, bank: Any, sources: Mapping[str, deps.Source]
+    ) -> Tuple[_FrozenPlanBank, Dict[str, deps.Source]]:
+        """Snapshot the plan's inputs once, on the main thread (P7b).
+
+        The token is validated against the live records, and the worker
+        must plan and build from exactly what was validated. Between the
+        two, other code can run -- another device worker's completion
+        lands on the main thread and may re-point a session source's
+        records -- so the whole-bank write carries this frozen snapshot
+        into the worker instead: every scope becomes a fresh
+        :class:`kws.deps.Source` with copied lists, and the source bank
+        becomes a frozen stand-in over its own snapshot, so the worker's
+        builders (``relocate_bank``, ``build_self_contained``,
+        ``build_overflow_import``, ``build_split_partition``) read only
+        records no other code can mutate. The session and cache updates
+        stay on the main thread, in ``done``; the worker still only talks
+        to the device.
+        """
+        frozen: Dict[str, deps.Source] = {}
+        for scope, source in sources.items():
+            frozen[scope] = self._frozen_source(source)
+        scope = str(getattr(bank, "scope", "") or "")
+        bank_source = getattr(bank, "source", None)
+        if bank_source is not None and scope and scope not in frozen:
+            frozen[scope] = self._frozen_source(bank_source)
+        snapshot = frozen.get(scope) or (
+            self._frozen_source(bank_source) if bank_source is not None else None
+        )
+        if snapshot is None:
+            raise ValueError("the write's source bank carries no records")
+        return (
+            _FrozenPlanBank(
+                label=str(getattr(bank, "label", "") or ""),
+                scope=scope,
+                source=snapshot,
+            ),
+            frozen,
+        )
 
     def _import_whole_bank_write(
         self,
@@ -5828,6 +5918,12 @@ class KwsedApp(App[None]):
             return
         from kws import banks as _banks
 
+        # The plan's inputs are frozen here, once, on the main thread:
+        # everything below -- the split planning and the worker's own
+        # planning and building -- reads this snapshot, never the live
+        # session sources, so what was approved is what is sent even if
+        # another worker's completion mutates a source in between (P7b).
+        plan_bank, sources = self._frozen_plan_sources(bank, sources)
         target, target_scope = self._resolve_whole_bank_target(choice)
         if target_scope.startswith("CARD/"):
             # The unit has one card slot: a write to CARD/07 lands on
@@ -5863,7 +5959,7 @@ class KwsedApp(App[None]):
             )
             conflict = "; ".join(filter(None, (conflict, overflow_conflict)))
         split_plan, proceed, split_remaining = self._split_choice_plan(
-            bank, sources, target, mode, choice
+            plan_bank, sources, target, mode, choice
         )
         if not proceed:
             return
@@ -5878,7 +5974,7 @@ class KwsedApp(App[None]):
 
         def work() -> Any:
             return self._whole_write_work(
-                bank,
+                plan_bank,
                 sources,
                 target,
                 mode,
@@ -5928,6 +6024,37 @@ class KwsedApp(App[None]):
         state = self._import_passes.get(key) or {}
         return str(state.get("overflow_written") or "") == overflow_id
 
+    def _skipped_banks_for(self, key: str) -> Tuple[str, ...]:
+        """The physical banks this import session already landed, sorted.
+
+        This is the one derivation both the mint and the rebuild use: a
+        token minted for a retry of a partial attempt and the plan the
+        write boundary rebuilds from that same token must agree on which
+        banks the session has already landed, or every retry would be
+        refused. Two flows record what landed:
+
+        - a patches-only overflow whose target write failed leaves
+          ``overflow_written`` in the session state -- the retry sends
+          the target only;
+        - a split or cards-only pass records the landed groups'
+          physical bank ids as ``banks_written``.
+
+        A fresh session key maps to no state, so a first attempt (and
+        every companion write, which carries no session key at all)
+        skips nothing.
+        """
+        if not key:
+            return ()
+        state = self._import_passes.get(key) or {}
+        skipped: Set[str] = set()
+        overflow = str(state.get("overflow_written") or "")
+        if overflow:
+            skipped.add(overflow)
+        for bank_id in state.get("banks_written") or ():
+            if bank_id:
+                skipped.add(str(bank_id))
+        return tuple(sorted(skipped))
+
     def _overflow_status_note(self, key: str, overflow_id: str) -> str:
         """The line the pre-write status carries when the overflow landed.
 
@@ -5962,7 +6089,10 @@ class KwsedApp(App[None]):
         overflow writes the overflow bank first and then the target, and
         the plain write builds the one target bank (plan R5). A split or
         overflow flow returns a :class:`MultiBankOutcome` rather than
-        raising away the banks that already landed.
+        raising away the banks that already landed. ``bank`` and
+        ``sources`` are the frozen snapshot taken at the write boundary
+        (P7b): the worker plans and builds from it alone, never from the
+        session's live sources.
         """
         from kws import backup as _backup
 
@@ -7899,17 +8029,24 @@ class KwsedApp(App[None]):
         the session's written map grows by the group's allocations and the
         remainder shrinks by the same slots. Only the groups in
         ``outcome.completed`` are recorded: a failed pass keeps the groups
-        it never reached in the remainder.
+        it never reached in the remainder. The landed groups' *physical*
+        bank ids are recorded too, so a retry's plan approval can name the
+        banks this session already landed (:meth:`_skipped_banks_for`).
         """
         written: Set[int] = set()
+        landed_banks: Set[str] = set()
         for entry in outcome.completed:
             into = str(
                 getattr(entry.group.target_bank, "label", entry.group.target_bank)
             )
             self._record_import_pass(key, entry.built, into)
+            landed_banks.add(str(getattr(entry.group.target_bank, "id", "") or ""))
             plan = getattr(entry.built, "plan", None)
             for allocation in getattr(plan, "allocations", None) or []:
                 written.add(int(allocation.source_perf.number))
+        if landed_banks:
+            state = self._import_passes.setdefault(key, {"written": {}, "targets": []})
+            state.setdefault("banks_written", set()).update(landed_banks)
         return written
 
     def _record_split_session_state(
@@ -8057,6 +8194,10 @@ class KwsedApp(App[None]):
                     else "",
                     split_kind=pass_kind if split_state else "split",
                     source_index=int(state.get("source_index") or 0),
+                    # The banks this session already landed, as the
+                    # screen's mint must carry them so its token agrees
+                    # with the write boundary's rebuild (P7b).
+                    skipped_banks=self._skipped_banks_for(key),
                 ),
                 notice=notice,
                 companion_loaded=self._companion_loaded_snapshot(),

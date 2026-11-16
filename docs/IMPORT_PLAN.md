@@ -377,10 +377,11 @@ needs a one-shot approval bound to the exact plan the person saw.
 - **Canonical intent.** `kwsed/import_intent` describes the request as an
   immutable `WholeBankIntent`: source identity and a digest of the source
   records, mode, overflow kind, preflight answer, session id, continuation pass
-  slots, and an ordered list of `BankWriteIntent` entries. Each entry names one
-  physical bank, the kinds written to it, the source and target performance
-  slots, and digests of the patch and wave-sequence assignment maps. Write
-  order is part of the plan.
+  slots, the physical banks an earlier partial attempt already landed
+  (`skipped_banks`), and an ordered list of `BankWriteIntent` entries. Each
+  entry names one physical bank, the kinds written to it, the source and target
+  performance slots, and digests of the patch and wave-sequence assignment
+  maps. Write order is part of the plan.
 - **Versioned fingerprint.** The intent is encoded as canonical JSON (sorted
   keys, fixed separators, length-prefixed records) with a schema version, then
   hashed (SHA-256). Equal plans fingerprint identically; any change to bank,
@@ -392,7 +393,10 @@ needs a one-shot approval bound to the exact plan the person saw.
   `_import_whole_bank_write` requires an armed gate and an approval whose
   fingerprint matches a plan rebuilt from the same file banks and planners, and
   consumes the nonce. A missing, foreign or replayed approval refuses with zero
-  device calls. Companion writes (`x`, and the preflight's companions) validate
+  device calls. The plan's planner inputs are frozen at the boundary — fresh
+  copies of every source's records — and only that snapshot reaches the write
+  worker, so a session source mutated after approval cannot change what is
+  sent. Companion writes (`x`, and the preflight's companions) validate
   and consume their own token at their own boundary.
 - **Companion branch.** A companion write sends patches and wave sequences only
   unless the loaded copy of that bank is empty of performances (all Init), where
@@ -403,6 +407,19 @@ needs a one-shot approval bound to the exact plan the person saw.
   slots are re-derived at the boundary from the session's written-slot map and
   the containment audit, so a pass carries exactly the performances no earlier
   pass placed; each pass is minted and consumed on its own.
+- **Token granularity.** One approval covers one finalized ordered sequence:
+  an overflow or split sequence is approved as one ordered plan — the overflow
+  bank followed by its target, or a split's groups in the order they are sent —
+  so there is not one token per physical write. A companion chain is answered
+  one choice at a time, and each answer finalizes its own plan and mints its
+  own token. Either way, every bank in a plan is still separately read, backed
+  up and verified.
+- **Retries.** `skipped_banks` names the physical banks an earlier partial
+  attempt already landed (the overflow marker a failed patches-only target
+  write left, or the landed groups of a split pass). The screen mints from the
+  pass state the app handed it and the write boundary derives the same set from
+  the session state, so the two always agree: the first attempt's token is a
+  different plan from the retry's and cannot be replayed for the remainder.
 - **Safe-direction corner.** Consumption happens before device I/O, so a plan
   that is approved and then refused or fails later has already spent its nonce.
   Repeating it is not a replay: the retry finalizes a new plan and mints a new

@@ -173,6 +173,14 @@ class ImportPassState:
     for the two-bank partition, ``"cards_only"`` for one card per group
     with no RAM bank. ``source_index`` keeps the session's own source
     bank selected when the screen is re-offered.
+
+    ``skipped_banks`` is the physical bank ids an earlier pass of this
+    session already landed, exactly as the application derives them from
+    its session state (:meth:`KwsedApp._skipped_banks_for`) at the moment
+    it re-offered this screen. A choice that continues this session must
+    mint its approval with the same value: the write boundary rebuilds
+    the plan with the banks the session landed, and a token minted
+    without them would be refused for every retry.
     """
 
     session_key: str = ""
@@ -185,6 +193,8 @@ class ImportPassState:
     split_kind: str = "split"
     #: The source bank index the session started from.
     source_index: int = 0
+    #: Physical bank ids an earlier pass of this session already landed.
+    skipped_banks: Tuple[str, ...] = ()
 
     @property
     def split_session(self) -> bool:
@@ -1310,6 +1320,26 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
             return ()
         return tuple(self._remaining_slots())
 
+    def _mint_skipped_banks(self, choice: WholeBankChoice) -> Tuple[str, ...]:
+        """The banks this session already landed, as the app rebuilds them.
+
+        The application derives the skipped set from its own session
+        state at the write boundary (:meth:`KwsedApp._skipped_banks_for`);
+        this screen was handed the same derivation's result in its pass
+        state when it was re-offered. Only a choice that continues that
+        session carries it: a companion write (no session key) and a
+        fresh visit mint for a first attempt, which skips nothing.
+        """
+        state = self._pass_state
+        if (
+            state is None
+            or not state.skipped_banks
+            or not choice.session_key
+            or choice.session_key != state.session_key
+        ):
+            return ()
+        return tuple(state.skipped_banks)
+
     def _mint_for_choice(
         self, choice: WholeBankChoice, *, pass_slots: Sequence[int] = ()
     ) -> Optional[import_intent.PlanApproval]:
@@ -1325,6 +1355,11 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
         will run. The approval is minted only
         here, for a choice this method is about to dismiss with; a plan
         the planners refuse mints nothing, and the status says why.
+
+        A choice that continues a session with already-landed banks
+        carries them as ``skipped_banks`` (:meth:`_mint_skipped_banks`):
+        the write boundary rebuilds the plan with the same set, and a
+        token minted without it would refuse every retry.
         """
         try:
             entry = self._banks[choice.source_index]
@@ -1352,6 +1387,7 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
                 pass_slots=tuple(int(slot) for slot in pass_slots),
                 companion_only=choice.companion_only,
                 companion_all_init=companion_all_init,
+                skipped_banks=self._mint_skipped_banks(choice),
             )
         except (IndexError, LookupError, ValueError, TypeError, AttributeError) as exc:
             self._set_status(f"this write cannot be planned: {exc}")
@@ -1873,13 +1909,20 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
         self.dismiss(replace(choice, approval=approval))
 
     def action_cache(self) -> None:
-        choice = WholeBankChoice(
-            self._source_index, self._target_bank().id, False, self._mode
+        """Save the bank to the cache only: no unit write, no token minted.
+
+        A cache-only choice touches no unit bank, so there is no plan to
+        approve -- and minting one here would refuse a bank whose unit
+        write cannot even be planned, exactly when ``c`` is the key that
+        must still work. The app takes the ``write_to_unit=False``
+        branch before any approval check, so the choice is dismissed as
+        it is.
+        """
+        self.dismiss(
+            WholeBankChoice(
+                self._source_index, self._target_bank().id, False, self._mode
+            )
         )
-        approval = self._mint_for_choice(choice)
-        if approval is None:
-            return
-        self.dismiss(replace(choice, approval=approval))
 
     def action_help(self) -> None:
         text = (

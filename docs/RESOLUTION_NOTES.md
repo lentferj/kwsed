@@ -894,3 +894,62 @@ that branch is decided from loaded copies both at mint and at check.
 is recorded by this change; only bank ids, kinds, slot numbers and counts are
 part of a plan. This entry records the safety fix and its verification; it does
 not describe a hardware run.
+
+---
+
+## 20. Whole-bank import: retries needed the landed banks, and the worker re-planned from live records
+
+**Verified gaps (P7b).** Three, all found re-reading the plan-approval work:
+
+1. *A retry's token could not name what had already landed.* P7a added
+   `WholeBankIntent.skipped_banks` and wired nothing to it: the screen minted
+   with `()` and the app rebuilt with `()`, so a partial attempt's remainder
+   fingerprinted exactly like the first attempt. Any future divergence — the
+   app deriving the landed banks from its session state while the screen did
+   not — would have refused every retry.
+2. *The worker re-planned from mutable sources.* The token was validated
+   against the live records, then the worker planned and built from those same
+   live objects (`bank.source`, the file's `Source` map). Any code that runs on
+   the main thread between validation and the worker's planning — another
+   device worker's completion, a later load re-pointing a session source's
+   record list — could change what is sent while the fingerprint stood still.
+3. *`c` minted a unit-write token.* Cache-only writes nothing to the unit, but
+   the key minted an approval for the unit write first, so a bank whose unit
+   write cannot be planned could not even be saved to the cache.
+
+**Fix.** The session state that already records what landed now feeds the
+intent builder: a failed patches-only target write leaves `overflow_written`
+in the session, and a split or cards-only pass records its landed groups'
+physical bank ids as `banks_written`; `_skipped_banks_for` folds both into one
+sorted tuple, and the screen carries the same tuple in its pass state
+(`ImportPassState.skipped_banks`), minted only for choices that continue that
+session. The mint (`_mint_for_choice`, `_mint_whole_bank_approval`) and the
+rebuild (`_whole_bank_intent`) both go through that one derivation, so they
+cannot disagree: a token minted without the skip state, and the first
+attempt's replayed token, are refused at the boundary with zero device calls.
+
+The write's planner inputs are frozen immediately after validation, on the
+main thread: every scope becomes a fresh `deps.Source` with copied record
+lists and copied wave-sequence bytes, and the source bank becomes a frozen
+stand-in over its own snapshot. The worker plans and builds from that snapshot
+alone — `relocate_bank`, `build_self_contained`, `build_overflow_import` and
+`build_split_partition` all read records through the map they are handed — so
+its outputs depend only on records no other code can mutate. The
+main-thread/worker split is unchanged: the worker still only talks to the
+device, and the session, cache and undo updates stay in `done` on the main
+thread.
+
+`c` dismisses without minting again: cache-only writes no unit bank, so there
+is no plan to approve, and the app takes the `write_to_unit=False` branch
+before any approval check.
+
+**Docs.** README and `docs/IMPORT_PLAN.md` §6.11 now state the token
+granularity outright: an overflow or split sequence is approved as one ordered
+plan (not one token per physical write), a companion chain mints one token per
+answer, and every bank in a plan is still separately read, backed up and
+verified.
+
+**Counts only.** No performance, patch, wave-sequence, instrument or card name
+is recorded by this change; only bank ids, kinds, slot numbers and counts are
+part of a plan. This entry records the safety fix and its verification; it does
+not describe a hardware run.
