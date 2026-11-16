@@ -57,6 +57,7 @@ PATH_ID = "whole-bank-path"
 SUMMARY_ID = "whole-bank-summary"
 TARGET_ID = "whole-bank-target"
 MODE_ID = "whole-bank-mode"
+PLAN_ID = "whole-bank-plan"
 GATE_ID = "whole-bank-gate"
 STATUS_ID = "whole-bank-status"
 SOURCE_ID = "whole-bank-source"
@@ -408,8 +409,9 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
     DEFAULT_CSS = """
     WholeBankImportScreen { align: center middle; }
     WholeBankImportScreen > Vertical {
-        width: 92; height: 80%; max-height: 90%;
+        width: 92; max-width: 100%; height: 80%; max-height: 90%;
         border: thick $accent; background: $surface; padding: 1 2;
+        overflow-y: auto;
     }
     WholeBankImportScreen .title { height: auto; text-style: bold; }
     WholeBankImportScreen .path { height: auto; color: $text-muted; }
@@ -418,6 +420,7 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
     WholeBankImportScreen DataTable { height: 1fr; }
     WholeBankImportScreen .target { height: auto; }
     WholeBankImportScreen .mode { height: auto; }
+    WholeBankImportScreen .plan { height: auto; text-style: italic; }
     WholeBankImportScreen .gate { height: auto; }
     WholeBankImportScreen .status { height: auto; color: $text; padding: 0 1; }
     WholeBankImportScreen .hint { height: auto; color: $text-muted; }
@@ -457,6 +460,12 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
         self._writable: list[Any] = list(kws_banks.writable_banks())
         self._target_index = 0
         self._gate = gate
+        #: The plan fingerprint captured when the gate was armed on this
+        #: screen. An armed gate belongs to the plan that was on screen at
+        #: the moment ``w`` armed it; a material change (``s``, ``b``,
+        #: ``m``) locks it again instead of reusing the old approval for a
+        #: different write. ``None`` while this screen has not armed it.
+        self._armed_fingerprint: Optional[tuple[Any, ...]] = None
         self._mode = ImportMode.AS_IS if mode is None else mode
         #: The session's written-slot state for this source (plan R4 c).
         self._pass_state = pass_state
@@ -593,7 +602,14 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
         The session carries the bank the split started with -- the card
         slot. The user swaps the card between passes, so the target stays
         the slot, not whatever this screen's selector happens to show.
+        A cards-only session always writes the physical card slot: it has
+        no RAM bank, so the selector's RAM bank must not leak into ``n``.
         """
+        if self._cards_only_session():
+            try:
+                return kws_banks.bank("CARD")
+            except LookupError:
+                pass
         target_id = (
             str(self._pass_state.split_target) if self._pass_state is not None else ""
         )
@@ -639,7 +655,16 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
         cards_only = self._cards_only_session()
         if not remaining:
             flow = "cards-only pass" if cards_only else "self-contained split"
-            return f"Mode: {label} · the {flow} is complete: nothing is left to write"
+            done = (
+                " — writes went to the card in the slot, one group per card, "
+                "no RAM bank"
+                if cards_only
+                else ""
+            )
+            return (
+                f"Mode: {label} · the {flow} is complete: nothing is left "
+                f"to write{done}"
+            )
         try:
             where = self._split_target_bank().label
         except IndexError:
@@ -651,9 +676,10 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
             return (
                 f"Mode: {label} · cards-only: next pass writes "
                 f"{self._split_group_words(group)} into {where}, and "
-                f"{later} performances remain for the card after — switch "
-                "the card on the unit (select it on the HCard and press C), "
-                "then press n"
+                f"{later} performances remain for the card after — writes go "
+                "to the card in the slot, one group per card, no RAM bank; "
+                "switch the card on the unit (select it on the HCard and "
+                "press C), then press n"
             )
         return (
             f"Mode: {label} · split continues: next pass writes "
@@ -805,20 +831,43 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
             lambda picked: self._overflow_bank_chosen(banks, kind, picked),
         )
 
+    def _cards_only_target(self) -> Optional[Any]:
+        """The physical card slot a cards-only pass writes, or ``None``.
+
+        ``kws_banks.bank("CARD")`` is the slot itself, never a ``CARD/NN``
+        archive scope: a write filed under an archive would land on
+        whatever card is in the slot. If no writable card resolves, the
+        screen says so and stays open rather than falling back to the RAM
+        bank the selector happens to show.
+        """
+        try:
+            card = kws_banks.bank("CARD")
+        except LookupError:
+            self._set_status("no card bank is available to write")
+            return None
+        if card.id != "CARD" or not card.writable:
+            self._set_status("the card bank is not a writable destination")
+            return None
+        return card
+
     def _cards_only_chosen(self) -> None:
         """Dismiss into a cards-only split: no RAM bank, one card per group.
 
         The kind names no overflow bank at all, so there is no bank step:
         the app packs every non-empty performance, writes the first group
         into the card in the slot, and carries the rest to the next card.
+        The target is the physical card slot whatever this screen's
+        selector shows -- the default RAM 1 must not leak into the write.
         """
-        if self._gate is not None and not self._gate.armed:
-            self._set_status("write gate is locked")
+        if not self._gate_may_dismiss():
+            return
+        card = self._cards_only_target()
+        if card is None:
             return
         self.dismiss(
             WholeBankChoice(
                 self._source_index,
-                str(self._target_bank().id),
+                str(card.id),
                 True,
                 self._mode,
                 self._session_key(),
@@ -913,8 +962,7 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
 
     def _dismiss_overflow(self, overflow: Any, kind: str) -> None:
         """Dismiss with the overflow bank and the kind that was picked."""
-        if self._gate is not None and not self._gate.armed:
-            self._set_status("write gate is locked")
+        if not self._gate_may_dismiss():
             return
         if kind == OVERFLOW_SELF_CONTAINED:
             partition = self._split_preview(overflow)
@@ -969,16 +1017,120 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
             )
         this_pass, total, skipped, later = counts
         continuation = bool(self._written_slots())
-        if self._mode is ImportMode.SELF_CONTAINED_1TO1 and not continuation:
-            placement = "at their own slots"
-        else:
-            placement = f"packed into slots 0-{max(this_pass - 1, 0)}"
+        placement = self._placement_phrase(this_pass, continuation)
         prefix = "next pass: writes " if continuation else "writes "
         tail = f"; {later} more remain for later passes (n)" if later else ""
         return (
             f"Mode: {label} · {prefix}{this_pass} of {total} "
             f"performances {placement}, skipping {skipped} that reference "
             f"another writable bank; ROM references stay in ROM{tail}"
+        )
+
+    def _placement_phrase(self, this_pass: int, continuation: bool) -> str:
+        """How the chosen performances sit in the target bank.
+
+        ``1:1`` keeps each performance in the slot it had; a packed pass
+        (or any continuation pass, which starts from slot 0 of a fresh
+        target) re-slots them 0..n-1. One phrase, used by both the mode
+        line and the plan sentence, so neither can drift from the other.
+        """
+        if self._mode is ImportMode.SELF_CONTAINED_1TO1 and not continuation:
+            return "at their own slots"
+        return f"packed into slots 0-{max(this_pass - 1, 0)}"
+
+    def _plan_sentence(self) -> str:
+        """One plain outcome sentence, shown before the gate can be armed.
+
+        The same audit and pass counts the mode line states, said as the
+        result the person gets: what lands where, and whether a later
+        pass is still owed. No number is recomputed here -- the mode line
+        stays the technical promise, and this is its plain reading.
+        """
+        if self._split_session():
+            try:
+                split_target = self._split_target_bank().label
+            except IndexError:
+                split_target = "(no target)"
+            return self._split_plan_sentence(split_target)
+        try:
+            target = self._target_bank().label
+        except IndexError:
+            target = "(no target)"
+        if self._mode is ImportMode.AS_IS:
+            return self._as_is_plan_sentence(target)
+        counts = self._pass_counts()
+        if counts is None:
+            return (
+                "Containment is not known for this bank, so what a "
+                f"{MODE_LABELS[self._mode]} write would leave out cannot "
+                "be said."
+            )
+        this_pass, _total, skipped, later = counts
+        continuation = bool(self._written_slots())
+        placement = self._placement_phrase(this_pass, continuation)
+        if placement == "at their own slots":
+            middle = f"keep {this_pass} performances in their own slots"
+        else:
+            middle = f"{this_pass} performances {placement}"
+        if skipped:
+            skipped_words = f"{skipped} skipped because they use another bank"
+        else:
+            skipped_words = "nothing is skipped"
+        if later:
+            tail = f"{later} more wait for later passes (n)"
+        else:
+            tail = "nothing is left for a later pass"
+        prefix = "Next pass: " if continuation else ""
+        return (
+            f"{prefix}Make one self-contained bank in {target}: {middle}; "
+            f"{skipped_words}; {tail}."
+        )
+
+    def _as_is_plan_sentence(self, target: str) -> str:
+        """The as-is reading: the whole bank travels, nothing waits."""
+        audit = self._audit
+        if audit is None:
+            outside = "the containment audit could not say what they point at"
+        elif audit.parts_per_bank:
+            parts = sum(audit.parts_per_bank.values())
+            named = ", ".join(
+                kws_banks.bank(number).label for number in sorted(audit.parts_per_bank)
+            )
+            keeps = "parts keep" if parts != 1 else "part keeps"
+            outside = f"{parts} {keeps} pointing at another bank ({named})"
+        else:
+            outside = "nothing points at another bank"
+        return (
+            f"Move this bank as-is into {target}: every performance, patch "
+            f"and wave sequence; {outside}, ROM parts stay in ROM, and "
+            "nothing is left for a later pass."
+        )
+
+    def _split_plan_sentence(self, target: str) -> str:
+        """The plan sentence while a split or cards-only pass waits."""
+        remaining = self._split_remaining()
+        cards_only = self._cards_only_session()
+        if not remaining:
+            if cards_only:
+                return "Cards only: every group has its card; nothing is left to write."
+            return (
+                "Self-contained split: every group has its bank; nothing "
+                "is left to write."
+            )
+        group = self._split_next_group(remaining, self._split_target_bank())
+        words = self._split_group_words(group)
+        this_pass = 0 if group is None else len(group.performances)
+        later = max(len(remaining) - this_pass, 0)
+        if cards_only:
+            return (
+                f"Cards only: the card in the slot gets {words}; {later} "
+                "performances remain for the card after — press n after "
+                "switching the card."
+            )
+        return (
+            f"Self-contained split: {target} gets {words}, packed and fully "
+            f"self-contained; {later} performances remain for the next "
+            "card — press n after switching the card."
         )
 
     def _pass_line(self) -> str:
@@ -993,16 +1145,25 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
         head = f"pass so far: {len(state.written)} written ({groups})"
         if state.split_session:
             remaining = self._split_remaining()
+            cards_only = self._cards_only_session()
             if remaining:
-                what = (
-                    "remain for the next card"
-                    if self._cards_only_session()
-                    else "remain"
+                what = "remain for the next card" if cards_only else "remain"
+                clause = (
+                    ": writes go to the card in the slot, one group per card, "
+                    "no RAM bank"
+                    if cards_only
+                    else ""
                 )
                 return (
-                    f"{head} · {len(remaining)} performances {what}: switch "
-                    "the card on the unit (select it on the HCard and press "
-                    "C), then press n"
+                    f"{head} · {len(remaining)} performances {what}{clause} — "
+                    "switch the card on the unit (select it on the HCard and "
+                    "press C), then press n"
+                )
+            if cards_only:
+                return (
+                    f"{head} · nothing left to write: the cards-only pass is "
+                    "complete — writes went to the card in the slot, one group "
+                    "per card, no RAM bank"
                 )
             return f"{head} · nothing left to write: the split is complete"
         return f"{head} · next pass: {len(self._remaining_slots())} remaining"
@@ -1041,6 +1202,86 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
         return (
             "Write gate: ARMED" if self._gate.armed else "Write gate: locked (press w)"
         )
+
+    def _plan_fingerprint(self) -> tuple[Any, ...]:
+        """The plan this screen would write, as a comparable tuple.
+
+        The gate's approval is bound to one plan: the source bank (index
+        and scope), the target, the mode, the screen's overflow state and
+        whether this visit continues a split. The ``o`` flow's own kind
+        and bank travel in the dismissal that ends the flow, which keeps
+        its armed-gate check of its own; this fingerprint holds what the
+        screen itself shows.
+        """
+        state = self._pass_state
+        continuation = (
+            bool(state.split_session) if state is not None else False,
+            str(state.split_kind) if state is not None else "",
+            str(state.split_target) if state is not None else "",
+            tuple(sorted((int(slot), str(t)) for slot, t in state.written.items()))
+            if state is not None
+            else (),
+        )
+        try:
+            source = (self._source_index, str(self._source_bank().scope))
+        except (IndexError, AttributeError):
+            source = (self._source_index, "")
+        try:
+            target = str(self._target_bank().id)
+        except (IndexError, AttributeError):
+            target = ""
+        return (
+            source,
+            target,
+            str(self._mode),
+            self._overflow_index,
+            continuation,
+        )
+
+    def _lock_gate(self) -> None:
+        """Lock the shared gate: its approval no longer matches the plan."""
+        if self._gate is not None:
+            self._gate.lock()
+        self._armed_fingerprint = None
+        self._update_gate()
+        self._set_status("plan changed — gate locked again")
+
+    def _gate_follows_plan(self) -> None:
+        """Disarm the gate when the plan it was armed for is gone.
+
+        ``s``, ``b`` and ``m`` each change what a write would do. The
+        fingerprint is recorded at the moment of arming, so an armed gate
+        always belongs to the plan that was on screen then; once the plan
+        moves, the old approval is locked away instead of reused.
+        """
+        if self._gate is None or not self._gate.armed:
+            return
+        if (
+            self._armed_fingerprint is not None
+            and self._armed_fingerprint != self._plan_fingerprint()
+        ):
+            self._lock_gate()
+
+    def _gate_may_dismiss(self) -> bool:
+        """Whether the gate still approves the plan about to be written.
+
+        A locked gate is the existing refusal. An armed gate whose
+        fingerprint no longer matches is the same refusal with the reason
+        said: the old approval is not silently reused for a different
+        write.
+        """
+        if self._gate is None:
+            return True
+        if not self._gate.armed:
+            self._set_status("write gate is locked")
+            return False
+        if (
+            self._armed_fingerprint is not None
+            and self._armed_fingerprint != self._plan_fingerprint()
+        ):
+            self._lock_gate()
+            return False
+        return True
 
     def _set_status(self, message: str) -> None:
         try:
@@ -1115,12 +1356,19 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
         except Exception:
             _ = None
 
+    def _update_plan(self) -> None:
+        try:
+            self.query_one(f"#{PLAN_ID}", Static).update(self._plan_sentence())
+        except Exception:
+            _ = None
+
     def _rebuild_all(self) -> None:
         self._refresh_audit()
         self._update_source()
         self._rebuild_table()
         self._update_target()
         self._update_mode()
+        self._update_plan()
         self._update_gate()
 
     def compose(self) -> ComposeResult:
@@ -1136,12 +1384,11 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
             )
             yield Static("", id=TARGET_ID, classes="target", markup=False)
             yield Static("", id=MODE_ID, classes="mode", markup=False)
+            yield Static("", id=PLAN_ID, classes="plan", markup=False)
             yield Static("", id=GATE_ID, classes="gate", markup=False)
             yield Static("", id=STATUS_ID, classes="status", markup=False)
             yield Static(
-                "s source · b target · m mode · o overflow (patches only, a "
-                "self-contained split of both banks, or cards only with no "
-                "RAM bank) · n next pass · "
+                "s source · b target · m mode · o overflow · n next pass · "
                 "x companions · "
                 "w gate · ctrl+s write · c cache · ? help · esc/q cancel",
                 classes="hint",
@@ -1179,6 +1426,7 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
             return
         self._source_index = (self._source_index + 1) % len(self._banks)
         self._rebuild_all()
+        self._gate_follows_plan()
 
     def action_target(self) -> None:
         if not self._writable:
@@ -1186,12 +1434,18 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
             return
         self._target_index = (self._target_index + 1) % len(self._writable)
         self._update_target()
+        self._update_plan()
+        self._gate_follows_plan()
 
     def action_toggle_gate(self) -> None:
         if self._gate is None:
             self._set_status("not held here")
             return
-        self._gate.toggle()
+        armed = self._gate.toggle()
+        # The fingerprint is captured at the moment of arming: an armed
+        # gate belongs to the plan on screen then, and any material
+        # change after it locks the gate again.
+        self._armed_fingerprint = self._plan_fingerprint() if armed else None
         self._update_gate()
         self._set_status(self._gate.describe())
 
@@ -1199,7 +1453,9 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
         index = MODE_ORDER.index(self._mode)
         self._mode = MODE_ORDER[(index + 1) % len(MODE_ORDER)]
         self._update_mode()
+        self._update_plan()
         self._set_status(self._mode_line())
+        self._gate_follows_plan()
 
     def action_next_pass(self) -> None:
         """Offer the not-yet-written performances (plan R4 c and d)."""
@@ -1256,8 +1512,9 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
             self._set_status(
                 f"next pass: writes {self._split_group_words(group)} into "
                 f"{target.label}, leaving {later} for the card after — "
-                "switch the card on the unit (select it on the HCard and "
-                "press C), then press n"
+                "writes go to the card in the slot, one group per card, no "
+                "RAM bank; switch the card on the unit (select it on the "
+                "HCard and press C), then press n"
             )
         else:
             self._set_status(
@@ -1265,8 +1522,7 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
                 f"{target.label} — switch the card on the unit (select it on "
                 "the HCard and press C), then press n"
             )
-        if self._gate is not None and not self._gate.armed:
-            self._set_status("write gate is locked")
+        if not self._gate_may_dismiss():
             return
         self.dismiss(
             WholeBankChoice(
@@ -1289,8 +1545,7 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
             target = self._writable[picked]
         except (IndexError, TypeError):
             return
-        if self._gate is not None and not self._gate.armed:
-            self._set_status("write gate is locked")
+        if not self._gate_may_dismiss():
             return
         self.dismiss(
             WholeBankChoice(
@@ -1392,8 +1647,7 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
             target = targets[picked]
         except (IndexError, TypeError):
             return
-        if self._gate is not None and not self._gate.armed:
-            self._set_status("write gate is locked")
+        if not self._gate_may_dismiss():
             return
         # A companion write fills the patch slots the parts name; it does
         # not exist to replace the performances that RAM bank already
@@ -1407,8 +1661,7 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
         )
 
     def action_write(self) -> None:
-        if self._gate is not None and not self._gate.armed:
-            self._set_status("write gate is locked")
+        if not self._gate_may_dismiss():
             return
         self.dismiss(
             WholeBankChoice(

@@ -45,7 +45,7 @@ import os
 import sys
 import threading
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from typing import (
     TYPE_CHECKING,
@@ -376,6 +376,54 @@ class PerformanceRow:
     name: str
     favourite: bool
     rating: int
+
+
+@dataclass
+class BankWriteOutcome:
+    """One fenced bundle write of one bank inside a cross-bank import.
+
+    ``result`` is the bridge's ``write_bank_bundle`` verdict for this
+    bank; ``verified`` says its read-back compared every kind and
+    matched. ``built`` is what was built for the bank (a split group's
+    payload, or the overflow target's share) so the main thread can
+    file it exactly as a success path does, and ``group`` is the split
+    group the bank carried, when it is one.
+    """
+
+    bank: Any
+    result: Any = None
+    verified: bool = False
+    built: Any = None
+    group: Any = None
+
+
+@dataclass
+class MultiBankOutcome:
+    """What a cross-bank import wrote, and where it stopped.
+
+    Cross-bank writes are not atomic: each bank is its own fenced
+    bundle, and a later bank can fail after an earlier one has landed.
+    The outcome is the honest report of that instead of an exception
+    that would lose the completed banks: ``completed`` is exactly what
+    landed (to book-keep on the main thread), ``failed_bank`` the bank
+    the write stopped on, ``not_written`` the banks never attempted,
+    and ``ok`` is false unless every attempted bank verified.
+    """
+
+    completed: List[BankWriteOutcome] = field(default_factory=list)
+    failed_bank: Optional[Any] = None
+    error: str = ""
+    not_written: List[Any] = field(default_factory=list)
+    #: The overflow import's full build, when this outcome is one.
+    built: Any = None
+    #: The split groups whose source slots did not land: the group the
+    #: failure hit and every group it stopped before. The session's
+    #: remainder keeps their slots so ``n`` never rewrites a landed one.
+    skipped_groups: List[Any] = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return self.error == "" and self.failed_bank is None
 
 
 class PerformancePickerScreen(ModalScreen[Optional[Tuple[int, int]]]):
@@ -5586,9 +5634,20 @@ class KwsedApp(App[None]):
             split_plan, session_key, split_remaining, cards_only
         )
 
+        # The session's overflow marker is read here, on the main thread:
+        # a worker only ever talks to the device.
+        overflow_skip = self._overflow_session_written(session_key, overflow_id)
+
         def work() -> Any:
             return self._whole_write_work(
-                bank, sources, target, mode, written, split_plan, overflow_id
+                bank,
+                sources,
+                target,
+                mode,
+                written,
+                split_plan,
+                overflow_id,
+                skip_overflow=overflow_skip,
             )
 
         def done(result: Any, failure: BaseException | None) -> None:
@@ -5607,10 +5666,46 @@ class KwsedApp(App[None]):
 
         into = target_scope if target_scope != target.id else target.label
         status = self._whole_write_status(
-            label, into, conflict, split_statement, cards_only=cards_only
+            label,
+            into,
+            conflict,
+            split_statement,
+            cards_only=cards_only,
+            overflow_note=self._overflow_status_note(session_key, overflow_id),
         )
         self.notify_status(status, warn=bool(conflict))
         self._device_worker(work, done, f"importing {label} into {into}")
+
+    def _overflow_session_written(self, key: str, overflow_id: str) -> bool:
+        """Whether this import session already landed ``overflow_id``.
+
+        A patches-only overflow whose target write failed has left the
+        overflow bank on the unit: the patches the target's performances
+        name are there. The retry must not send them again -- the
+        marker is per session key, and a fresh visit of the same file
+        starts a new session, so it never leaks across imports.
+        """
+        if not key or not overflow_id:
+            return False
+        state = self._import_passes.get(key) or {}
+        return str(state.get("overflow_written") or "") == overflow_id
+
+    def _overflow_status_note(self, key: str, overflow_id: str) -> str:
+        """The line the pre-write status carries when the overflow landed.
+
+        Skipping the overflow write silently would hide where the bytes
+        go: the status says the target is all this pass sends.
+        """
+        if not self._overflow_session_written(key, overflow_id):
+            return ""
+        try:
+            overflow_label = banks.bank(overflow_id).label
+        except LookupError:
+            overflow_label = overflow_id
+        return (
+            f"the overflow bank {overflow_label} already landed; "
+            "this write sends the target only"
+        )
 
     def _whole_write_work(
         self,
@@ -5621,12 +5716,15 @@ class KwsedApp(App[None]):
         written: Mapping[int, str],
         split_plan: Any,
         overflow_id: str,
+        skip_overflow: bool = False,
     ) -> Any:
         """The bytes one whole-bank write sends, chosen by the flow.
 
         A self-contained split writes each bank's share, a patches-only
         overflow writes the overflow bank first and then the target, and
-        the plain write builds the one target bank (plan R5).
+        the plain write builds the one target bank (plan R5). A split or
+        overflow flow returns a :class:`MultiBankOutcome` rather than
+        raising away the banks that already landed.
         """
         from kws import backup as _backup
 
@@ -5634,7 +5732,13 @@ class KwsedApp(App[None]):
             return self._write_split_banks(split_plan, _backup.default_dir())
         if overflow_id:
             return self._write_with_overflow(
-                bank, sources, target, mode, _backup.default_dir(), overflow_id
+                bank,
+                sources,
+                target,
+                mode,
+                _backup.default_dir(),
+                overflow_id,
+                skip_overflow=skip_overflow,
             )
         built = self._whole_bank_bytes(bank, sources, target, mode, written=written)
         # The bridge reads the unit before writing it. Handing it the
@@ -5659,6 +5763,7 @@ class KwsedApp(App[None]):
         split_statement: str,
         *,
         cards_only: bool = False,
+        overflow_note: str = "",
     ) -> str:
         """What is about to be written, per bank when it is a split.
 
@@ -5667,13 +5772,17 @@ class KwsedApp(App[None]):
         self-contained split replaces the destination with each bank's
         share, because one destination name would hide the second write.
         A cards-only pass says so, and the statement names the card and
-        how much is left for the next one.
+        how much is left for the next one. ``overflow_note`` states a
+        retry that sends the target only, because the overflow bank
+        already landed in this session.
         """
         if split_statement:
             flow = "cards-only groups" if cards_only else "a self-contained split"
             status = f"writing {label} as {flow} — {split_statement}"
         else:
             status = f"writing {label} into {into}..."
+        if overflow_note:
+            status = f"{status} — {overflow_note}"
         if conflict:
             suffix = status if split_statement else "writing anyway"
             return f"warning: this import overwrites {conflict} — {suffix}"
@@ -5697,29 +5806,29 @@ class KwsedApp(App[None]):
         if failure is not None:
             self.notify_status(f"import: {failure}", refused=True)
             return
-        into = target_scope if target_scope != target.id else target.label
-        overflow_id = str(getattr(choice, "overflow_bank", "") or "")
-        overflow_kind = str(
-            getattr(choice, "overflow_kind", OVERFLOW_PATCHES) or OVERFLOW_PATCHES
-        )
-        session_key = str(getattr(choice, "session_key", "") or "")
-        split_pass = bool(session_key) and (
-            split_remainder is not None
-            or self._split_pass_kind(session_key) in ("split", OVERFLOW_CARDS_ONLY)
-        )
-        if overflow_id and overflow_kind == OVERFLOW_SELF_CONTAINED and not split_pass:
-            # A split the offered banks hold in full: nothing continues.
-            self._split_written(result, label)
-            return
-        if split_pass:
-            self._split_pass_done(
-                result, choice, label, banks_list, path, split_remainder
+        if isinstance(result, MultiBankOutcome):
+            # A cross-bank flow: the outcome carries what landed, what
+            # failed and what was never attempted.
+            self._multi_bank_done(
+                result,
+                choice=choice,
+                label=label,
+                target=target,
+                target_scope=target_scope,
+                banks_list=banks_list,
+                path=path,
+                split_remainder=split_remainder,
             )
             return
-        if overflow_id:
-            self._overflow_written(result, label, into, target, target_scope)
-            return
         built, write_result = result
+        verdict = self._bundle_result_error(write_result)
+        if verdict:
+            # The unit did not store what was sent: a failed bank, whose
+            # backup is the way back. No undo record, no cache update, no
+            # pass state -- and nothing says the import succeeded.
+            self.notify_status(f"import: {verdict}", refused=True)
+            return
+        into = target_scope if target_scope != target.id else target.label
         self._import_whole_bank_written(
             label, target, built, write_result, conflict, target_scope=target_scope
         )
@@ -5742,9 +5851,256 @@ class KwsedApp(App[None]):
             choice, session_key, built, into, banks_list, path, mode
         )
 
+    def _multi_bank_done(
+        self,
+        outcome: MultiBankOutcome,
+        *,
+        choice: Any,
+        label: str,
+        target: Any,
+        target_scope: str,
+        banks_list: Optional[Sequence[Any]],
+        path: str,
+        split_remainder: Optional[Sequence[int]] = None,
+    ) -> None:
+        """Dispatch a cross-bank write's structured outcome.
+
+        A full success takes the exact path and wording today's success
+        takes; a partial one is reported as what it is -- some banks
+        landed, some did not -- without ever claiming the import
+        succeeded.
+        """
+        into = target_scope if target_scope != target.id else target.label
+        overflow_id = str(getattr(choice, "overflow_bank", "") or "")
+        overflow_kind = str(
+            getattr(choice, "overflow_kind", OVERFLOW_PATCHES) or OVERFLOW_PATCHES
+        )
+        session_key = str(getattr(choice, "session_key", "") or "")
+        split_pass = bool(session_key) and (
+            split_remainder is not None
+            or self._split_pass_kind(session_key) in ("split", OVERFLOW_CARDS_ONLY)
+        )
+        if not outcome.ok:
+            self._multi_bank_partial(
+                outcome,
+                choice=choice,
+                label=label,
+                target=target,
+                target_scope=target_scope,
+                banks_list=banks_list,
+                path=path,
+                split_remainder=split_remainder,
+            )
+            return
+        if overflow_id and overflow_kind == OVERFLOW_SELF_CONTAINED and not split_pass:
+            # A split the offered banks hold in full: nothing continues.
+            self._split_written(outcome, label)
+            return
+        if split_pass:
+            self._split_pass_done(
+                outcome, choice, label, banks_list, path, split_remainder
+            )
+            return
+        if overflow_id:
+            self._overflow_written(
+                outcome, label, into, target, target_scope, overflow_id
+            )
+            return
+        # A cross-bank flow without a session still has every bank's
+        # bookkeeping to do; the split report names each bank it wrote.
+        self._split_written(
+            outcome, label, cards_only=self._cards_only_choice(choice, session_key)
+        )
+
+    def _multi_bank_partial(
+        self,
+        outcome: MultiBankOutcome,
+        *,
+        choice: Any,
+        label: str,
+        target: Any,
+        target_scope: str,
+        banks_list: Optional[Sequence[Any]],
+        path: str,
+        split_remainder: Optional[Sequence[int]] = None,
+    ) -> None:
+        """Book-keep and report a cross-bank write that stopped part way.
+
+        The banks that landed are recorded exactly as a full success
+        records them -- undo, session, cache -- and the failed and
+        unattempted banks get nothing. The status names what was
+        written and what was not, and never says the import succeeded.
+        """
+        overflow_id = str(getattr(choice, "overflow_bank", "") or "")
+        overflow_kind = str(
+            getattr(choice, "overflow_kind", OVERFLOW_PATCHES) or OVERFLOW_PATCHES
+        )
+        session_key = str(getattr(choice, "session_key", "") or "")
+        if not outcome.completed:
+            # Nothing landed: today's plain failure, and nothing recorded.
+            self.notify_status(f"import: {outcome.error}", refused=True)
+            return
+        for entry in outcome.completed:
+            if entry.group is not None:
+                scope = getattr(
+                    entry.group.target_bank, "id", str(entry.group.target_bank)
+                )
+                self._remember_written_bank(
+                    entry.group.target_bank,
+                    entry.built,
+                    entry.result,
+                    target_scope=scope,
+                )
+            elif overflow_id and getattr(entry.bank, "id", "") == overflow_id:
+                if hasattr(self, "_record_write"):
+                    self._record_write(entry.result)
+                self._remember_overflow(entry.bank, outcome.built)
+            else:
+                self._remember_written_bank(
+                    target,
+                    outcome.built.destination,
+                    entry.result,
+                    target_scope=target_scope,
+                )
+        mode = getattr(choice, "mode", perfcopy.ImportMode.AS_IS)
+        split_pass = bool(session_key) and (
+            split_remainder is not None
+            or self._split_pass_kind(session_key) in ("split", OVERFLOW_CARDS_ONLY)
+        )
+        if split_pass:
+            self._multi_bank_partial_split(
+                outcome,
+                choice,
+                mode,
+                banks_list,
+                path,
+                session_key,
+                split_remainder,
+            )
+            return
+        message = self._multi_bank_partial_status(outcome)
+        landed_overflow = bool(overflow_id) and any(
+            getattr(entry.bank, "id", "") == overflow_id for entry in outcome.completed
+        )
+        if landed_overflow and overflow_kind == OVERFLOW_PATCHES:
+            # The overflow bank carries the patches the target's
+            # performances name: it landed, the target did not. Mark the
+            # session so a retry sends the target only, and say so.
+            if session_key:
+                state = self._import_passes.setdefault(
+                    session_key, {"written": {}, "targets": []}
+                )
+                state["overflow_written"] = overflow_id
+            try:
+                overflow_label = banks.bank(overflow_id).label
+            except LookupError:
+                overflow_label = overflow_id
+            message += (
+                f" — the overflow bank {overflow_label} holds the patches "
+                "the target's performances name; write the target again"
+            )
+        self.notify_status(message, refused=True)
+
+    def _multi_bank_partial_split(
+        self,
+        outcome: MultiBankOutcome,
+        choice: Any,
+        mode: Any,
+        banks_list: Optional[Sequence[Any]],
+        path: str,
+        session_key: str,
+        split_remainder: Optional[Sequence[int]],
+    ) -> None:
+        """Keep a failed split pass's landed groups and re-offer ``n``.
+
+        The groups that landed are in the session's written map; the
+        groups the failure hit or stopped before go back into the
+        remainder, so the next pass writes exactly the not-written
+        source slots and never rewrites a landed group.
+        """
+        cards_only = self._cards_only_choice(choice, session_key)
+        if session_key:
+            written_now = self._record_split_pass_groups(session_key, outcome)
+            prior = (
+                list(split_remainder)
+                if split_remainder is not None
+                else self._split_pass_remainder(session_key)
+            )
+            placed = set(written_now)
+            remaining = [slot for slot in prior if slot not in placed]
+            # The groups the failure stopped before were not in the
+            # first pass's own leftover: their slots go back too.
+            lost = {
+                int(slot)
+                for group in outcome.skipped_groups
+                for slot in group.performances
+            }
+            remaining += [
+                slot for slot in lost if slot not in placed and slot not in remaining
+            ]
+            self._record_split_session_state(
+                session_key, written_now, remaining, choice, mode, cards_only
+            )
+        self.notify_status(self._multi_bank_partial_status(outcome), refused=True)
+        if (
+            session_key
+            and getattr(choice, "continue_pass", False)
+            and banks_list
+            and getattr(self, "is_running", False)
+        ):
+            self._reopen_whole_bank_import(banks_list, path, session_key, mode)
+
+    def _multi_bank_partial_status(self, outcome: MultiBankOutcome) -> str:
+        """One honest line for a cross-bank write that stopped part way.
+
+        The error leads; the completed banks follow with their backups,
+        then the banks the write never reached. Nothing here says the
+        import succeeded.
+        """
+        parts = [f"import: {outcome.error}"]
+        written = "; ".join(
+            f"{getattr(entry.bank, 'label', entry.bank)} (verified; "
+            f"{self._counted(self._backup_count(entry.result), 'backup', 'backups')})"
+            for entry in outcome.completed
+        )
+        if written:
+            parts.append(f"written: {written}")
+        if outcome.failed_bank is not None:
+            # The write stopped on this bank. A refused transfer may have
+            # changed nothing; a read-back mismatch or a mid-transfer error
+            # may have changed it -- the honest word is "unverified".
+            parts.append(
+                f"failed or unverified (may have changed): "
+                f"{getattr(outcome.failed_bank, 'label', outcome.failed_bank)}"
+            )
+        not_written = ", ".join(
+            getattr(bank, "label", str(bank)) for bank in outcome.not_written
+        )
+        if not_written:
+            parts.append(f"not written: {not_written}")
+        return " — ".join(parts)
+
+    @staticmethod
+    def _backup_count(result: Any) -> int:
+        """The backup envelopes a write result names: one bundle, one backup."""
+        if not isinstance(result, dict):
+            return 0
+        if isinstance(result.get("backups"), list):
+            return len(result["backups"])
+        return 1 if result.get("backup") else 0
+
     @staticmethod
     def _import_left_dangling(choice: Any) -> bool:
-        """Whether this write left parts pointing at another bank."""
+        """Whether this write leaves parts pointing at another bank.
+
+        Only as-is does: the self-contained modes select performances that
+        already point at their own bank or ROM, so a question about a
+        companion would describe a write the person did not ask for.
+        """
+        if getattr(choice, "mode", perfcopy.ImportMode.AS_IS) is not (
+            perfcopy.ImportMode.AS_IS
+        ):
+            return False
         kind = str(
             getattr(choice, "overflow_kind", OVERFLOW_PATCHES) or OVERFLOW_PATCHES
         )
@@ -5766,10 +6122,11 @@ class KwsedApp(App[None]):
     ) -> List[Tuple[int, int, Any]]:
         """``(part count, file index, bank)`` for companions the parts name.
 
-        A companion is only reported when the unit does not already hold
-        the patches those parts name: a bank that was written before (or
-        that already matched the file) would otherwise be offered a second
-        time for no reason.
+        With ``require_missing`` the companion is only reported when the
+        *loaded copy* does not already show those patches: the post-write
+        fallback asks only when something is actually missing. The
+        preflight passes ``False`` -- it asks every time, naming the
+        loaded copy's state in the question itself.
         """
         from kws import containment
 
@@ -5805,7 +6162,14 @@ class KwsedApp(App[None]):
     def _unit_matches(
         self, companion: Any, file_source: Any, slots: Sequence[int]
     ) -> bool:
-        """Whether the loaded copy of ``companion`` already holds those patches."""
+        """Whether the *loaded copy* of ``companion`` shows those patches.
+
+        The loaded copy is the session's bank or the cache -- never a
+        fresh reading of the unit -- so a ``True`` here is a snapshot,
+        not hardware truth. The wave sequences are compared too when the
+        file carries them: identical patch bytes that sit on top of
+        different sequence bytes are not the patches the file means.
+        """
         current = self._sources_with_store().get(companion.id)
         if current is None or file_source is None:
             return False
@@ -5815,7 +6179,11 @@ class KwsedApp(App[None]):
                 return False
             if bytes(current.patches[slot]) != bytes(file_patches[slot]):
                 return False
-        return True
+        file_waveseq = getattr(file_source, "waveseq", None)
+        matches_waveseq = file_waveseq is None or bytes(
+            current.waveseq or b""
+        ) == bytes(file_waveseq)
+        return matches_waveseq
 
     def _deferred_companion_step(
         self,
@@ -5832,7 +6200,7 @@ class KwsedApp(App[None]):
         ordinary whole-bank write may proceed.
         """
         named = self._preflight_companion(bank, choice, banks_list, path)
-        if named is not None and banks_list is not None:
+        if named and banks_list is not None:
             # Nothing has been sent: the question decides what travels.
             self._ask_preflight(bank, choice, banks_list, path, named)
             return True
@@ -5847,17 +6215,19 @@ class KwsedApp(App[None]):
         choice: Any,
         banks_list: Optional[Sequence[Any]],
         path: str,
-    ) -> Optional[Tuple[int, int, Any]]:
-        """The companion a plain write should ask about before it runs.
+    ) -> Optional[List[Tuple[int, int, Any]]]:
+        """The companions a plain write should ask about before it runs.
 
         The question is asked when the choice comes from the import
         screen's own write keys (ctrl+s or n, which carry
         ``continue_pass``), the write is a plain one -- no overflow of its
         own, nothing answered yet, no split session continuing -- and the
-        audit of the source bank shows parts naming a writable bank that
-        the same file carries while the unit does not already hold those
-        patches. The target being the named bank itself is not a
-        question: those parts already point where they will play.
+        audit of the source bank shows parts naming writable banks that
+        the same file carries. Every such bank is listed, most-referenced
+        first, as ``(part count, file index, bank)``; a bank the parts
+        name but the file does not carry cannot be written here, so it is
+        not a question. The target being a named bank itself is not a
+        question either: those parts already point where they will play.
         """
         if not banks_list or not path:
             return None
@@ -5886,12 +6256,13 @@ class KwsedApp(App[None]):
         named = self._companions_named_by_parts(
             bank, banks_list, source_index, require_missing=False
         )
+        named = [item for item in named if item[2].number != target.number]
         if not named:
             return None
-        count, index, companion = max(named, key=lambda item: (item[0], -item[1]))
-        if companion.number == target.number:
-            return None
-        return (count, index, companion)
+        # The most-referenced companion comes first; ties keep the file's
+        # own order, so the list is stable from one visit to the next.
+        named.sort(key=lambda item: (-item[0], item[1]))
+        return named
 
     def _ask_preflight(
         self,
@@ -5899,31 +6270,38 @@ class KwsedApp(App[None]):
         choice: Any,
         banks_list: Optional[Sequence[Any]],
         path: str,
-        named: Tuple[int, int, Any],
+        named: Sequence[Tuple[int, int, Any]],
     ) -> None:
-        """Offer the three answers while nothing has been written yet."""
+        """Offer the three answers while nothing has been written yet.
+
+        Every named companion is listed, one line each, with its part
+        count and how many of its patches the performances use. The state
+        of each bank comes from the loaded copies -- the session and the
+        cache -- never from the unit, and the modal says so: the unit is
+        not re-read before the question is asked.
+        """
         if banks_list is None:
             return
-        count, index, companion = named
-        already = self._preflight_companion_is_loaded(
-            bank, banks_list, index, companion
+        lines = self._preflight_companion_lines(bank, banks_list, named)
+        listed = "\n".join(
+            f"· {label} — {self._counted(count, 'part', 'parts')} name it, "
+            f"{patches} of its patch slots are used"
+            + (" · its loaded copy already shows these patches" if loaded else "")
+            for label, count, patches, loaded in lines
         )
-        state = (
-            f"{companion.label} already holds those patches, so writing them "
-            "again changes nothing."
-            if already
-            else f"{companion.label} does not hold those patches yet."
-        )
+        labels = ", ".join(label for label, _count, _patches, _loaded in lines)
         body = (
-            f"{count} parts of the performances in {getattr(bank, 'label', '')} "
-            f"name {companion.label}, and this file carries that bank too. "
-            f"{state} Nothing has been written yet."
+            f"The performances in {getattr(bank, 'label', '')} name banks "
+            f"this file also carries ({labels}). Nothing has been written "
+            f"yet.\n\n{listed}\n\n"
+            "These states are a snapshot of the loaded copies, not of the "
+            "unit: the unit is not re-read before this question."
         )
         choices = (
-            f"Write both: this bank, plus {companion.label}'s patches and "
-            "wave sequences only (its performances stay as they are)",
-            f"Write only this bank — those parts will play whatever "
-            f"{companion.label} holds now",
+            "Write every named bank and this bank — each named bank's "
+            "patches and wave sequences only (its performances stay as "
+            "they are), then this bank",
+            f"Write only this bank — those parts will play whatever {labels} hold now",
             "Cancel — open the import screen to pick a self-contained or "
             "cards-only pass",
         )
@@ -5939,14 +6317,22 @@ class KwsedApp(App[None]):
             choice,
             banks_list,
             path,
-            index,
-            companion,
+            named,
         )
 
-    def _preflight_companion_is_loaded(
-        self, bank: Any, banks_list: Sequence[Any], index: int, companion: Any
-    ) -> bool:
-        """Whether the unit already holds the patches this companion names."""
+    def _preflight_companion_lines(
+        self,
+        bank: Any,
+        banks_list: Sequence[Any],
+        named: Sequence[Tuple[int, int, Any]],
+    ) -> List[Tuple[str, int, int, bool]]:
+        """``(label, parts, patches, loaded)`` per named companion.
+
+        ``loaded`` says whether the *loaded copy* of that bank -- session
+        or cache, never the unit -- already shows the patches the parts
+        name. It is evidence about what this app has seen, not about what
+        the instrument holds right now.
+        """
         from kws import containment
 
         try:
@@ -5954,12 +6340,20 @@ class KwsedApp(App[None]):
             sources = dict(self._sources_with_store())
             sources[scope] = bank.source
             audit = containment.audit_containment(sources, scope)
+        except (LookupError, ValueError, TypeError, AttributeError):
+            audit = None
+        lines: List[Tuple[str, int, int, bool]] = []
+        for count, index, companion in named:
             entry = banks_list[index] if index < len(banks_list) else None
             file_source = getattr(entry, "source", None)
-            slots = audit.patch_records.get(companion.number, ())
-            return self._unit_matches(companion, file_source, slots)
-        except (LookupError, IndexError, ValueError, TypeError, AttributeError):
-            return False
+            slots = (
+                audit.patch_records.get(companion.number, ())
+                if audit is not None
+                else ()
+            )
+            loaded = self._unit_matches(companion, file_source, slots)
+            lines.append((companion.label, count, len(slots), loaded))
+        return lines
 
     def _push_preflight(
         self,
@@ -5969,14 +6363,13 @@ class KwsedApp(App[None]):
         choice: Any,
         banks_list: Sequence[Any],
         path: str,
-        companion_index: int,
-        companion: Any,
+        named: Sequence[Tuple[int, int, Any]],
     ) -> None:
         """Put the preflight modal on the stack."""
         self.push_screen(
             PreflightImportScreen(body, choices=choices),
             lambda answer: self._preflight_answer(
-                answer, bank, choice, banks_list, path, companion_index, companion
+                answer, bank, choice, banks_list, path, named
             ),
         )
 
@@ -5987,14 +6380,11 @@ class KwsedApp(App[None]):
         choice: Any,
         banks_list: Sequence[Any],
         path: str,
-        companion_index: int,
-        companion: Any,
+        named: Sequence[Tuple[int, int, Any]],
     ) -> None:
         """Carry out the preflight's answer; cancel writes nothing."""
         if answer == "both":
-            self._preflight_write_both(
-                bank, choice, banks_list, path, companion_index, companion
-            )
+            self._preflight_write_both(bank, choice, banks_list, path, named)
             return
         if answer == "only":
             if not self._write_gate.armed:
@@ -6019,7 +6409,7 @@ class KwsedApp(App[None]):
             notice=(
                 "nothing was written — press o for a self-contained or "
                 "cards-only pass that repoints those parts, or x to write "
-                "the companion bank they name"
+                "the companion banks they name"
             ),
         )
 
@@ -6029,35 +6419,71 @@ class KwsedApp(App[None]):
         choice: Any,
         banks_list: Sequence[Any],
         path: str,
-        companion_index: int,
-        companion: Any,
+        named: Sequence[Tuple[int, int, Any]],
     ) -> None:
-        """The preflight's first answer: the companion's patches, then the bank.
+        """The preflight's first answer: every named companion, then the bank.
 
-        The companion's patches and wave sequences go out first, because
-        a performance that names them must find them already on the
-        unit; its performances are never sent, so that RAM bank keeps
-        whatever performances it holds. The bank's own write follows,
-        marked so neither the preflight nor the post-write popup runs
-        again.
+        Each companion's patches and wave sequences go out first, in the
+        listed order, because a performance that names them must find
+        them already on the unit; their performances are never sent, so
+        those RAM banks keep whatever performances they hold. The bank's
+        own write follows only after every companion has landed, marked
+        so neither the preflight nor the post-write popup runs again. A
+        companion that fails stops the run: what was written and what was
+        not is reported, and the source bank is not sent.
         """
         if not self._write_gate.armed:
             self.notify_status("write gate is locked", refused=True)
             return
-        try:
-            companion_entry = banks_list[companion_index]
-        except (IndexError, TypeError):
-            return
+        self._preflight_companion_chain(bank, choice, banks_list, path, named, 0, [])
 
-        def after_companion() -> None:
+    def _preflight_companion_chain(
+        self,
+        bank: Any,
+        choice: Any,
+        banks_list: Sequence[Any],
+        path: str,
+        named: Sequence[Tuple[int, int, Any]],
+        index: int,
+        completed: List[str],
+    ) -> None:
+        """Write companion ``index``, then the rest, then the source bank.
+
+        Each companion is its own fenced write. ``completed`` carries the
+        labels of the companions that already landed, so a later failure
+        can name exactly what succeeded and what was never written.
+        """
+        if index >= len(named):
             self._import_whole_bank_write(
                 bank,
                 replace(choice, preflight="both"),
                 banks_list=banks_list,
                 path=path,
             )
+            return
+        _count, companion_index, companion = named[index]
+        try:
+            companion_entry = banks_list[companion_index]
+        except (IndexError, TypeError):
+            return
+        pending = [item[2].label for item in named[index:]]
+        pending.append(getattr(bank, "label", "") or "the source bank")
+        note = (
+            "written so far: "
+            + (", ".join(completed) if completed else "nothing")
+            + "; not written: "
+            + ", ".join(pending)
+        )
 
-        self._write_companion_patches(companion_entry, companion, after_companion)
+        def after_companion() -> None:
+            completed.append(companion.label)
+            self._preflight_companion_chain(
+                bank, choice, banks_list, path, named, index + 1, completed
+            )
+
+        self._write_companion_patches(
+            companion_entry, companion, after_companion, pending_note=note
+        )
 
     def _companion_write_patches_only(self, choice: Any) -> bool:
         """Whether a companion write must leave the bank's performances alone.
@@ -6101,6 +6527,8 @@ class KwsedApp(App[None]):
         entry: Any,
         companion: Any,
         on_done: Optional[Callable[[], None]] = None,
+        *,
+        pending_note: str = "",
     ) -> None:
         """Write one companion bank's patches and wave sequences only.
 
@@ -6109,13 +6537,21 @@ class KwsedApp(App[None]):
         performances' parts name, not to replace the performances that
         bank already holds. The write is fenced like any other: the
         destination is backed up before anything is sent, and the
-        read-back decides whether it landed.
+        read-back decides whether it landed. ``pending_note`` is what a
+        multi-companion run still owed when this write started; a failure
+        reports it, so the banks that succeeded are never silently
+        swallowed by the one that did not.
         """
         from kws import backup as _backup
         from kws import banks as _banks
 
         source = getattr(entry, "source", None)
         if source is None:
+            self.notify_status(
+                f"import: the file carries no records for {companion.label}, "
+                "so it was not written",
+                refused=True,
+            )
             return
         patches_blob = b"".join(getattr(source, "patches", []) or []) or None
         waveseq = getattr(source, "waveseq", None)
@@ -6125,6 +6561,10 @@ class KwsedApp(App[None]):
                 f"for {companion.label}, so there is nothing to write",
                 refused=True,
             )
+            # Nothing to send is not a failure of the run: the rest of
+            # the answer still goes out.
+            if on_done is not None:
+                on_done()
             return
         count = sum(
             1
@@ -6151,20 +6591,68 @@ class KwsedApp(App[None]):
             )
 
         def done(result: Any, failure: BaseException | None) -> None:
-            if failure is not None:
-                self.notify_status(f"import: {failure}", refused=True)
-                return
-            if hasattr(self, "_record_write"):
-                self._record_write(result)
-            self._remember_companion_patches(companion, source)
+            self._companion_write_done(
+                result,
+                failure,
+                companion=companion,
+                source=source,
+                count=count,
+                pending_note=pending_note,
+                on_done=on_done,
+            )
+
+        self._device_worker(work, done, f"writing patches into {companion.label}")
+
+    def _companion_write_done(
+        self,
+        result: Any,
+        failure: BaseException | None,
+        *,
+        companion: Any,
+        source: Any,
+        count: int,
+        pending_note: str,
+        on_done: Optional[Callable[[], None]],
+    ) -> None:
+        """Report one companion write: only a verified one counts as landed."""
+        verdict = "" if failure is not None else self._bundle_result_error(result)
+        if failure is not None or verdict:
+            # A companion that was not verified must not be booked as
+            # landed: the chain stops and nothing claims it is there.
+            self.notify_status(
+                self._companion_failure_message(failure or verdict, pending_note),
+                refused=True,
+            )
+            return
+        unchanged = self._bundle_sent_nothing(result)
+        if hasattr(self, "_record_write"):
+            self._record_write(result)
+        self._remember_companion_patches(companion, source)
+        if unchanged:
+            self.notify_status(
+                f"{companion.label} already matches the file — nothing was "
+                f"sent; its performances were left as they were"
+            )
+        else:
             self.notify_status(
                 f"wrote {self._counted(count, 'patch', 'patches')} into "
                 f"{companion.label}; its performances were left as they were"
             )
-            if on_done is not None:
-                on_done()
+        if on_done is not None:
+            on_done()
 
-        self._device_worker(work, done, f"writing patches into {companion.label}")
+    @staticmethod
+    def _companion_failure_message(failure: Any, pending_note: str) -> str:
+        """One failure line that still names what the run had done.
+
+        A multi-companion run that stops halfway must not look like a
+        clean failure of the whole answer: the banks written before the
+        failure are listed as written, the rest as not written.
+        """
+        message = f"import: {failure}"
+        if pending_note:
+            message = f"{message} — {pending_note}"
+        return message
 
     def _remember_companion_patches(self, companion: Any, source: Any) -> None:
         """Record the patches a companion write left on the unit.
@@ -6302,6 +6790,93 @@ class KwsedApp(App[None]):
                 banks_list, path, "", perfcopy.ImportMode.AS_IS
             )
 
+    @staticmethod
+    def _bundle_sent_nothing(result: Any) -> bool:
+        """Whether the bridge reported every kind unchanged and sent nothing."""
+        return (
+            isinstance(result, dict)
+            and result.get("kinds") == []
+            and bool(result.get("unchanged"))
+        )
+
+    @staticmethod
+    def _bundle_result_error(result: Any) -> str:
+        """The failure a bundle result reports about itself, or "" when clean.
+
+        A ``verified: False`` or a non-None ``mismatch`` means the unit
+        did not store what was sent: for the outcome that is a failed
+        bank whose backup is the way back, not a success to celebrate.
+        """
+        if not isinstance(result, dict):
+            return ""
+        mismatch = result.get("mismatch")
+        if mismatch is not None:
+            return f"read-back mismatch: {mismatch}"
+        if result.get("verified") is False:
+            return "read-back mismatch"
+        return ""
+
+    def _write_bundle_once(
+        self, bank_number: int, payload: Mapping[str, Any], backup_dir: str
+    ) -> Tuple[Any, str]:
+        """One fenced bundle write, as ``(result, error)``.
+
+        The bridge raises when the transfer is refused; a clean return
+        must still prove itself, so the result's own ``verified`` /
+        ``mismatch`` verdict becomes the error the outcome names.
+        Nothing raises here: the caller's outcome is the report.
+        """
+        try:
+            result = self.device.write_bank_bundle(
+                bank_number,
+                backup_dir=backup_dir,
+                before_blocks=None,
+                **payload,
+            )
+        except Exception as exc:  # a refused write leaves the bank as it was
+            return None, str(exc)
+        return result, self._bundle_result_error(result)
+
+    def _write_bank_steps(
+        self,
+        steps: Sequence[Tuple[Any, Dict[str, Any], Optional[BankWriteOutcome]]],
+        backup_dir: str,
+        *,
+        built: Any = None,
+    ) -> MultiBankOutcome:
+        """Write each (bank, bundle payload, outcome shell) in order.
+
+        Cross-bank writes are not atomic and must not pretend to be:
+        when a bundle is refused or its read-back does not match, the
+        later banks are not attempted and the outcome reports exactly
+        what landed, what failed and what was never touched -- instead
+        of raising away the banks that are already written. ``built`` is
+        the overflow import's full build, when these steps are one.
+        """
+        completed: List[BankWriteOutcome] = []
+        for index, (step_bank, payload, shell) in enumerate(steps):
+            result, error = self._write_bundle_once(
+                step_bank.number, payload, backup_dir
+            )
+            if error:
+                return MultiBankOutcome(
+                    completed=completed,
+                    failed_bank=step_bank,
+                    error=error,
+                    not_written=[bank for bank, _p, _s in steps[index + 1 :]],
+                    built=built,
+                    skipped_groups=[
+                        pending.group
+                        for _b, _p, pending in steps[index:]
+                        if pending is not None and pending.group is not None
+                    ],
+                )
+            entry = shell if shell is not None else BankWriteOutcome(bank=step_bank)
+            entry.result = result
+            entry.verified = True
+            completed.append(entry)
+        return MultiBankOutcome(completed=completed, built=built)
+
     def _write_with_overflow(
         self,
         bank: Any,
@@ -6310,13 +6885,17 @@ class KwsedApp(App[None]):
         mode: Any,
         backup_dir: str,
         overflow_id: str,
-    ) -> Any:
+        skip_overflow: bool = False,
+    ) -> MultiBankOutcome:
         """Write the overflow bank first, then the target.
 
         The overflow bank must exist on the unit before a performance that
         names it arrives, so its patches and wave sequences go out first.
         Each bank is its own fenced ``write_bank_bundle``: two backups, two
-        read-back verifications, two independent undo points.
+        read-back verifications, two independent undo points. With
+        ``skip_overflow`` the overflow bank already landed in an earlier
+        pass of this session (its write succeeded, the target's did not),
+        so only the target goes out: the patches are already on the unit.
         """
         from kws import banks as _banks
 
@@ -6329,50 +6908,104 @@ class KwsedApp(App[None]):
         if not plan.fits:
             raise ValueError("; ".join(plan.rejected))
         built = perfcopy.build_overflow_import(plan_sources, plan)
-        overflow_result = self.device.write_bank_bundle(
-            overflow.number,
-            patches=built.overflow_patches,
-            waveseq=built.overflow_waveseq,
-            backup_dir=backup_dir,
-            before_blocks=None,
+        steps: List[Tuple[Any, Dict[str, Any], Optional[BankWriteOutcome]]] = []
+        if not skip_overflow:
+            steps.append(
+                (
+                    overflow,
+                    {
+                        "patches": built.overflow_patches,
+                        "waveseq": built.overflow_waveseq,
+                    },
+                    None,
+                )
+            )
+        steps.append(
+            (
+                target,
+                {
+                    "performances": built.destination.performances,
+                    "patches": built.destination.patches,
+                    "waveseq": built.destination.waveseq,
+                },
+                None,
+            )
         )
-        target_result = self.device.write_bank_bundle(
-            target.number,
-            performances=built.destination.performances,
-            patches=built.destination.patches,
-            waveseq=built.destination.waveseq,
-            backup_dir=backup_dir,
-            before_blocks=None,
-        )
-        return built, overflow, overflow_result, target_result
+        return self._write_bank_steps(steps, backup_dir, built=built)
 
     def _overflow_written(
         self,
-        result: Any,
+        outcome: MultiBankOutcome,
         label: str,
         into: str,
         target: Any,
         target_scope: str,
+        overflow_id: str = "",
     ) -> None:
-        """Book-keeping after both halves of an overflow import landed."""
-        built, overflow, overflow_result, target_result = result
-        if hasattr(self, "_record_write"):
-            self._record_write(overflow_result)
-        self._import_whole_bank_written(
-            label,
-            target,
-            built.destination,
-            target_result,
-            "",
-            target_scope=target_scope,
+        """Book-keeping after an overflow import landed.
+
+        Both halves landed -- the overflow bank's patches first, then the
+        target -- or, after a partial pass marked the session, the target
+        alone with the overflow bank already holding what the parts name.
+        """
+        built = outcome.built
+        overflow_entry = None
+        if overflow_id:
+            overflow_entry = next(
+                (
+                    entry
+                    for entry in outcome.completed
+                    if getattr(entry.bank, "id", "") == overflow_id
+                ),
+                None,
+            )
+        target_entry = next(
+            (entry for entry in outcome.completed if entry is not overflow_entry),
+            None,
         )
-        self._remember_overflow(overflow, built)
+        if overflow_entry is not None and hasattr(self, "_record_write"):
+            self._record_write(overflow_entry.result)
+        if target_entry is not None:
+            self._import_whole_bank_written(
+                label,
+                target,
+                built.destination,
+                target_entry.result,
+                "",
+                target_scope=target_scope,
+            )
+        if overflow_entry is not None:
+            self._remember_overflow(overflow_entry.bank, built)
+            target_result = target_entry.result if target_entry else None
+            both_unchanged = self._bundle_sent_nothing(
+                overflow_entry.result
+            ) and self._bundle_sent_nothing(target_result)
+            if both_unchanged:
+                self.notify_status(
+                    f"{into} and {overflow_entry.bank.label} already match the "
+                    "file — nothing was sent"
+                )
+                return
+            self.notify_status(
+                f"imported {label} into {into}: "
+                f"{len(built.destination.performances) // rec.PERFORMANCE_SIZE} "
+                f"performances, {built.patch_count} patches repointed from "
+                f"{overflow_entry.bank.label}; {overflow_entry.bank.label} also "
+                f"received {built.patch_count} patches"
+            )
+            return
+        # The overflow bank landed in an earlier pass; this write is the
+        # target alone, and the status must not claim it received patches.
+        overflow_label = overflow_id
+        try:
+            overflow_label = banks.bank(overflow_id).label
+        except LookupError:
+            pass
         self.notify_status(
             f"imported {label} into {into}: "
             f"{len(built.destination.performances) // rec.PERFORMANCE_SIZE} "
             f"performances, {built.patch_count} patches repointed from "
-            f"{overflow.label}; {overflow.label} also received "
-            f"{built.patch_count} patches"
+            f"{overflow_label}; the overflow bank already held them"
         )
 
     def _remember_overflow(self, overflow: Any, built: Any) -> None:
@@ -6454,9 +7087,23 @@ class KwsedApp(App[None]):
         performance is packed against the target, only the first group
         travels, and the other groups' slots are the next cards' load.
         """
+        from kws import banks as _banks
+
         session_key = str(getattr(choice, "session_key", "") or "")
         remainder = self._split_pass_remainder(session_key) if session_key else []
         if remainder:
+            if (
+                self._split_pass_kind(session_key) == OVERFLOW_CARDS_ONLY
+                and getattr(target, "id", "") != _banks.bank("CARD").id
+            ):
+                # A cards-only session continues onto the card, never onto
+                # a RAM bank the screen's selector happens to show.
+                self.notify_status(
+                    "cards-only continuation needs the card in the slot, not "
+                    f"{getattr(target, 'label', target)}: no RAM bank is written",
+                    refused=True,
+                )
+                return None, False, None
             return (
                 self._split_continuation_plan(bank, sources, target, mode, remainder),
                 True,
@@ -6478,8 +7125,6 @@ class KwsedApp(App[None]):
         )
         if split_plan[1].fits:
             return split_plan, True, None
-        from kws import banks as _banks
-
         try:
             overflow = _banks.bank(overflow_id)
         except LookupError:
@@ -6538,7 +7183,28 @@ class KwsedApp(App[None]):
         only thing a later pass needs is the card now in the slot. A group
         that cannot be planned at all refuses the whole run, with the
         engine's own reasons, and ``(None, [])`` writes nothing.
+
+        The write goes to the physical card slot whatever the screen's
+        target selector showed. A non-Card target is a caller bug, not
+        something to redirect: it is refused, because a cards-only pass
+        that quietly landed in RAM would be the exact mistake this kind
+        exists to avoid.
         """
+        from kws import banks as _banks
+
+        try:
+            card = _banks.bank("CARD")
+        except LookupError:
+            self.notify_status("no card bank is available to write", refused=True)
+            return None, []
+        if getattr(target, "id", "") != card.id:
+            self.notify_status(
+                "cards-only pass needs the card in the slot, not "
+                f"{getattr(target, 'label', target)}: no RAM bank is written",
+                refused=True,
+            )
+            return None, []
+        target = card
         plan_sources = dict(sources)
         # The file the bank came from is not necessarily in the session,
         # so the planner sees it under its own scope.
@@ -6586,7 +7252,12 @@ class KwsedApp(App[None]):
         if not statement or not cards_only:
             return statement
         left = self._cards_only_left(session_key, split_plan, first_remainder)
-        return statement + self._cards_only_remaining_statement(left)
+        return (
+            statement
+            + self._cards_only_remaining_statement(left)
+            + " — writes go to the card in the slot, one group per card, "
+            "no RAM bank"
+        )
 
     def _cards_only_choice(self, choice: Any, session_key: str) -> bool:
         """Whether this write is a cards-only pass, or continues one."""
@@ -6707,33 +7378,40 @@ class KwsedApp(App[None]):
         self,
         split_plan: Tuple[Dict[str, deps.Source], Any],
         backup_dir: str,
-    ) -> Any:
+    ) -> MultiBankOutcome:
         """Build every group and write it as its own fenced bundle.
 
         One ``write_bank_bundle`` per bank, in partition order (the target
         first, then the overflow bank): each is a separate backup, a
         separate read-back verification and a separate undo point. The
         banks of a self-contained split do not reference each other, so
-        the order is the partition's own, not a dependency.
+        the order is the partition's own, not a dependency. A failed bank
+        stops the pass: the outcome names the groups that landed and the
+        ones the failure hit or stopped before, and the session keeps
+        their source slots so ``n`` never rewrites a landed group.
         """
         plan_sources, partition = split_plan
         built = perfcopy.build_split_partition(plan_sources, partition)
-        written: list[Tuple[Any, Any, Any]] = []
+        steps: List[Tuple[Any, Dict[str, Any], Optional[BankWriteOutcome]]] = []
         for group, payload in zip(partition.groups, built):
-            result = self.device.write_bank_bundle(
-                group.target_bank.number,
-                performances=payload.performances,
-                patches=payload.patches,
-                waveseq=payload.waveseq,
-                backup_dir=backup_dir,
-                before_blocks=None,
+            steps.append(
+                (
+                    group.target_bank,
+                    {
+                        "performances": payload.performances,
+                        "patches": payload.patches,
+                        "waveseq": payload.waveseq,
+                    },
+                    BankWriteOutcome(
+                        bank=group.target_bank, built=payload, group=group
+                    ),
+                )
             )
-            written.append((group, payload, result))
-        return written
+        return self._write_bank_steps(steps, backup_dir)
 
     def _split_written(
         self,
-        result: Any,
+        outcome: MultiBankOutcome,
         label: str,
         remaining: Optional[Sequence[int]] = None,
         *,
@@ -6748,13 +7426,14 @@ class KwsedApp(App[None]):
         card instead of staying silent.
         """
         summary: list[str] = []
-        for group, built, write_result in result:
+        for entry in outcome.completed:
+            group = entry.group
             scope = getattr(group.target_bank, "id", str(group.target_bank))
             self._import_whole_bank_written(
                 label,
                 group.target_bank,
-                built,
-                write_result,
+                entry.built,
+                entry.result,
                 "",
                 target_scope=scope,
             )
@@ -6769,12 +7448,12 @@ class KwsedApp(App[None]):
         if cards_only:
             message = (
                 f"imported {label} as cards-only groups — "
-                f"{len(result)} card: " + "; ".join(summary)
+                f"{len(outcome.completed)} card: " + "; ".join(summary)
             )
         else:
             message = (
                 f"imported {label} as a self-contained split — "
-                f"{len(result)} banks: " + "; ".join(summary)
+                f"{len(outcome.completed)} banks: " + "; ".join(summary)
             )
         if remaining:
             message += (
@@ -6800,25 +7479,51 @@ class KwsedApp(App[None]):
             return ""
         return str(state.get("pass_kind") or "")
 
-    def _record_split_pass_groups(self, key: str, result: Any) -> Set[int]:
+    def _record_split_pass_groups(
+        self, key: str, outcome: MultiBankOutcome
+    ) -> Set[int]:
         """Record one split pass's placements; return the source slots it wrote.
 
-        Each group's plan names exactly what the write put where, so the
-        session's written map grows by the group's allocations and the
-        remainder shrinks by the same slots.
+        Each landed group's plan names exactly what the write put where, so
+        the session's written map grows by the group's allocations and the
+        remainder shrinks by the same slots. Only the groups in
+        ``outcome.completed`` are recorded: a failed pass keeps the groups
+        it never reached in the remainder.
         """
         written: Set[int] = set()
-        for group, built, _write_result in result:
-            into = str(getattr(group.target_bank, "label", group.target_bank))
-            self._record_import_pass(key, built, into)
-            plan = getattr(built, "plan", None)
+        for entry in outcome.completed:
+            into = str(
+                getattr(entry.group.target_bank, "label", entry.group.target_bank)
+            )
+            self._record_import_pass(key, entry.built, into)
+            plan = getattr(entry.built, "plan", None)
             for allocation in getattr(plan, "allocations", None) or []:
                 written.add(int(allocation.source_perf.number))
         return written
 
+    def _record_split_session_state(
+        self,
+        key: str,
+        written_now: Set[int],
+        prior: Sequence[int],
+        choice: Any,
+        mode: Any,
+        cards_only: bool,
+    ) -> List[int]:
+        """Fold one split pass into the session; return the slots left."""
+        remaining = [slot for slot in prior if slot not in written_now]
+        state = self._import_passes.setdefault(key, {"written": {}, "targets": []})
+        # A session marker, not a secret.
+        state["pass_kind"] = OVERFLOW_CARDS_ONLY if cards_only else "split"
+        state["mode"] = mode
+        state["split_remaining"] = remaining
+        state.setdefault("split_target", str(getattr(choice, "target_bank", "") or ""))
+        state.setdefault("source_index", int(getattr(choice, "source_index", 0) or 0))
+        return remaining
+
     def _split_pass_done(
         self,
-        result: Any,
+        outcome: MultiBankOutcome,
         choice: Any,
         label: str,
         banks_list: Optional[Sequence[Any]],
@@ -6838,28 +7543,17 @@ class KwsedApp(App[None]):
         cards_only = self._cards_only_choice(choice, session_key)
         reported: Optional[Sequence[int]] = first_remainder
         if session_key:
-            written_now = self._record_split_pass_groups(session_key, result)
+            written_now = self._record_split_pass_groups(session_key, outcome)
             prior = (
                 list(first_remainder)
                 if first_remainder is not None
                 else self._split_pass_remainder(session_key)
             )
-            remaining = [slot for slot in prior if slot not in written_now]
-            state = self._import_passes.setdefault(
-                session_key, {"written": {}, "targets": []}
-            )
-            # A session marker, not a secret.
-            state["pass_kind"] = OVERFLOW_CARDS_ONLY if cards_only else "split"
-            state["mode"] = mode
-            state["split_remaining"] = remaining
-            state.setdefault(
-                "split_target", str(getattr(choice, "target_bank", "") or "")
-            )
-            state.setdefault(
-                "source_index", int(getattr(choice, "source_index", 0) or 0)
+            remaining = self._record_split_session_state(
+                session_key, written_now, prior, choice, mode, cards_only
             )
             reported = remaining
-        self._split_written(result, label, reported, cards_only=cards_only)
+        self._split_written(outcome, label, reported, cards_only=cards_only)
         if (
             session_key
             and getattr(choice, "continue_pass", False)
@@ -6958,16 +7652,20 @@ class KwsedApp(App[None]):
             lambda picked: self._import_whole_bank_chosen(banks_list, picked, path),
         )
 
-    def _import_whole_bank_written(
+    def _remember_written_bank(
         self,
-        label: str,
         target: Any,
         relocated: Any,
         result: Any,
-        conflict: str = "",
         target_scope: Optional[str] = None,
-    ) -> None:
-        """Book-keeping after a whole-bank import has landed."""
+    ) -> int:
+        """Record a landed write and update the session and the cache.
+
+        The undo record, the session's source, the bankstore cache and
+        the browser's refresh -- exactly what a success path does, minus
+        the status line: the caller owns what the user is told. Returns
+        the number of performances the bank now holds.
+        """
         if target_scope is None:
             target_scope = getattr(target, "id", None) or str(target)
         if hasattr(self, "_record_write"):
@@ -7001,10 +7699,40 @@ class KwsedApp(App[None]):
             except OSError:
                 pass
         self._refresh_written_bank(target_scope, relocated)
-        overwrote = f"; overwrote {conflict}" if conflict else ""
+        return len(perfs)
+
+    def _import_whole_bank_written(
+        self,
+        label: str,
+        target: Any,
+        relocated: Any,
+        result: Any,
+        conflict: str = "",
+        target_scope: Optional[str] = None,
+    ) -> None:
+        """Book-keeping after a whole-bank import has landed."""
+        if target_scope is None:
+            target_scope = getattr(target, "id", None) or str(target)
         into = target_scope if target_scope != target.id else target.label
+        if (
+            isinstance(result, dict)
+            and result.get("kinds") == []
+            and result.get("unchanged")
+        ):
+            # The bridge's fresh unit read already equalled every payload,
+            # so nothing was sent. Saying "imported" would claim SysEx
+            # that never left the cable; the pre-write backup was still
+            # taken, so the undo point is recorded.
+            self._remember_written_bank(target, relocated, result, target_scope)
+            backups = self._counted(self._backup_count(result), "backup", "backups")
+            self.notify_status(
+                f"{label} already matches {into} — nothing was sent ({backups} on disk)"
+            )
+            return
+        perfs = self._remember_written_bank(target, relocated, result, target_scope)
+        overwrote = f"; overwrote {conflict}" if conflict else ""
         self.notify_status(
-            f"imported {label} into {into}: {len(perfs)} performances{overwrote}",
+            f"imported {label} into {into}: {perfs} performances{overwrote}",
             warn=bool(conflict),
         )
 

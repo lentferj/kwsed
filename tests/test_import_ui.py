@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import os
 from types import SimpleNamespace
-from typing import Any, Optional
+from typing import Any, Optional, cast
 from unittest.mock import patch
 
 import pytest
@@ -2447,7 +2447,7 @@ async def test_as_is_write_ends_in_a_popup_for_the_carried_companion(
         await _settle(pilot)
         assert popup is not None, "the popup was not shown"
         body = _static_text(popup, "dangling-body")
-        assert "2 parts of the performances in Main bank name RAM 2" in body
+        assert "2 parts name RAM 2" in body
         assert "Main bank only" in body
         hint = _static_text(popup, "dangling-hint")
         assert "write the file's RAM 2 bank" in hint
@@ -3389,6 +3389,270 @@ async def test_cards_only_continuation_requires_the_write_gate(
     assert state["split_remaining"] == list(range(50, 60))
 
 
+async def _press_cards_only(pilot: Any) -> None:
+    """Choose the cards-only kind from the overflow menu."""
+    await pilot.press("o")
+    await _settle(pilot)
+    await pilot.press("down")
+    await _settle(pilot)
+    await pilot.press("down")
+    await _settle(pilot)
+    await pilot.press("enter")
+    await _settle(pilot)
+
+
+def _assert_no_ram_written(app: KwsedApp) -> None:
+    """No RAM bank key may appear in the demo device's written map."""
+    assert all(not bank_id.startswith("RAM") for bank_id, _kind in app.device._written)
+
+
+@pytest.mark.asyncio
+async def test_cards_only_from_the_default_target_writes_the_card(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """The default RAM 1 target must not leak into a cards-only write.
+
+    The selector still shows RAM 1; choosing the cards-only kind writes
+    exactly one bundle, to the physical Card, and touches no RAM bank.
+    The statement before the write says where it goes.
+    """
+    app = _split_pass_app(tmp_path, monkeypatch)
+    statuses: list[str] = []
+    app.notify_status = lambda msg, *a, **k: statuses.append(str(msg))  # type: ignore[method-assign]
+    file_banks = _cards_only_banks()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        first = WholeBankImportScreen(
+            path="cards-default.syx", banks=file_banks, gate=app._write_gate
+        )
+        app.push_screen(
+            first,
+            lambda picked: app._import_whole_bank_chosen(
+                file_banks, picked, "cards-default.syx"
+            ),
+        )
+        await _settle(pilot)
+        assert first._target_bank().id == "RAM1"
+        await pilot.press("m")
+        await _settle(pilot)
+        await pilot.press("m")  # self-contained packed
+        await _settle(pilot)
+        await _press_cards_only(pilot)
+        await _wait_for_writes(app, pilot, 1)
+        await _settle(pilot)
+
+        assert app.device.bundle_write_count == 1
+        assert [w["bank"] for w in app.device.bundle_writes] == [
+            banks.bank("CARD").label
+        ]
+        assert set(app.device._written) == {
+            ("CARD", banks.Kind.PERFORMANCE),
+            ("CARD", banks.Kind.PATCH),
+        }
+        statement = next(s for s in statuses if "cards-only groups" in s)
+        assert "Card gets 50 performances and 35 patches" in statement
+        assert "writes go to the card in the slot, one group per card" in statement
+        assert "no RAM bank" in statement
+
+
+@pytest.mark.asyncio
+async def test_cards_only_after_picking_ram3_still_writes_the_card(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """An explicit RAM 3 selection must not leak into a cards-only write."""
+    app = _split_pass_app(tmp_path, monkeypatch)
+    statuses: list[str] = []
+    app.notify_status = lambda msg, *a, **k: statuses.append(str(msg))  # type: ignore[method-assign]
+    file_banks = _cards_only_banks()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        first = WholeBankImportScreen(
+            path="cards-ram3.syx", banks=file_banks, gate=app._write_gate
+        )
+        app.push_screen(
+            first,
+            lambda picked: app._import_whole_bank_chosen(
+                file_banks, picked, "cards-ram3.syx"
+            ),
+        )
+        await _settle(pilot)
+        for _ in range(2):
+            await pilot.press("b")
+            await _settle(pilot)
+        assert first._target_bank().id == "RAM3"
+        await pilot.press("m")
+        await _settle(pilot)
+        await pilot.press("m")  # self-contained packed
+        await _settle(pilot)
+        await _press_cards_only(pilot)
+        await _wait_for_writes(app, pilot, 1)
+        await _settle(pilot)
+
+        assert app.device.bundle_write_count == 1
+        assert [w["bank"] for w in app.device.bundle_writes] == [
+            banks.bank("CARD").label
+        ]
+        _assert_no_ram_written(app)
+        statement = next(s for s in statuses if "cards-only groups" in s)
+        assert "Card gets 50 performances and 35 patches" in statement
+        assert "no RAM bank" in statement
+
+
+@pytest.mark.asyncio
+async def test_cards_only_continuation_stays_on_the_card(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """``n`` after a cards-only pass writes the card again, never RAM.
+
+    The reopened screen's selector is moved to RAM 3 first: the session
+    is cards-only, so the continuation must still resolve the card slot.
+    """
+    app = _split_pass_app(tmp_path, monkeypatch)
+    statuses: list[str] = []
+    app.notify_status = lambda msg, *a, **k: statuses.append(str(msg))  # type: ignore[method-assign]
+    file_banks = _cards_only_banks()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        first = WholeBankImportScreen(
+            path="cards-next.syx", banks=file_banks, gate=app._write_gate
+        )
+        app.push_screen(
+            first,
+            lambda picked: app._import_whole_bank_chosen(
+                file_banks, picked, "cards-next.syx"
+            ),
+        )
+        await _settle(pilot)
+        await pilot.press("m")
+        await _settle(pilot)
+        await pilot.press("m")  # self-contained packed
+        await _settle(pilot)
+        await _press_cards_only(pilot)
+        await _wait_for_writes(app, pilot, 1)
+        await _settle(pilot)
+        assert [w["bank"] for w in app.device.bundle_writes] == [
+            banks.bank("CARD").label
+        ]
+
+        second = app.screen
+        assert isinstance(second, WholeBankImportScreen)
+        assert "writes go to the card in the slot, one group per card" in (
+            _static_text(second, "whole-bank-mode")
+        )
+        for _ in range(2):
+            await pilot.press("b")
+            await _settle(pilot)
+        assert second._target_bank().id == "RAM3"
+        assert second._split_target_bank().id == "CARD"
+        await pilot.press("n")
+        await _wait_for_writes(app, pilot, 2)
+        await _settle(pilot)
+
+        assert [w["bank"] for w in app.device.bundle_writes] == [
+            banks.bank("CARD").label,
+            banks.bank("CARD").label,
+        ]
+        _assert_no_ram_written(app)
+        third = app.screen
+        assert isinstance(third, WholeBankImportScreen)
+        assert "no RAM bank" in _static_text(third, "whole-bank-status")
+
+
+@pytest.mark.asyncio
+async def test_cards_only_locked_gate_writes_nothing(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """A locked gate refuses the cards-only step and writes nothing."""
+    app = _split_pass_app(tmp_path, monkeypatch)
+    file_banks = _cards_only_banks()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        first = WholeBankImportScreen(
+            path="cards-locked.syx", banks=file_banks, gate=app._write_gate
+        )
+        app.push_screen(
+            first,
+            lambda picked: app._import_whole_bank_chosen(
+                file_banks, picked, "cards-locked.syx"
+            ),
+        )
+        await _settle(pilot)
+        app._write_gate.toggle()  # the user locked the gate
+        await pilot.press("m")
+        await _settle(pilot)
+        await pilot.press("m")  # self-contained packed
+        await _settle(pilot)
+        await _press_cards_only(pilot)
+        await _settle(pilot)
+
+        assert app.device.bundle_write_count == 0
+        assert app.screen is first
+        assert "write gate is locked" in _static_text(first, "whole-bank-status")
+
+
+@pytest.mark.asyncio
+async def test_cancelling_the_cards_only_step_writes_nothing(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """Escape at the overflow menu leaves the whole-bank screen, writes nothing."""
+    app = _split_pass_app(tmp_path, monkeypatch)
+    file_banks = _cards_only_banks()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        first = WholeBankImportScreen(
+            path="cards-cancel.syx", banks=file_banks, gate=app._write_gate
+        )
+        app.push_screen(
+            first,
+            lambda picked: app._import_whole_bank_chosen(
+                file_banks, picked, "cards-cancel.syx"
+            ),
+        )
+        await _settle(pilot)
+        await pilot.press("o")
+        await _settle(pilot)
+        assert isinstance(app.screen, ImportMenuScreen)
+        await pilot.press("escape")
+        await _settle(pilot)
+
+        assert isinstance(app.screen, WholeBankImportScreen)
+        assert app.screen is first
+        assert app.device.bundle_write_count == 0
+
+
+@pytest.mark.asyncio
+async def test_cards_only_choice_with_a_ram_target_is_refused(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """A cards-only choice naming a RAM bank is a bug and writes nothing.
+
+    The app must refuse a non-Card target rather than quietly redirecting
+    the pass to the card.
+    """
+    app = _split_pass_app(tmp_path, monkeypatch)
+    statuses: list[str] = []
+    app.notify_status = lambda msg, *a, **k: statuses.append(str(msg))  # type: ignore[method-assign]
+    file_banks = _cards_only_banks()
+    choice = WholeBankChoice(
+        0,
+        "RAM1",
+        True,
+        perfcopy.ImportMode.SELF_CONTAINED_PACKED,
+        "cards.syx|RAM1|bad-target",
+        True,
+        "",
+        "cards_only",
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._import_whole_bank_write(
+            file_banks[0], choice, banks_list=file_banks, path="cards.syx"
+        )
+        await _settle(pilot)
+        assert app.device.bundle_write_count == 0
+        assert any("no RAM bank is written" in s for s in statuses), statuses
+
+
 @pytest.mark.asyncio
 async def test_a_raising_done_still_ends_the_progress_bar(tmp_path: Any) -> None:
     """A failed report must not leave the bar frozen at its last percent.
@@ -3449,25 +3713,47 @@ async def test_the_offer_compares_against_the_unit_when_it_has_the_bank(
 
 
 @pytest.mark.asyncio
-async def test_a_unit_bank_that_already_matches_is_not_offered(
+async def test_a_matching_unit_bank_is_disclosed_but_not_re_offered(
     tmp_path: Any, monkeypatch: Any
 ) -> None:
-    """The companion is offered only when it is actually missing."""
-    from kwsed.import_bank import DanglingRefsScreen
+    """A matching loaded copy is said so, and "source only" writes one bundle.
 
-    app, _recorded = _armed_app(tmp_path, monkeypatch)
-    monkeypatch.setattr(bankstore, "save", lambda *a, **k: None)
+    The preflight asks every time (that predictability is deliberate), so a
+    matching copy must not suppress the question. What it must do is say
+    that the comparison is a snapshot, not a unit read, and answer "source
+    only" without a second nagging popup afterwards.
+    """
+    from kwsed.import_bank import DanglingRefsScreen, PreflightImportScreen
+
+    app, _recorded = _preflight_app(tmp_path, monkeypatch)
     file_banks = _two_bank_file()
     app._sources["RAM2"] = file_banks[1].source
     async with app.run_test() as pilot:
         await pilot.pause()
-        app._import_whole_bank_write(
-            file_banks[0],
-            WholeBankChoice(0, "RAM3", True, perfcopy.ImportMode.AS_IS, "s", True),
-            banks_list=file_banks,
-            path="two.syx",
+        app.push_screen(
+            WholeBankImportScreen(
+                path="two.syx", banks=file_banks, gate=app._write_gate
+            ),
+            lambda picked: app._import_whole_bank_chosen(file_banks, picked, "two.syx"),
         )
-        await _settle(pilot, times=60)
+        await _settle(pilot)
+        await pilot.press("b")
+        await pilot.press("b")  # target RAM 3
+        await pilot.press("ctrl+s")
+        for _ in range(100):
+            await pilot.pause()
+            if isinstance(app.screen, PreflightImportScreen):
+                break
+        assert isinstance(app.screen, PreflightImportScreen)
+        body = _static_text(app.screen, "preflight-body")
+        assert "loaded copies, not of the unit" in body
+        assert "already shows these patches" in body
+        await pilot.press("2")  # source only
+        for _ in range(100):
+            await pilot.pause()
+            if app.device.bundle_write_count:
+                break
+        await _settle(pilot, times=40)
         assert not isinstance(app.screen, DanglingRefsScreen)
     assert app.device.bundle_write_count == 1
 
@@ -3799,6 +4085,874 @@ async def test_preflight_asks_even_when_the_unit_already_has_the_patches(
         modal = app.screen
         assert isinstance(modal, PreflightImportScreen)
         body = _static_text(modal, "preflight-body")
-        assert "2 parts of the performances in Main bank name RAM 2" in body
-        assert "already holds those patches" in body
+        assert "2 parts name it" in body
+        # The state is a snapshot of the loaded copy, never a claim about
+        # the unit: nothing re-read the instrument before this question.
+        assert "loaded copy already shows these patches" in body
+        assert "the unit is not re-read" in body
+        assert "already holds those patches" not in body
+        assert "the unit already" not in body
         assert app.device.bundle_write_count == 0
+
+
+def _three_bank_file() -> list[Any]:
+    """A three-bank file whose main bank names two of the banks it carries.
+
+    Every name is invented. RAM 3 is named by five used parts and RAM 2
+    by three, so the preflight lists RAM 3 first; each named bank also
+    carries a wave sequence, so a companion write sends both kinds. A
+    Card bank rides along in the file but no part names it: it must not
+    appear in the question.
+    """
+    from tests.test_bankbuild import make_patch, make_performance, make_waveseq
+
+    perfs = [_empty_perf() for _ in range(50)]
+    perfs[2] = make_performance("Harbor Gate", ((1, 2), (2, 4)))
+    perfs[6] = make_performance("Lantern Field", ((1, 5), (2, 4)))
+    perfs[9] = make_performance("Drift Path", ((2, 3), (2, 3), (1, 2)))
+    perfs[11] = make_performance("Spar Row", ((2, 3),))
+    main = deps.Source(
+        scope_id="RAM1",
+        performances=perfs,
+        patches=[make_patch("Quarry Seam")] + [bytes(PATCH_RECORD_SIZE)] * 34,
+        waveseq=None,
+    )
+    ram2 = _make_bank(scope="RAM2", active_slots=[])
+    ram2.source.patches[2] = make_patch("Tide Chart")
+    ram2.source.patches[5] = make_patch("Gull Wing")
+    ram2.source.waveseq = make_waveseq({0: [40]})[0]
+    ram3 = _make_bank(scope="RAM3", active_slots=[])
+    ram3.source.patches[3] = make_patch("Fern Hollow")
+    ram3.source.patches[4] = make_patch("Kelp Steps")
+    ram3.source.waveseq = make_waveseq({1: [41]})[0]
+    card = _make_bank(scope="CARD", active_slots=[])
+    return [
+        importers.ImportedBank(
+            label="Main bank", scope="RAM1", format="sysex", source=main
+        ),
+        ram2,
+        ram3,
+        card,
+    ]
+
+
+async def _raise_preflight_on_card(
+    pilot: Any, app: Any, file_banks: list[Any], path: str
+) -> Any:
+    """Drive the import screen to ctrl+s with the Card as the target.
+
+    Three ``b`` presses walk RAM 1 → RAM 2 → RAM 3 → Card, so the target
+    is neither named bank and the question covers every named one.
+    """
+    from kwsed.import_bank import PreflightImportScreen
+
+    app.push_screen(
+        WholeBankImportScreen(path=path, banks=file_banks, gate=app._write_gate),
+        lambda picked: app._import_whole_bank_chosen(file_banks, picked, path),
+    )
+    await _settle(pilot)
+    for _ in range(3):
+        await pilot.press("b")
+    await pilot.press("ctrl+s")
+    for _ in range(100):
+        await pilot.pause()
+        if isinstance(app.screen, PreflightImportScreen):
+            break
+    await _settle(pilot)
+    modal = app.screen
+    assert isinstance(modal, PreflightImportScreen)
+    return modal
+
+
+@pytest.mark.asyncio
+async def test_preflight_lists_both_named_companions_and_writes_each_then_the_source(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """Every named bank is listed, and 'both' writes them all, then the bank.
+
+    Writing only the most-referenced companion used to leave the other
+    one's parts dangling with the preflight marked answered: the answer
+    now means every listed companion.
+    """
+    app, recorded = _preflight_app(tmp_path, monkeypatch)
+    file_banks = _three_bank_file()
+    async with app.run_test() as pilot:
+        modal = await _raise_preflight_on_card(pilot, app, file_banks, "three.syx")
+        assert app.device.bundle_write_count == 0
+        body = _static_text(modal, "preflight-body")
+        # Both named banks, most-referenced first, each with its counts.
+        assert "· RAM 3 — 5 parts name it, 2 of its patch slots are used" in body
+        assert "· RAM 2 — 3 parts name it, 2 of its patch slots are used" in body
+        assert body.index("RAM 3") < body.index("RAM 2")
+        assert "Nothing has been written yet" in body
+        choices = _static_text(modal, "preflight-choices")
+        assert "wave sequences only" in choices
+        assert "its performances stay as they are" in choices
+        await pilot.press("1")  # write every named bank, then this bank
+        for _ in range(300):
+            await pilot.pause()
+            if app.device.bundle_write_count == 3:
+                break
+        await _settle(pilot)
+    assert app.device.bundle_write_count == 3
+    first, second, source = app.device.bundle_writes
+    # The named banks went out in the listed order, dependencies first,
+    # and the source bank came last.
+    assert first["bank"] == banks.bank("RAM3").label
+    assert second["bank"] == banks.bank("RAM2").label
+    assert source["bank"] == banks.bank("CARD").label
+    # Each companion carries patches and wave sequences, never performances.
+    for companion_write in (first, second):
+        assert "patches" in companion_write["kinds"]
+        assert "waveseq" in companion_write["kinds"]
+        assert "performances" not in companion_write["kinds"]
+    assert ("RAM2", banks.Kind.PERFORMANCE) not in app.device._written
+    assert ("RAM3", banks.Kind.PERFORMANCE) not in app.device._written
+    assert ("RAM2", banks.Kind.PATCH) in app.device._written
+    assert ("RAM3", banks.Kind.PATCH) in app.device._written
+    assert "performances" in source["kinds"]
+    # Three fenced writes: one backup envelope each.
+    assert len(recorded) == 3
+    for result in recorded:
+        backup_path = result["backup"]
+        assert isinstance(backup_path, str) and os.path.exists(backup_path)
+
+
+@pytest.mark.asyncio
+async def test_preflight_does_not_list_a_companion_nothing_names(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """A bank the file carries but no part names stays out of the question."""
+    app, _recorded = _preflight_app(tmp_path, monkeypatch)
+    file_banks = _three_bank_file()
+    async with app.run_test() as pilot:
+        modal = await _raise_preflight_on_card(pilot, app, file_banks, "three.syx")
+        body = _static_text(modal, "preflight-body")
+        assert "Card" not in body, "nothing names it, so it is not asked about"
+        assert "RAM 3" in body
+        assert "RAM 2" in body
+
+
+@pytest.mark.asyncio
+async def test_preflight_with_two_companions_cancel_writes_nothing(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """Cancel with two named banks sends nothing and reopens the screen."""
+    from kwsed.import_bank import WholeBankImportScreen
+
+    app, _recorded = _preflight_app(tmp_path, monkeypatch)
+    file_banks = _three_bank_file()
+    async with app.run_test() as pilot:
+        await _raise_preflight_on_card(pilot, app, file_banks, "three.syx")
+        await pilot.press("3")  # cancel
+        await _settle(pilot)
+        reopened = app.screen
+        assert isinstance(reopened, WholeBankImportScreen)
+        status = _static_text(reopened, "whole-bank-status")
+        assert "nothing was written" in status
+        assert "x to write" in status
+    assert app.device.bundle_write_count == 0
+
+
+@pytest.mark.asyncio
+async def test_preflight_with_two_companions_source_only_sends_one_bundle(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """'only' means one bank: no companion travels and nothing nags after."""
+    from kwsed.import_bank import DanglingRefsScreen, PreflightImportScreen
+
+    app, _recorded = _preflight_app(tmp_path, monkeypatch)
+    file_banks = _three_bank_file()
+    async with app.run_test() as pilot:
+        await _raise_preflight_on_card(pilot, app, file_banks, "three.syx")
+        await pilot.press("2")  # write only this bank
+        for _ in range(200):
+            await pilot.pause()
+            if app.device.bundle_write_count == 1:
+                break
+        await _settle(pilot)
+    assert app.device.bundle_write_count == 1
+    assert app.device.bundle_writes[0]["bank"] == banks.bank("CARD").label
+    assert not any(
+        isinstance(s, (PreflightImportScreen, DanglingRefsScreen))
+        for s in app.screen_stack
+    ), "the choice was explicit: no popup asks again"
+
+
+@pytest.mark.asyncio
+async def test_preflight_second_companion_failure_names_what_completed(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """A companion that fails stops the run and reports the partial truth.
+
+    The first companion's backup stays as the way back, the source bank
+    is not written, and the status names what was written and what was
+    not -- instead of claiming the whole answer went out.
+    """
+    app, recorded = _preflight_app(tmp_path, monkeypatch)
+    file_banks = _three_bank_file()
+    statuses: list[str] = []
+    app.notify_status = lambda msg, *a, **k: statuses.append(str(msg))
+    real_write = app.device.write_bank_bundle
+
+    def failing_write(bank: Any, **kwargs: Any) -> dict[str, Any]:
+        if banks.bank(bank).id == "RAM2":
+            raise ValueError("the unit refused the second bank")
+        return cast(dict[str, Any], real_write(bank, **kwargs))
+
+    app.device.write_bank_bundle = failing_write
+    async with app.run_test() as pilot:
+        await _raise_preflight_on_card(pilot, app, file_banks, "three.syx")
+        await pilot.press("1")
+        for _ in range(200):
+            await pilot.pause()
+            if any("written so far" in s for s in statuses):
+                break
+        await _settle(pilot)
+    # RAM 3 landed, RAM 2 did not, and the source bank never went out.
+    assert app.device.bundle_write_count == 1
+    assert app.device.bundle_writes[0]["bank"] == banks.bank("RAM3").label
+    assert ("RAM2", banks.Kind.PATCH) not in app.device._written
+    assert ("CARD", banks.Kind.PATCH) not in app.device._written
+    assert any(
+        "written so far: RAM 3" in s and "not written: RAM 2, Main bank" in s
+        for s in statuses
+    ), statuses
+    assert recorded, "the companion that succeeded is still recorded for undo"
+
+
+@pytest.mark.asyncio
+async def test_preflight_locked_gate_is_refused_before_the_question(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """A locked gate stops the write before any modal is raised."""
+    from kwsed.import_bank import PreflightImportScreen
+
+    app, _recorded = _preflight_app(tmp_path, monkeypatch)
+    app._write_gate = EditGate(armed=False)
+    statuses: list[str] = []
+    app.notify_status = lambda msg, *a, **k: statuses.append(str(msg))
+    file_banks = _three_bank_file()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.push_screen(
+            WholeBankImportScreen(
+                path="three.syx", banks=file_banks, gate=app._write_gate
+            ),
+            lambda picked: app._import_whole_bank_chosen(
+                file_banks, picked, "three.syx"
+            ),
+        )
+        await _settle(pilot)
+        for _ in range(3):
+            await pilot.press("b")
+        await pilot.press("ctrl+s")
+        await _settle(pilot)
+        assert not isinstance(app.screen, PreflightImportScreen)
+        assert "write gate is locked" in statuses or "write gate is locked" in (
+            _static_text(app.screen, "whole-bank-status")
+            if isinstance(app.screen, WholeBankImportScreen)
+            else ""
+        )
+    assert app.device.bundle_write_count == 0
+
+
+# --- T3: explicit partial outcomes for multi-bank writes ---------------------
+
+
+def _partial_app(
+    tmp_path: Any, monkeypatch: Any
+) -> tuple[Any, list[str], list[Any], list[dict[str, Any]]]:
+    """An armed app whose undo records, cache saves and statuses are watched.
+
+    RAM 2, RAM 3 and the Card are there to receive; the backups are
+    sandboxed and the cache save is a recorder. Every name is invented.
+    """
+    from kws import backup as _backup
+
+    app = KwsedApp(DemoDevice(), bankstore_dir=str(tmp_path / "store"))
+    # No configured pre-audit staging: a write's pre-write warning must
+    # not depend on this machine's own configuration.
+    app._config_path = str(tmp_path / "absent-kwsed.toml")
+    app._sources["RAM2"] = _make_bank(scope="RAM2", active_slots=[]).source
+    app._sources["RAM3"] = _make_bank(scope="RAM3", active_slots=[]).source
+    app._sources["CARD"] = _make_bank(scope="CARD", active_slots=[]).source
+    app._write_gate = EditGate(armed=True)
+    statuses: list[str] = []
+    app.notify_status = lambda msg, *a, **k: statuses.append(str(msg))  # type: ignore[method-assign]
+    backup_dir = str(tmp_path / "backups")
+    os.makedirs(backup_dir, exist_ok=True)
+    monkeypatch.setattr(_backup, "default_dir", lambda root=None: backup_dir)
+    recorded: list[Any] = []
+    app._record_write = recorded.append  # type: ignore[method-assign]
+    saved: list[dict[str, Any]] = []
+
+    def fake_save(
+        scope_id: Any,
+        *,
+        performances: Any = None,
+        patches: Any = None,
+        waveseq: Any = None,
+        directory: Any = None,
+    ) -> None:
+        saved.append(
+            {
+                "scope": scope_id,
+                "performances": performances,
+                "patches": patches,
+                "waveseq": waveseq,
+            }
+        )
+
+    monkeypatch.setattr(bankstore, "save", fake_save)
+    return app, statuses, recorded, saved
+
+
+async def _await_partial(app: Any, pilot: Any) -> None:
+    """Let a cross-bank write finish, however it ended."""
+    for _ in range(200):
+        await pilot.pause()
+        if app.device.bundle_write_count:
+            break
+    await _settle(pilot)
+
+
+@pytest.mark.asyncio
+async def test_overflow_failure_on_the_target_keeps_the_overflow_bank(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """The overflow bank landed; the write stopped before the target.
+
+    Cross-bank writes are not atomic and must not pretend to be: the
+    overflow bank is recorded and cached exactly as a success records
+    it, the target is named as not written, and nothing says the import
+    succeeded. A retry sends the target only.
+    """
+    app, statuses, recorded, saved = _partial_app(tmp_path, monkeypatch)
+    bank = _mixed_bank()
+    card_no = banks.bank("CARD").number
+    ram3_no = banks.bank("RAM3").number
+    original = app.device.write_bank_bundle
+    calls: list[int] = []
+    card_before = app._sources["CARD"]
+    fails = {"armed": True}
+
+    def failing(bank_number: int, **k: Any) -> dict[str, Any]:
+        if fails["armed"] and bank_number == card_no:
+            raise RuntimeError("card refused the write")
+        calls.append(bank_number)
+        return cast(dict[str, Any], original(bank_number, **k))
+
+    app.device.write_bank_bundle = failing
+    choice = WholeBankChoice(
+        0,
+        "CARD",
+        True,
+        perfcopy.ImportMode.AS_IS,
+        "overflow-partial",
+        True,
+        "RAM3",
+        OVERFLOW_PATCHES,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._import_whole_bank_write(bank, choice, banks_list=[bank], path="two.syx")
+        await _await_partial(app, pilot)
+        await _settle(pilot)
+
+        # Exactly one bundle went out: the overflow bank, and it landed.
+        assert calls == [ram3_no]
+        # One undo record, for the overflow bank, with its backup on disk.
+        assert len(recorded) == 1
+        assert recorded[0]["bank"] == banks.bank("RAM3").label
+        backup_path = recorded[0]["backup"]
+        assert isinstance(backup_path, str) and os.path.exists(backup_path)
+        # The overflow bank's cache holds the patches it received.
+        overflow_saves = [
+            s for s in saved if s["scope"] == "RAM3" and s["patches"] is not None
+        ]
+        assert len(overflow_saves) == 1
+        # The target was never written: its session source is untouched.
+        assert app._sources["CARD"] is card_before
+
+        closing = statuses[-1]
+        assert closing.startswith("import: card refused the write")
+        assert "written: RAM 3" in closing
+        assert "failed or unverified (may have changed): Card" in closing
+        assert "backup" in closing
+        assert "write the target again" in closing
+        assert not any("imported" in s for s in statuses), statuses
+        # The session keeps the overflow bank, so a retry never resends it.
+        assert app._import_passes["overflow-partial"]["overflow_written"] == "RAM3"
+
+        # The retry: the target only, and the status says so up front.
+        fails["armed"] = False
+        app._import_whole_bank_write(bank, choice, banks_list=[bank], path="two.syx")
+        await _wait_for_writes(app, pilot, 2)
+        await _settle(pilot)
+
+    assert calls == [ram3_no, card_no]
+    assert any(
+        "RAM 3 already landed; this write sends the target only" in s for s in statuses
+    ), statuses
+    assert any("the overflow bank already held them" in s for s in statuses)
+    assert app._sources["CARD"] is not card_before
+    assert len(recorded) == 2
+
+
+@pytest.mark.asyncio
+async def test_split_failure_keeps_the_landed_groups_and_n_writes_the_rest(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """A split pass that stopped half way keeps what landed; ``n`` finishes.
+
+    The Card group landed, RAM 3's write was refused: the landed group
+    is recorded and cached, the session's remainder grows by the group
+    the failure stopped before, and the reopened screen's ``n`` writes
+    exactly that remainder -- the landed Card group is never rewritten.
+    """
+    app, statuses, recorded, saved = _partial_app(tmp_path, monkeypatch)
+    file_banks = _split_continuation_banks()
+    bank = file_banks[0]
+    app._sources["RAM2"] = file_banks[1].source
+    card_before = app._sources["CARD"]
+    original = app.device.write_bank_bundle
+    fails = {"armed": True}
+
+    def failing(bank_number: int, **k: Any) -> dict[str, Any]:
+        if fails["armed"] and app.device.bundle_write_count == 1:
+            raise RuntimeError("ram refused the write")
+        return cast(dict[str, Any], original(bank_number, **k))
+
+    app.device.write_bank_bundle = failing
+    choice = WholeBankChoice(
+        0,
+        "CARD",
+        True,
+        perfcopy.ImportMode.SELF_CONTAINED_PACKED,
+        "three.syx|RAM1|partial",
+        True,
+        "RAM3",
+        "self_contained",
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._import_whole_bank_write(
+            bank, choice, banks_list=file_banks, path="three.syx"
+        )
+        await _await_partial(app, pilot)
+        await _settle(pilot)
+
+        # Only the Card's bundle went out; RAM 3 was never attempted.
+        assert app.device.bundle_write_count == 1
+        assert app.device.bundle_writes[0]["bank"] == banks.bank("CARD").label
+        # The landed group is recorded and cached, as a success would be.
+        assert len(recorded) == 1
+        assert any(
+            s["scope"] == "CARD" and s["performances"] is not None for s in saved
+        )
+        assert app._sources["CARD"] is not card_before
+
+        closing = statuses[-1]
+        assert closing.startswith("import: ram refused the write")
+        assert "written: Card" in closing
+        assert "failed or unverified (may have changed): RAM 3" in closing
+        assert not any("imported" in s for s in statuses), statuses
+
+        # The session holds the landed slots and the not-written ones.
+        state = app._import_passes["three.syx|RAM1|partial"]
+        assert state["pass_kind"] == "split"  # noqa: S105 -- a session marker, not a secret
+        assert state["split_remaining"] == [50, 51, 52, 53, 54, 56, 57]
+        assert set(state["written"]) == set(range(50))
+
+        # The screen is back; ``n`` writes exactly the remainder's group.
+        second = app.screen
+        assert isinstance(second, WholeBankImportScreen)
+        assert "7 performances remain" in _static_text(second, "whole-bank-status")
+        fails["armed"] = False
+        await pilot.press("n")
+        await _wait_for_writes(app, pilot, 2)
+        await _settle(pilot)
+
+    assert app.device.bundle_write_count == 2
+    # The retry went to the card in the slot; the landed group stayed.
+    assert [w["bank"] for w in app.device.bundle_writes] == [
+        banks.bank("CARD").label,
+        banks.bank("CARD").label,
+    ]
+    assert state["split_remaining"] == []
+    assert set(state["written"]) == set(range(55)) | {56, 57}
+
+
+@pytest.mark.asyncio
+async def test_overflow_failure_before_the_first_write_records_nothing(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """A refusal on the first write is today's plain failure, recorded nowhere."""
+    app, statuses, recorded, saved = _partial_app(tmp_path, monkeypatch)
+    bank = _mixed_bank()
+    ram3_no = banks.bank("RAM3").number
+    calls: list[int] = []
+
+    def failing(bank_number: int, **k: Any) -> dict[str, Any]:
+        calls.append(bank_number)
+        raise RuntimeError("ram refused the write")
+
+    app.device.write_bank_bundle = failing
+    choice = WholeBankChoice(
+        0,
+        "CARD",
+        True,
+        perfcopy.ImportMode.AS_IS,
+        "overflow-first-fail",
+        True,
+        "RAM3",
+        OVERFLOW_PATCHES,
+    )
+    app._import_whole_bank_write(bank, choice, banks_list=[bank], path="two.syx")
+
+    assert calls == [ram3_no]
+    assert app.device.bundle_write_count == 0
+    assert recorded == []
+    assert saved == []
+    assert statuses == [
+        "writing Bank RAM1 into Card...",
+        "import: ram refused the write",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_overflow_read_back_mismatch_on_the_target_is_a_failure(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """A target whose read-back differs is failed, and the overflow is kept.
+
+    The bank was attempted, not verified: the undo record and the cache
+    belong to the overflow bank alone, the target is named as not
+    written with the mismatch as the error, and nothing says the import
+    succeeded.
+    """
+    app, statuses, recorded, saved = _partial_app(tmp_path, monkeypatch)
+    bank = _mixed_bank()
+    card_no = banks.bank("CARD").number
+    original = app.device.write_bank_bundle
+    card_before = app._sources["CARD"]
+
+    def mismatching(bank_number: int, **k: Any) -> dict[str, Any]:
+        result = cast(dict[str, Any], original(bank_number, **k))
+        if bank_number == card_no:
+            return {**result, "verified": False, "mismatch": "performance 4 differs"}
+        return result
+
+    app.device.write_bank_bundle = mismatching
+    choice = WholeBankChoice(
+        0,
+        "CARD",
+        True,
+        perfcopy.ImportMode.AS_IS,
+        "overflow-mismatch",
+        True,
+        "RAM3",
+        OVERFLOW_PATCHES,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._import_whole_bank_write(bank, choice, banks_list=[bank], path="two.syx")
+        await _await_partial(app, pilot)
+        await _settle(pilot)
+
+        # Both bundles went out; the second did not verify.
+        assert app.device.bundle_write_count == 2
+        # Only the verified overflow bank is recorded and cached.
+        assert len(recorded) == 1
+        assert recorded[0]["bank"] == banks.bank("RAM3").label
+        assert all(s["scope"] != "CARD" for s in saved)
+        assert app._sources["CARD"] is card_before
+
+        closing = statuses[-1]
+        assert closing.startswith("import: read-back mismatch: performance 4 differs")
+        assert "written: RAM 3" in closing
+        assert "failed or unverified (may have changed): Card" in closing
+        assert not any("imported" in s for s in statuses), statuses
+        assert app._import_passes["overflow-mismatch"]["overflow_written"] == "RAM3"
+
+
+@pytest.mark.asyncio
+async def test_overflow_success_keeps_today_s_message_and_one_record_per_bank(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """A clean overflow import: today's wording, one undo record per bank."""
+    app, statuses, recorded, _saved = _partial_app(tmp_path, monkeypatch)
+    bank = _mixed_bank()
+    ram3_no = banks.bank("RAM3").number
+    card_no = banks.bank("CARD").number
+    original = app.device.write_bank_bundle
+    calls: list[int] = []
+
+    def write(bank_number: int, **k: Any) -> dict[str, Any]:
+        calls.append(bank_number)
+        return cast(dict[str, Any], original(bank_number, **k))
+
+    app.device.write_bank_bundle = write
+    choice = WholeBankChoice(
+        0,
+        "CARD",
+        True,
+        perfcopy.ImportMode.AS_IS,
+        "overflow-clean",
+        True,
+        "RAM3",
+        OVERFLOW_PATCHES,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._import_whole_bank_write(bank, choice, banks_list=[bank], path="two.syx")
+        await _wait_for_writes(app, pilot, 2)
+        await _settle(pilot)
+
+    assert calls == [ram3_no, card_no]
+    assert len(recorded) == 2
+    assert [r["bank"] for r in recorded] == [
+        banks.bank("RAM3").label,
+        banks.bank("CARD").label,
+    ]
+    closing = statuses[-1]
+    assert closing.startswith("imported Bank RAM1 into Card: 50 performances, ")
+    assert "patches repointed from RAM 3; RAM 3 also received" in closing
+
+
+# --- T4: truthful completion, unchanged bundles, and the gate's plan -----
+
+
+def _stub_result(
+    *,
+    kinds: list[str],
+    unchanged: Optional[list[str]] = None,
+    verified: bool = True,
+    mismatch: Optional[str] = None,
+    backup: str = "env.syx",
+) -> dict[str, Any]:
+    """A bridge ``write_bank_bundle`` verdict the test controls."""
+    return {
+        "bank": banks.bank("RAM3").label,
+        "kind": "bank-bundle",
+        "kinds": list(kinds),
+        "backup": backup,
+        "verified": verified,
+        "mismatch": mismatch,
+        "unchanged": list(unchanged or []),
+    }
+
+
+@pytest.mark.asyncio
+async def test_unchanged_bundle_says_already_matches_and_records_once(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """A bundle the unit already holds is a match, not an import.
+
+    The bridge sent nothing for it; the status must not claim SysEx left
+    the cable. The pre-write backup was still taken, so the fence ran and
+    one undo point is recorded.
+    """
+    app, recorded = _armed_app(tmp_path, monkeypatch)
+    statuses: list[str] = []
+    app.notify_status = lambda msg, *a, **k: statuses.append(str(msg))
+    calls: list[int] = []
+
+    def unchanged_write(*a: Any, **k: Any) -> dict[str, Any]:
+        calls.append(1)
+        return _stub_result(kinds=[], unchanged=["performances", "patches"])
+
+    app.device.write_bank_bundle = unchanged_write
+    bank = _mixed_bank()
+    with patch.object(bankstore, "save", lambda *a, **k: None):
+        app._import_whole_bank_write(bank, WholeBankChoice(0, "RAM3", True))
+
+    assert calls == [1]  # the fence still read the unit and backed it up
+    assert app.device.bundle_write_count == 0
+    assert len(recorded) == 1
+    closing = statuses[-1]
+    assert "already matches" in closing
+    assert "nothing was sent" in closing
+    assert "backup" in closing
+    assert "imported" not in closing
+    assert "wrote" not in closing
+
+
+@pytest.mark.asyncio
+async def test_changed_bundle_keeps_today_s_imported_message(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """A bundle that really was sent keeps the imported wording."""
+    app, recorded = _armed_app(tmp_path, monkeypatch)
+    statuses: list[str] = []
+    app.notify_status = lambda msg, *a, **k: statuses.append(str(msg))
+
+    def changed_write(*a: Any, **k: Any) -> dict[str, Any]:
+        return _stub_result(kinds=["performances", "patches"])
+
+    app.device.write_bank_bundle = changed_write
+    bank = _mixed_bank()
+    with patch.object(bankstore, "save", lambda *a, **k: None):
+        app._import_whole_bank_write(bank, WholeBankChoice(0, "RAM3", True))
+
+    closing = statuses[-1]
+    assert closing.startswith("imported Bank RAM1 into RAM 3: ")
+    assert len(recorded) == 1
+
+
+@pytest.mark.asyncio
+async def test_plain_write_read_back_mismatch_is_a_failure(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """A verdict the unit did not verify is a refusal, never an import.
+
+    The mismatch is named, nothing claims success, and the failed bank
+    gets no undo record and no cache update -- its backup is the way
+    back.
+    """
+    app, recorded = _armed_app(tmp_path, monkeypatch)
+    statuses: list[str] = []
+    app.notify_status = lambda msg, *a, **k: statuses.append(str(msg))
+
+    def mismatching(*a: Any, **k: Any) -> dict[str, Any]:
+        return _stub_result(
+            kinds=["performances"],
+            verified=False,
+            mismatch="performance 4 differs",
+        )
+
+    app.device.write_bank_bundle = mismatching
+    before = app._sources["RAM3"]
+    bank = _mixed_bank()
+    with patch.object(bankstore, "save", lambda *a, **k: None):
+        app._import_whole_bank_write(bank, WholeBankChoice(0, "RAM3", True))
+
+    closing = statuses[-1]
+    assert closing.startswith("import: read-back mismatch: performance 4 differs")
+    assert not any("imported" in s for s in statuses), statuses
+    assert recorded == []
+    assert app._sources["RAM3"] is before
+
+
+@pytest.mark.asyncio
+async def test_gate_locks_when_the_target_changes(tmp_path: Any) -> None:
+    """Armed for one target, ``b`` locks the gate before ctrl+s can write."""
+    app = _make_app(tmp_path, bankstore_dir=str(tmp_path / "store"))
+    app._sources["RAM3"] = _make_bank(scope="RAM3").source
+    screen = WholeBankImportScreen(
+        path="one.syx", banks=[_make_bank()], gate=app._write_gate
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.push_screen(screen)
+        await _settle(pilot)
+        await pilot.press("w")
+        await _settle(pilot)
+        assert app._write_gate.armed
+        assert screen._armed_fingerprint == screen._plan_fingerprint()
+        await pilot.press("b")
+        await _settle(pilot)
+        assert not app._write_gate.armed
+        assert "plan changed — gate locked again" in _static_text(
+            screen, "whole-bank-status"
+        )
+        assert "locked" in _static_text(screen, "whole-bank-gate")
+        await pilot.press("ctrl+s")
+        await _settle(pilot)
+        assert "write gate is locked" in _static_text(screen, "whole-bank-status")
+        assert app.device.bundle_write_count == 0
+        assert isinstance(app.screen, WholeBankImportScreen)
+
+
+@pytest.mark.asyncio
+async def test_gate_locks_when_the_mode_changes(tmp_path: Any) -> None:
+    """Armed as-is, ``m`` locks the gate: packed is not what was approved."""
+    app = _make_app(tmp_path, bankstore_dir=str(tmp_path / "store"))
+    app._sources["RAM3"] = _make_bank(scope="RAM3").source
+    screen = WholeBankImportScreen(
+        path="one.syx", banks=[_make_bank()], gate=app._write_gate
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.push_screen(screen)
+        await _settle(pilot)
+        await pilot.press("w")
+        await _settle(pilot)
+        await pilot.press("m")
+        await _settle(pilot)
+        assert not app._write_gate.armed
+        assert "plan changed — gate locked again" in _static_text(
+            screen, "whole-bank-status"
+        )
+        await pilot.press("ctrl+s")
+        await _settle(pilot)
+    assert app.device.bundle_write_count == 0
+
+
+@pytest.mark.asyncio
+async def test_gate_locks_when_the_source_changes(tmp_path: Any) -> None:
+    """``s`` on a multi-bank file locks an armed gate the same way."""
+    app = _make_app(tmp_path, bankstore_dir=str(tmp_path / "store"))
+    app._sources["RAM3"] = _make_bank(scope="RAM3").source
+    file_banks = _two_bank_file()
+    screen = WholeBankImportScreen(
+        path="two.syx", banks=file_banks, gate=app._write_gate
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.push_screen(screen)
+        await _settle(pilot)
+        await pilot.press("w")
+        await _settle(pilot)
+        assert app._write_gate.armed
+        await pilot.press("s")
+        await _settle(pilot)
+        assert screen._source_index == 1
+        assert not app._write_gate.armed
+        assert "plan changed — gate locked again" in _static_text(
+            screen, "whole-bank-status"
+        )
+        await pilot.press("ctrl+s")
+        await _settle(pilot)
+    assert app.device.bundle_write_count == 0
+
+
+@pytest.mark.asyncio
+async def test_armed_gate_with_an_unchanged_plan_writes(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """Arm then ctrl+s: the fingerprint matches, so the write proceeds."""
+    from kws import backup as _backup
+
+    app = _make_app(tmp_path, bankstore_dir=str(tmp_path / "store"))
+    app._sources["RAM3"] = _make_bank(scope="RAM3").source
+    app.notify_status = lambda *a, **k: None  # type: ignore[method-assign]
+    backup_dir = str(tmp_path / "backups")
+    os.makedirs(backup_dir, exist_ok=True)
+    monkeypatch.setattr(_backup, "default_dir", lambda root=None: backup_dir)
+    recorded: list[Any] = []
+    app._record_write = recorded.append  # type: ignore[method-assign]
+    file_banks = [_make_bank()]
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = WholeBankImportScreen(
+            path="one.syx", banks=file_banks, gate=app._write_gate
+        )
+        app.push_screen(
+            screen,
+            lambda picked: app._import_whole_bank_chosen(file_banks, picked, "one.syx"),
+        )
+        await _settle(pilot)
+        await pilot.press("w")
+        await _settle(pilot)
+        assert app._write_gate.armed
+        await pilot.press("ctrl+s")
+        await _wait_for_writes(app, pilot, 1)
+        await _settle(pilot)
+        assert app.device.bundle_write_count == 1
+        # The plan did not change between arming and firing: the approval
+        # stood, and the gate stays armed for the same plan.
+        assert app._write_gate.armed
+        assert screen._armed_fingerprint == screen._plan_fingerprint()
+    assert len(recorded) == 1
