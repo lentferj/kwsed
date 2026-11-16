@@ -575,6 +575,27 @@ opens `WholeBankImportScreen`:
   frames up, then skips kinds that already match, so an unchanged bank is
   reported as "already matches — nothing was sent" rather than as a write.
 
+**Affected performances.** A whole-bank write replaces every patch slot in each
+bank it writes, so a performance that survives the write and points into a
+written bank will play different sounds. Before anything is written, the app
+asks one question: green field (clear the banks the import writes first —
+performances, patches and wave sequences, each backed up before clearing; the
+Card is never touched), decide with counts (read the banks the import does not
+replace and count, per bank, the performances whose parts name a replaced patch,
+then Init those slots or leave them), or leave as is (with a warning). Every
+whole-bank write is asked, including a companion-only write (`x` or the
+post-write popup's write), a Card target and a cards-only pass; green field is
+offered only where a RAM bank would be cleared, and Init only where an
+affected slot is known. When the companion preflight applies, it is asked
+first and its answer is resolved before this question, so a cancel at either
+has written nothing at all; on the answer the writes run remediation first,
+then the confirmed companions, then the target. Green field clears only the
+banks this import writes; RAM 3 and the Card can still hold performances
+pointing at replaced patches, and their sound can still change. The Init
+records are bundled with the app and nothing is read from a path at runtime.
+Declining green field is the only time the unit is read for this question;
+green field itself needs no read.
+
 **Single / multiple performances** first asks for a source: a file, or any
 unit bank (`RAM 1`–`RAM 3`, `ROM 4`–`ROM 11`, or the active `Card`). It then
 asks for the target bank. `SingleImportScreen` shows the source performances

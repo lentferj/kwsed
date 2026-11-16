@@ -427,6 +427,117 @@ needs a one-shot approval bound to the exact plan the person saw.
 
 ---
 
+## 7. Affected performances and the pre-write question
+
+A whole-bank write replaces every patch slot in each bank it writes. A
+performance that survives the write and points into a written bank keeps its
+slot numbers but now names different sounds. The app asks about this before
+the write is approved.
+
+### 7.1 Affected-performance analysis
+
+Only surviving banks are analysed: a bank written wholesale has its
+performances replaced and is excluded; a companion bank receiving patches
+only survives and is a candidate; any other writable bank is a candidate in
+the "decide with counts" path. For each candidate, the analyser reads the
+performance records already in memory and reports, per bank, the slots
+whose used parts name a bank this import writes (including the bank's own
+number, since rewriting its patches changes it too). Parts naming ROM banks
+are unaffected unless a ROM bank number happens to be in the written set,
+which it never is for a real import; ROM is never special-cased, the
+written set decides. Empty (Init) performance slots are ignored. The result
+carries per-bank `affected_slots`, `affected_parts`, the distinct bank
+numbers named, and counts.
+
+The written set is the bank numbers the import writes: the target, a
+self-contained split's overflow, a patches-only overflow bank, and the
+companions a "both" preflight answer already committed to. The cleared
+banks (green field) are the same set minus the Card.
+
+### 7.2 Read-on-decline
+
+Green field is asked first and needs no read: it clears without reading the
+unit. Only when green field is declined does the app read, one performance
+dump per candidate bank, and compute the counts. A bank whose read fails
+(timeout, no card, wrong byte count) is marked "not read": green field and
+leave stay available, Init is disabled for that bank, and the counts modal
+names it. A failure of the whole read pass re-raises the stage-1 question
+instead of aborting.
+
+### 7.3 When the question is asked, and what it offers
+
+Every whole-bank write to the unit is asked, before anything is sent. When
+the companion preflight applies, it is asked first and its answer is
+resolved before the remediation question: a cancel at either question has
+written nothing at all, and the remediation's bank sets -- what the
+question names, what a green-field answer clears, what the counts analyse
+-- include exactly the companions the preflight answer confirmed (target,
+overflow, companions; never the Card). On the answer, the writes run in
+the order below: remediation first, then the companions the "both" answer
+confirmed, then the target.
+
+A companion-only write (`x`, or the post-write popup's write), a Card
+target and a cards-only pass are asked too. Green field is offered only
+where at least one eligible RAM bank would be cleared: a Card write and a
+cards-only pass offer decide-with-counts and cancel only, because the Card
+is never cleared. Init is offered on the counts modal only where an
+affected slot is known -- when every candidate read failed, the modal
+offers leave and back, and a pressed Init key is refused with a line that
+says why.
+
+### 7.4 Write order and fencing
+
+1. remediation — the cleared banks (green field), or the Init-ed
+   performance slots (decide);
+2. companion patches and wave sequences;
+3. the target bank.
+
+Each is its own fenced write: armed gate, fresh unit read, one backup,
+read-back verification. Partial failure stops the run and reports per bank;
+nothing retries silently. Every remediated bank updates the session source
+and the cache, so a cleared bank does not keep old names in the browser.
+
+### 7.4 Intent fields and schema bump
+
+The remediation is part of the approved plan, so it is part of the approval
+token's fingerprint. `WholeBankIntent` gained three fields:
+
+- `remediation` — `""`, `green_field`, `init_affected` or `leave`;
+- `cleared_banks` — the sorted set of physical bank ids a green-field plan
+  clears (RAM banks only; the Card is never among them);
+- `init_banks` — sorted `(bank_id, sorted slots)` pairs for an
+  init-affected plan.
+
+A token minted for one answer must not authorize another, and the Init-slot
+set must be in the fingerprint. `INTENT_SCHEMA` was bumped to 2 when the
+encoding gained these fields, so an approval minted under the old encoding
+cannot be read as approval for a plan under the new one.
+
+The cleared set is validated at the plan itself, not only in the UI that
+fills it: `WholeBankIntent` (and so `build_intent`) refuses a
+`cleared_banks` entry that is the Card or a ROM bank, so a plan that names
+one cannot fingerprint and the application refuses it before any device
+I/O.
+
+### 7.5 Bundled Init data
+
+The Init records ship with the app; nothing reads them from a path at
+runtime. They are embedded as bytes literals in `kws/initbank.py`:
+
+- one 181-byte performance record named `Init` (part 0 points at bank 0
+  slot 0; parts 1-7 are unused, patch 255), expanded to 50 records
+  (9050 bytes);
+- one 426-byte patch record named `Init`, expanded to 35 records
+  (14910 bytes);
+- a zeroed 8784-byte wave-sequence bank (no sequence headers, no steps, no
+  names).
+
+`cleared_bank()` returns all three. The loader (`init_performances`,
+`init_patches`, `init_waveseq`, `cleared_bank`) takes no argument and
+returns `bytes`.
+
+---
+
 ## Implementation status (2026-11-11)
 
 - [x] **Init/empty detection** — `Init`, `INIT Perf.`, `Init Patch` performance/patch slots are free; `is_empty_patch` added.

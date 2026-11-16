@@ -988,3 +988,90 @@ separately read, backed up and verified; the token never implies
 atomicity.
 
 Verified: 1478 tests pass; lint, formatting and strict typing are clean.
+
+---
+
+## 22. Affected performances: the gap a whole-bank write leaves behind
+
+A whole-bank import replaces every patch slot in each bank it writes. A
+performance that survives the write and points into a written bank keeps
+its slot numbers but now names different sounds. Nothing in the import's
+own write touches that performance, so "left untouched" performances are
+still broken.
+
+Measured on the unit:
+
+```
+RAM 2: 50 non-empty performances
+their used parts: RAM 1 58 · RAM 2 57 · ROM 11 55
+```
+
+After writing the file's RAM 1 bank, 58 parts of RAM 2's performances point
+at patches that are no longer the ones they were written against.
+
+Three answers are offered before the write is approved:
+
+1. **Green field** — clear the banks the import writes first (performances,
+   patches and wave sequences, each backed up before clearing), so no
+   surviving performance points at a replaced patch. The Card is never
+   cleared; RAM 3 and the Card can still hold performances pointing at the
+   replaced patches, and their sound can still change.
+2. **Decide with counts** — read the banks the import does not replace, count
+   per bank the performances whose parts name a replaced patch, and Init
+   those slots (or leave them).
+3. **Leave as is** — write nothing extra; the affected performances keep
+   their slots and their sound changes (with a warning).
+
+Green field clears only the banks the import writes and needs no read.
+Declining it is the only time the unit is read for this question.
+
+The Init records are bundled with the app in `kws/initbank.py`, not read
+from a path at runtime: one 181-byte performance record named `Init`
+(expanded to 50), one 426-byte patch record named `Init` (expanded to 35),
+and a zeroed 8784-byte wave-sequence bank. See `docs/IMPORT_PLAN.md` §7.
+
+---
+
+## 23. Affected performances: the review fixes
+
+An independent review of the first implementation found seven blockers.
+Each fix and where it landed:
+
+1. **The companion plan is resolved before any remediation write.** The
+   preflight question is now asked when the choice is dismissed
+   (`_import_whole_bank_chosen`), and only its answer goes on to the
+   remediation question; a cancel at either has written nothing at all.
+   The companion chain runs after the remediation's own writes
+   (`_deferred_companion_step` carries a `companions_written` flag so the
+   chain runs exactly once per plan), and the target write this frame
+   validated follows it under the same token. The cleared and analysed
+   sets include exactly the companions a "both" answer confirmed.
+2. **One bank set behind the question.** `_remediation_written_labels`,
+   `_remediation_cleared_banks` and `_remediation_flow_banks` all gate the
+   companions on the preflight answer, so the named, cleared and analysed
+   sets cannot disagree, and never name the Card.
+3. **The paths that skipped the question now get it.** A companion-only
+   write (`x`, the post-write popup's write), a Card target and a
+   cards-only pass are all asked. Green field is offered only where a RAM
+   bank would be cleared (`AffectedImportScreen(green_field=...)`); a
+   pressed green-field key on a Card plan is refused with a line that
+   says why. A companion plan minted after the answer carries the answer
+   in its intent (`_companion_write_intent` takes the choice), and a
+   remediation that empties the companion target decides the
+   whole-bank/patches-only branch the same way at the mint and at the
+   boundary (`_companion_write_patches_only`).
+4. **The boundary is in the plan, not the UI.** `WholeBankIntent` refuses
+   a `cleared_banks` entry that is the Card or a ROM bank, so
+   `build_intent` refuses it too and the application refuses such a plan
+   before any device I/O.
+5. **Init only where something is known.** `AffectedCountsScreen` takes
+   `allow_init`; when no affected slot is known (every candidate read
+   failed) the key is not offered and pressing it is refused.
+6. **The dead screen state is gone.** `WholeBankImportScreen._remediation`
+   (never set, and so never the answer actually given) is deleted with
+   its fingerprint entry and its resets; the application owns the answer.
+7. **The Init records are pinned.** `kws/initbank.py`'s docstring states
+   why byte literals were chosen over a resource file, and
+   `tests/test_initbank.py` asserts the two records' SHA-256 digests
+   (performance `769d9575…`, patch `79a5cec5…`, the T0 extraction's
+   values), so a silent edit of the embedded bytes is refused.
