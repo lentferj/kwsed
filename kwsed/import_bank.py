@@ -36,6 +36,7 @@ from kws.perfcopy import (
     pack_self_contained_into,
     partition_self_contained_split,
 )
+from kwsed import import_intent
 from kwsed.gate import EditGate
 from kwsed.target_bank import ImportMenuScreen, TargetBankScreen
 from vinsynlib.ui.report import ReportScreen
@@ -83,9 +84,11 @@ MODE_LABELS: Dict[ImportMode, str] = {
 #: with every patch they name, so both banks are self-contained.
 #: ``CARDS_ONLY`` names no RAM bank at all: one self-contained group goes
 #: onto the card in the slot per pass, however many cards that takes.
-OVERFLOW_PATCHES = "patches"
-OVERFLOW_SELF_CONTAINED = "self_contained"
-OVERFLOW_CARDS_ONLY = "cards_only"
+#: The names are the intent builder's (``kwsed.import_intent``), so a
+#: choice, its fingerprint and its approval cannot spell them apart.
+OVERFLOW_PATCHES = import_intent.OVERFLOW_PATCHES
+OVERFLOW_SELF_CONTAINED = import_intent.OVERFLOW_SELF_CONTAINED
+OVERFLOW_CARDS_ONLY = import_intent.OVERFLOW_CARDS_ONLY
 
 #: The menu ``o`` opens first; the RAM bank chooser follows only for the
 #: first two kinds.
@@ -143,6 +146,13 @@ class WholeBankChoice:
     #: write never raises the modal again, and the post-write companion
     #: popup stays a fallback for writes nobody asked about.
     preflight: str = ""
+    #: The one-shot plan approval minted when the screen dismissed with
+    #: this choice, or ``None`` for a choice nobody finalized through the
+    #: screen (older call sites). It binds the write to the exact plan the
+    #: person dismissed: fingerprint and nonce together, spent once. The
+    #: app checks it at the write boundary (P3); until then it travels
+    #: with the choice and is not required.
+    approval: Optional[import_intent.PlanApproval] = None
 
 
 @dataclass(frozen=True)
@@ -480,6 +490,13 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
         self._audit: Optional[containment.ContainmentAudit] = None
         #: The bank the excess patches go to (option b), or "" for none.
         self._overflow_index: Optional[int] = None
+        #: The overflow choice the ``o`` flow ended on, as
+        #: ``(kind, overflow bank id)`` (bank "" for cards only), while
+        #: the dismissal that would carry it has not happened. It is part
+        #: of the plan fingerprint from the moment it is chosen, so
+        #: arming after choosing and choosing after arming see the same
+        #: plan; ``None`` whenever no overflow choice waits.
+        self._pending_overflow: Optional[Tuple[str, str]] = None
         # The target list is the unit's four writable banks, and nothing
         # else. The card slot is one physical place: listing every archived
         # card bank here invited a write to "Card 07" that could only ever
@@ -851,31 +868,18 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
         return card
 
     def _cards_only_chosen(self) -> None:
-        """Dismiss into a cards-only split: no RAM bank, one card per group.
+        """Take the cards-only choice: no RAM bank, one card per group.
 
-        The kind names no overflow bank at all, so there is no bank step:
-        the app packs every non-empty performance, writes the first group
-        into the card in the slot, and carries the rest to the next card.
-        The target is the physical card slot whatever this screen's
-        selector shows -- the default RAM 1 must not leak into the write.
+        The kind names no overflow bank at all, so there is no bank step.
+        The choice waits as the pending plan (named on the plan line),
+        then the dismissal that carries it mints its approval.
         """
-        if not self._gate_may_dismiss():
-            return
         card = self._cards_only_target()
         if card is None:
             return
-        self.dismiss(
-            WholeBankChoice(
-                self._source_index,
-                str(card.id),
-                True,
-                self._mode,
-                self._session_key(),
-                True,
-                "",
-                OVERFLOW_CARDS_ONLY,
-            )
-        )
+        self._pending_overflow = (OVERFLOW_CARDS_ONLY, "")
+        self._show_pending_overflow()
+        self._finalize_pending_overflow()
 
     def _overflow_bank_chosen(
         self, banks: Sequence[Any], kind: str, picked: Optional[int]
@@ -961,9 +965,13 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
         return all(group.plan is None or not group.plan.rejected for group in packed)
 
     def _dismiss_overflow(self, overflow: Any, kind: str) -> None:
-        """Dismiss with the overflow bank and the kind that was picked."""
-        if not self._gate_may_dismiss():
-            return
+        """Take the overflow choice, say what it writes, and finalize.
+
+        The choice waits as the pending plan: the plan line names the
+        banks and kinds it covers, then the dismissal mints its approval.
+        A self-contained split that would drop performances is refused
+        here, while the screen is still open.
+        """
         if kind == OVERFLOW_SELF_CONTAINED:
             partition = self._split_preview(overflow)
             if partition is None:
@@ -976,18 +984,9 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
                 # Never dismiss on a split that would drop performances.
                 self._set_status(self._split_refusal(overflow, partition))
                 return
-        self.dismiss(
-            WholeBankChoice(
-                self._source_index,
-                str(self._target_bank().id),
-                True,
-                self._mode,
-                self._session_key(),
-                True,
-                str(overflow.id),
-                kind,
-            )
-        )
+        self._pending_overflow = (kind, str(overflow.id))
+        self._show_pending_overflow()
+        self._finalize_pending_overflow()
 
     def _mode_line(self) -> str:
         """What the selected mode writes and what it leaves out.
@@ -1207,11 +1206,12 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
         """The plan this screen would write, as a comparable tuple.
 
         The gate's approval is bound to one plan: the source bank (index
-        and scope), the target, the mode, the screen's overflow state and
-        whether this visit continues a split. The ``o`` flow's own kind
-        and bank travel in the dismissal that ends the flow, which keeps
-        its armed-gate check of its own; this fingerprint holds what the
-        screen itself shows.
+        and scope), the target, the mode, the screen's overflow state,
+        the overflow choice the ``o`` flow has ended on, and whether this
+        visit continues a split. The pending overflow is part of the plan
+        from the moment it is chosen, so arming after choosing and
+        choosing after arming both see the same plan -- and a change
+        under an armed gate locks it instead of reusing its approval.
         """
         state = self._pass_state
         continuation = (
@@ -1230,11 +1230,13 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
             target = str(self._target_bank().id)
         except (IndexError, AttributeError):
             target = ""
+        kind, overflow_id = self._pending_overflow or ("", "")
         return (
             source,
             target,
             str(self._mode),
             self._overflow_index,
+            (str(kind), str(overflow_id)),
             continuation,
         )
 
@@ -1282,6 +1284,155 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
             self._lock_gate()
             return False
         return True
+
+    def _write_pass_slots(self) -> Tuple[int, ...]:
+        """The source slots a plain write of this visit would place now.
+
+        A visit that continues an import session writes the remainder the
+        earlier passes left, not the whole bank; an as-is write replaces
+        the whole target whatever the session placed, so it has no pass
+        of its own.
+        """
+        if self._mode is ImportMode.AS_IS or not self._written_slots():
+            return ()
+        return tuple(self._remaining_slots())
+
+    def _mint_for_choice(
+        self, choice: WholeBankChoice, *, pass_slots: Sequence[int] = ()
+    ) -> Optional[import_intent.PlanApproval]:
+        """Build the intent this choice would execute and mint its approval.
+
+        The intent comes from the shared builder
+        (:func:`kwsed.import_intent.build_intent`), which plans the
+        choice with the same planners the write itself uses, so what is
+        approved is what would be sent. The approval is minted only
+        here, for a choice this method is about to dismiss with; a plan
+        the planners refuse mints nothing, and the status says why.
+        """
+        try:
+            entry = self._banks[choice.source_index]
+            source = entry.source
+            scope = str(entry.scope)
+            sources = dict(self._sources())
+            sources[scope] = source
+            target = kws_banks.bank(choice.target_bank)
+            intent = import_intent.build_intent(
+                source_id=f"{self._path}|{scope}",
+                source_scope=scope,
+                sources=sources,
+                source=source,
+                target=target,
+                mode=choice.mode,
+                overflow_kind=choice.overflow_kind,
+                overflow_bank=choice.overflow_bank,
+                preflight_answer=choice.preflight,
+                session_id=choice.session_key,
+                pass_slots=tuple(int(slot) for slot in pass_slots),
+                companion_only=choice.companion_only,
+            )
+        except (IndexError, LookupError, ValueError, TypeError, AttributeError) as exc:
+            self._set_status(f"this write cannot be planned: {exc}")
+            return None
+        return import_intent.new_approval(intent)
+
+    def _overflow_statement(self) -> str:
+        """What the pending overflow choice would write, in one line.
+
+        This is the plan the person sees named before anything is
+        approved: which banks, which kinds, in which order.
+        """
+        kind, overflow_id = self._pending_overflow or ("", "")
+        try:
+            target = self._target_bank().label
+        except IndexError:
+            target = "(no target)"
+        if kind == OVERFLOW_CARDS_ONLY:
+            return (
+                "cards only: the card in the slot gets the first "
+                "self-contained group (performances, patches, wave "
+                "sequences), one group per card; no RAM bank is written"
+            )
+        if not overflow_id:
+            return ""
+        try:
+            where = kws_banks.bank(overflow_id).label
+        except LookupError:
+            where = overflow_id
+        if kind == OVERFLOW_PATCHES:
+            return (
+                f"patches overflow: {where} is written first (patches and "
+                f"wave sequences), then {target} (performances, patches, "
+                f"wave sequences), and its parts are repointed at {where}"
+            )
+        if kind == OVERFLOW_SELF_CONTAINED:
+            return (
+                f"self-contained split: {target} gets the contained "
+                f"performances and {where} gets the ones that point "
+                "outside it, with all their patches; each bank is written "
+                "whole (performances, patches, wave sequences), target "
+                "first"
+            )
+        return ""
+
+    def _show_pending_overflow(self) -> None:
+        """Say what the ``o`` choice writes, before anything is approved."""
+        statement = self._overflow_statement()
+        try:
+            self.query_one(f"#{PLAN_ID}", Static).update(statement)
+        except Exception:
+            _ = None
+        self._set_status(statement)
+
+    def _finalize_pending_overflow(self) -> None:
+        """Dismiss with the overflow choice the ``o`` flow ended on.
+
+        The approval is minted at this dismissal, after the plan line has
+        named the banks and kinds it covers; the status says what was
+        approved. A locked gate or a gate armed for a different plan
+        mints nothing: the plan stays on screen and the keys to proceed
+        with it are said.
+        """
+        pending = self._pending_overflow
+        if not pending:
+            return
+        kind, overflow_id = pending
+        statement = self._overflow_statement()
+        if not self._gate_may_dismiss():
+            self._set_status(
+                f"{statement} — the write gate is locked; press w to arm "
+                "this plan, then ctrl+s writes it"
+            )
+            return
+        if kind == OVERFLOW_CARDS_ONLY:
+            card = self._cards_only_target()
+            if card is None:
+                return
+            choice = WholeBankChoice(
+                self._source_index,
+                str(card.id),
+                True,
+                self._mode,
+                self._session_key(),
+                True,
+                "",
+                OVERFLOW_CARDS_ONLY,
+            )
+        else:
+            choice = WholeBankChoice(
+                self._source_index,
+                str(self._target_bank().id),
+                True,
+                self._mode,
+                self._session_key(),
+                True,
+                overflow_id,
+                kind,
+            )
+        approval = self._mint_for_choice(choice)
+        if approval is None:
+            return
+        self._set_status(f"approved: {statement}")
+        self.dismiss(replace(choice, approval=approval))
 
     def _set_status(self, message: str) -> None:
         try:
@@ -1425,6 +1576,7 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
             self._set_status("only one source bank in this file")
             return
         self._source_index = (self._source_index + 1) % len(self._banks)
+        self._pending_overflow = None
         self._rebuild_all()
         self._gate_follows_plan()
 
@@ -1433,6 +1585,7 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
             self._set_status("no writable target banks")
             return
         self._target_index = (self._target_index + 1) % len(self._writable)
+        self._pending_overflow = None
         self._update_target()
         self._update_plan()
         self._gate_follows_plan()
@@ -1452,6 +1605,7 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
     def action_mode(self) -> None:
         index = MODE_ORDER.index(self._mode)
         self._mode = MODE_ORDER[(index + 1) % len(MODE_ORDER)]
+        self._pending_overflow = None
         self._update_mode()
         self._update_plan()
         self._set_status(self._mode_line())
@@ -1524,18 +1678,20 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
             )
         if not self._gate_may_dismiss():
             return
-        self.dismiss(
-            WholeBankChoice(
-                self._source_index,
-                str(target.id),
-                True,
-                self._mode,
-                self._session_key(),
-                True,
-                "",
-                OVERFLOW_SELF_CONTAINED,
-            )
+        choice = WholeBankChoice(
+            self._source_index,
+            str(target.id),
+            True,
+            self._mode,
+            self._session_key(),
+            True,
+            "",
+            OVERFLOW_SELF_CONTAINED,
         )
+        approval = self._mint_for_choice(choice, pass_slots=tuple(remaining))
+        if approval is None:
+            return
+        self.dismiss(replace(choice, approval=approval))
 
     def _next_pass_target_chosen(self, picked: Optional[int]) -> None:
         """Dismiss with the next pass's write into the chosen target."""
@@ -1547,16 +1703,20 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
             return
         if not self._gate_may_dismiss():
             return
-        self.dismiss(
-            WholeBankChoice(
-                self._source_index,
-                str(target.id),
-                True,
-                self._mode,
-                self._session_key(),
-                True,
-            )
+        choice = WholeBankChoice(
+            self._source_index,
+            str(target.id),
+            True,
+            self._mode,
+            self._session_key(),
+            True,
         )
+        approval = self._mint_for_choice(
+            choice, pass_slots=tuple(self._remaining_slots())
+        )
+        if approval is None:
+            return
+        self.dismiss(replace(choice, approval=approval))
 
     def _spillover_companions(self) -> list[SpilloverCompanion]:
         """The file's other RAM banks, each with the RAM bank it would fill.
@@ -1654,32 +1814,49 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
         # holds. The app still writes the bank whole when the unit's copy
         # of it is empty of performances (all Init) -- there is nothing
         # there to destroy.
-        self.dismiss(
-            WholeBankChoice(
-                companion.index, target.id, True, self._mode, companion_only=True
-            )
+        choice = WholeBankChoice(
+            companion.index, target.id, True, self._mode, companion_only=True
         )
+        approval = self._mint_for_choice(choice)
+        if approval is None:
+            return
+        self.dismiss(replace(choice, approval=approval))
 
     def action_write(self) -> None:
+        """The plain write, or the overflow choice that waits, with its token.
+
+        An overflow choice the ``o`` flow could not dismiss (a locked or
+        out-of-date gate) waits as the pending plan; ``ctrl+s`` then
+        finalizes that choice, minting the approval the status line
+        described. Otherwise this is the plain write for the screen's own
+        plan.
+        """
+        if self._pending_overflow is not None:
+            self._finalize_pending_overflow()
+            return
         if not self._gate_may_dismiss():
             return
-        self.dismiss(
-            WholeBankChoice(
-                self._source_index,
-                self._target_bank().id,
-                True,
-                self._mode,
-                self._session_key(),
-                True,
-            )
+        choice = WholeBankChoice(
+            self._source_index,
+            self._target_bank().id,
+            True,
+            self._mode,
+            self._session_key(),
+            True,
         )
+        approval = self._mint_for_choice(choice, pass_slots=self._write_pass_slots())
+        if approval is None:
+            return
+        self.dismiss(replace(choice, approval=approval))
 
     def action_cache(self) -> None:
-        self.dismiss(
-            WholeBankChoice(
-                self._source_index, self._target_bank().id, False, self._mode
-            )
+        choice = WholeBankChoice(
+            self._source_index, self._target_bank().id, False, self._mode
         )
+        approval = self._mint_for_choice(choice)
+        if approval is None:
+            return
+        self.dismiss(replace(choice, approval=approval))
 
     def action_help(self) -> None:
         text = (

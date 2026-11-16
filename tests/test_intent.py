@@ -18,22 +18,30 @@
 from __future__ import annotations
 
 import json
+from typing import Any, Dict, Tuple, cast
 
 import pytest
 
+from kws import banks as kws_banks
+from kws import deps
+from kws import records as r
+from kws.perfcopy import ImportMode
 from kwsed import import_intent as intent_mod
 from kwsed.import_intent import (
+    ALL_KINDS,
     INTENT_SCHEMA,
     BankWriteIntent,
     PlanApproval,
     WholeBankIntent,
     approval_matches,
+    build_intent,
     canonical_bytes,
     digest_map,
     fingerprint,
     new_approval,
     source_digest,
 )
+from tests.test_bankbuild import make_patch, make_performance
 
 
 def _intent(**overrides: object) -> WholeBankIntent:
@@ -190,3 +198,286 @@ class TestAssignmentMapDigest:
         payload["schema"] = INTENT_SCHEMA + 1
         assert intent_mod.INTENT_SCHEMA == INTENT_SCHEMA
         assert payload["schema"] != INTENT_SCHEMA
+
+
+def _file(
+    *, with_ram2: bool = True, waveseq: bool = False
+) -> Tuple[Dict[str, deps.Source], deps.Source]:
+    """A one-bank source: two contained performances, one naming RAM 2.
+
+    Slot 0 and slot 1 use their own bank's patches; slot 2 names RAM 2's
+    patch 0, which is loaded only when ``with_ram2`` asks for it. Every
+    name here is invented.
+    """
+    performances = [bytes(r.PERFORMANCE_SIZE)] * 8
+    performances[0] = make_performance("Harbour Belle", ((0, 0),))
+    performances[1] = make_performance("Inlet Drift", ((0, 1),))
+    performances[2] = make_performance("Crossing Deck", ((1, 0),))
+    source = deps.Source(
+        scope_id="RAM1",
+        performances=performances,
+        patches=[make_patch(f"Ashgrove Tone {index:02d}") for index in range(4)],
+        waveseq=bytes(r.WAVESEQ_BANK_SIZE) if waveseq else None,
+    )
+    sources: Dict[str, deps.Source] = {"RAM1": source}
+    if with_ram2:
+        sources["RAM2"] = deps.Source(
+            scope_id="RAM2",
+            performances=[],
+            patches=[make_patch("Quay Slate")],
+            waveseq=None,
+        )
+    return sources, source
+
+
+class TestBuildIntent:
+    """The shared builder: one choice, planned by the real planners."""
+
+    def _args(self, **overrides: Any) -> Dict[str, Any]:
+        with_ram2 = overrides.pop("with_ram2", True)
+        sources, source = _file(with_ram2=with_ram2)
+        base: Dict[str, Any] = {
+            "source_id": "file:one",
+            "source_scope": "RAM1",
+            "sources": sources,
+            "source": source,
+            "target": kws_banks.bank("RAM3"),
+            "mode": ImportMode.AS_IS,
+        }
+        base.update(overrides)
+        return base
+
+    def test_plain_as_is_names_the_target_with_all_three_kinds(self):
+        args = self._args()
+        intent = build_intent(**args)
+        write = intent.writes[0]
+        assert len(intent.writes) == 1
+        assert write.bank_id == "RAM3"
+        assert write.kinds == ("waveseq", "patches", "performances")
+        assert write.source_slots == (0, 1, 2)
+        # As-is keeps each performance at its own slot.
+        assert write.target_slots == (0, 1, 2)
+        assert write.patch_map_digest == digest_map(())
+        assert write.sequence_map_digest == digest_map(())
+        assert intent.mode == "as_is"
+        assert intent.overflow_kind == ""
+        assert intent.source_id == "file:one"
+        assert intent.source_digest == source_digest(
+            args["source"].performances, args["source"].patches, None
+        )
+
+    def test_patches_overflow_writes_the_overflow_bank_first(self):
+        intent = build_intent(
+            **self._args(
+                mode=ImportMode.SELF_CONTAINED_PACKED,
+                overflow_kind="patches",
+                overflow_bank="RAM2",
+            )
+        )
+        assert [write.bank_id for write in intent.writes] == ["RAM2", "RAM3"]
+        overflow, target = intent.writes
+        assert overflow.kinds == ("waveseq", "patches")
+        assert overflow.patch_map_digest == digest_map([("RAM2:0", 0)])
+        assert overflow.sequence_map_digest == digest_map(())
+        assert target.kinds == ALL_KINDS
+        assert target.source_slots == (0, 1, 2)
+        # Packed re-slots the performances 0..n-1.
+        assert target.target_slots == (0, 1, 2)
+        assert target.patch_map_digest == digest_map([("RAM1:0", 0), ("RAM1:1", 1)])
+        assert intent.overflow_kind == "patches"
+
+    def test_self_contained_split_writes_target_then_overflow(self):
+        intent = build_intent(
+            **self._args(overflow_kind="self_contained", overflow_bank="RAM2")
+        )
+        assert [write.bank_id for write in intent.writes] == ["RAM3", "RAM2"]
+        target, overflow = intent.writes
+        assert target.kinds == ALL_KINDS and overflow.kinds == ALL_KINDS
+        # The contained performances go to the target, the others to the
+        # overflow bank; as-is means each keeps its own slot.
+        assert target.source_slots == (0, 1)
+        assert target.target_slots == (0, 1)
+        assert overflow.source_slots == (2,)
+        assert overflow.target_slots == (2,)
+        assert intent.overflow_kind == "self_contained"
+
+    def test_cards_only_writes_the_first_group_into_the_card_slot(self):
+        # The selector's RAM bank must not leak into a cards-only write.
+        intent = build_intent(
+            **self._args(overflow_kind="cards_only", target=kws_banks.bank("RAM1"))
+        )
+        write = intent.writes[0]
+        assert len(intent.writes) == 1
+        assert write.bank_id == "CARD"
+        assert write.kinds == ALL_KINDS
+        assert write.source_slots == (0, 1, 2)
+        assert write.target_slots == (0, 1, 2)
+        assert intent.overflow_kind == "cards_only"
+
+    def test_companion_writes_patches_and_waveseq_only(self):
+        sources, source = _file(waveseq=True)
+        intent = build_intent(
+            source_id="file:one",
+            source_scope="RAM1",
+            sources=sources,
+            source=source,
+            target=kws_banks.bank("RAM2"),
+            mode=ImportMode.AS_IS,
+            companion_only=True,
+        )
+        write = intent.writes[0]
+        assert len(intent.writes) == 1
+        assert write.bank_id == "RAM2"
+        assert write.kinds == ("waveseq", "patches")
+        assert write.source_slots == () and write.target_slots == ()
+        assert write.patch_map_digest == digest_map(())
+
+    def test_a_companion_without_a_wave_bank_sends_patches_only(self):
+        sources, source = _file()
+        intent = build_intent(
+            source_id="file:one",
+            source_scope="RAM1",
+            sources=sources,
+            source=source,
+            target=kws_banks.bank("RAM2"),
+            mode=ImportMode.AS_IS,
+            companion_only=True,
+        )
+        assert intent.writes[0].kinds == ("patches",)
+
+    def test_a_continuation_pass_plans_the_first_packed_group(self):
+        intent = build_intent(
+            **self._args(
+                mode=ImportMode.SELF_CONTAINED_PACKED,
+                pass_slots=(1, 2),
+                session_id="file:one|RAM1|pass",
+            )
+        )
+        write = intent.writes[0]
+        assert len(intent.writes) == 1
+        assert write.bank_id == "RAM3"
+        assert write.kinds == ALL_KINDS
+        assert write.source_slots == (1, 2)
+        assert write.target_slots == (0, 1)
+        assert intent.pass_slots == (1, 2)
+        assert intent.session_id == "file:one|RAM1|pass"
+
+    def test_identical_choices_fingerprint_identically(self):
+        flows: Tuple[Dict[str, Any], ...] = (
+            {},
+            {
+                "mode": ImportMode.SELF_CONTAINED_PACKED,
+                "overflow_kind": "patches",
+                "overflow_bank": "RAM2",
+            },
+            {"overflow_kind": "self_contained", "overflow_bank": "RAM2"},
+            {"overflow_kind": "cards_only"},
+            {
+                "mode": ImportMode.SELF_CONTAINED_PACKED,
+                "pass_slots": (1, 2),
+            },
+        )
+        for flow in flows:
+            first = build_intent(**self._args(**flow))
+            second = build_intent(**self._args(**flow))
+            assert fingerprint(first) == fingerprint(second)
+
+    def test_a_material_change_changes_the_fingerprint(self):
+        base = build_intent(
+            **self._args(
+                target=kws_banks.bank("RAM1"),
+                overflow_kind="patches",
+                overflow_bank="RAM2",
+            )
+        )
+        variants = (
+            self._args(
+                target=kws_banks.bank("RAM1"),
+                overflow_kind="patches",
+                overflow_bank="RAM3",
+            ),
+            self._args(
+                target=kws_banks.bank("RAM1"),
+                overflow_kind="self_contained",
+                overflow_bank="RAM2",
+            ),
+            self._args(
+                target=kws_banks.bank("CARD"),
+                overflow_kind="patches",
+                overflow_bank="RAM2",
+            ),
+            self._args(
+                target=kws_banks.bank("RAM1"),
+                overflow_kind="patches",
+                overflow_bank="RAM2",
+                preflight_answer="both",
+            ),
+        )
+        for variant in variants:
+            assert fingerprint(build_intent(**variant)) != fingerprint(base)
+
+    def test_an_overflow_kind_without_a_bank_is_no_overflow(self):
+        # The choice's default kind with no bank chosen is a plain write;
+        # the approval describes the effect, not the menu state.
+        plain = build_intent(**self._args())
+        defaulted = build_intent(**self._args(overflow_kind="patches"))
+        assert fingerprint(plain) == fingerprint(defaulted)
+        assert defaulted.overflow_kind == ""
+
+    def test_an_unplannable_split_is_refused_with_the_planners_words(self):
+        with pytest.raises(ValueError, match="not loaded"):
+            build_intent(
+                **self._args(
+                    with_ram2=False,
+                    overflow_kind="self_contained",
+                    overflow_bank="RAM2",
+                )
+            )
+
+    def test_the_intent_and_approval_survive_a_round_trip(self):
+        intent = build_intent(
+            **self._args(overflow_kind="cards_only", session_id="one")
+        )
+        approval = new_approval(intent, nonce_factory=lambda: "fixed")
+        assert approval_matches(approval, intent)
+        again = build_intent(**self._args(overflow_kind="cards_only", session_id="one"))
+        assert approval_matches(approval, again)
+        other = build_intent(**self._args(session_id="one"))
+        assert not approval_matches(approval, other)
+
+
+def _simple_namespace_source() -> Any:
+    """A source shaped like the screen's own fixtures (SimpleNamespace)."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        performances=[bytes([1]) * r.PERFORMANCE_SIZE, bytes(r.PERFORMANCE_SIZE)],
+        patches=[bytes([2]) * r.PATCH_SIZE],
+        waveseq=None,
+    )
+
+
+class TestBuildIntentOnScreenShapedSources:
+    """The screen's loose sources build the same intents deps.Source does."""
+
+    def test_a_plain_as_is_intent_from_a_namespace_source(self):
+        source = cast(Any, _simple_namespace_source())
+        sources = {"RAM1": source}
+        first = build_intent(
+            source_id="foo.syx|RAM1",
+            source_scope="RAM1",
+            sources=cast(Dict[str, deps.Source], sources),
+            source=source,
+            target=kws_banks.bank("RAM1"),
+            mode=ImportMode.AS_IS,
+        )
+        second = build_intent(
+            source_id="foo.syx|RAM1",
+            source_scope="RAM1",
+            sources=cast(Dict[str, deps.Source], sources),
+            source=source,
+            target=kws_banks.bank("RAM1"),
+            mode=ImportMode.AS_IS,
+        )
+        assert first.writes[0].source_slots == (0,)
+        assert fingerprint(first) == fingerprint(second)
