@@ -67,6 +67,10 @@ __all__ = [
     "OVERFLOW_CARDS_ONLY",
     "OVERFLOW_PATCHES",
     "OVERFLOW_SELF_CONTAINED",
+    "REMEDIATION_GREEN_FIELD",
+    "REMEDIATION_INIT_AFFECTED",
+    "REMEDIATION_LEAVE",
+    "REMEDIATIONS",
     "source_digest",
     "sources_digest",
     "canonical_bytes",
@@ -80,7 +84,7 @@ __all__ = [
 
 #: Bump when the canonical encoding changes. An approval minted under one
 #: schema must never be read as approval for a plan under another.
-INTENT_SCHEMA = 1
+INTENT_SCHEMA = 2
 
 #: The three kinds a whole-bank write can send, in the order the bridge
 #: sends them. Kinds are compared as a set of names but always emitted in
@@ -97,6 +101,20 @@ ALL_KINDS: Tuple[str, ...] = KIND_ORDER
 OVERFLOW_PATCHES = "patches"
 OVERFLOW_SELF_CONTAINED = "self_contained"
 OVERFLOW_CARDS_ONLY = "cards_only"
+
+#: The remediation answers a whole-bank plan can carry. ``""`` is the
+#: absent answer: the question has not been asked (or does not apply).
+#: The names are ``kwsed.import_bank.Remediation``'s values, defined here
+#: so the intent builder and the screen cannot spell them differently.
+REMEDIATION_GREEN_FIELD = "green_field"
+REMEDIATION_INIT_AFFECTED = "init_affected"
+REMEDIATION_LEAVE = "leave"
+REMEDIATIONS: Tuple[str, ...] = (
+    "",
+    REMEDIATION_GREEN_FIELD,
+    REMEDIATION_INIT_AFFECTED,
+    REMEDIATION_LEAVE,
+)
 
 
 @dataclass(frozen=True)
@@ -162,12 +180,63 @@ class WholeBankIntent:
     pass_slots: Tuple[int, ...] = ()
     sources_digest: str = ""
     skipped_banks: Tuple[str, ...] = ()
+    #: The remediation answer this plan carries: ``""`` (not asked),
+    #: ``green_field``, ``init_affected`` or ``leave``. It is part of the
+    #: plan: a token minted for one answer must not authorize another.
+    remediation: str = ""
+    #: The physical bank ids a green-field plan clears first (all three
+    #: kinds, Init state), as a sorted set. Cleared banks are RAM banks;
+    #: the Card is never among them.
+    cleared_banks: Tuple[str, ...] = ()
+    #: The Init-ed performance slots per bank, as sorted ``(bank_id,
+    #: sorted slots)`` pairs for an ``init_affected`` plan. Only surviving
+    #: (not wholesale-replaced) banks can appear, and only the slots the
+    #: counts showed.
+    init_banks: Tuple[Tuple[str, Tuple[int, ...]], ...] = ()
 
     def __post_init__(self) -> None:
         # A retry's skipped set is a set of banks, not a sequence: the
         # same attempt recorded in a different order is the same plan.
         object.__setattr__(
             self, "skipped_banks", tuple(sorted(set(self.skipped_banks)))
+        )
+        if self.remediation not in REMEDIATIONS:
+            raise ValueError(f"unknown remediation {self.remediation!r}")
+        if self.remediation == REMEDIATION_GREEN_FIELD and self.init_banks:
+            raise ValueError("a green-field plan carries no Init-ed slots")
+        if self.remediation == REMEDIATION_INIT_AFFECTED and self.cleared_banks:
+            raise ValueError("an init-affected plan clears no bank")
+        # The cleared set is RAM banks only, and the boundary is here, in
+        # the plan itself, not only in the UI that fills it: the Card is
+        # never cleared, and a ROM bank cannot be, so a plan that names
+        # either is not a plan at all and must not fingerprint.
+        for bank_id in self.cleared_banks:
+            try:
+                entry = banks.bank(bank_id)
+            except LookupError as exc:
+                raise ValueError(f"the cleared bank {bank_id!r} is not a bank") from exc
+            if entry.id == "CARD":
+                raise ValueError("the Card is never cleared")
+            if not entry.writable:
+                raise ValueError(
+                    f"{entry.label} is not writable, so it cannot be cleared"
+                )
+        object.__setattr__(
+            self, "cleared_banks", tuple(sorted(set(self.cleared_banks)))
+        )
+        normalised: Dict[str, Tuple[int, ...]] = {}
+        for bank_id, slots in self.init_banks:
+            chosen = tuple(sorted({int(slot) for slot in slots}))
+            if not chosen:
+                continue
+            existing = normalised.get(str(bank_id))
+            normalised[str(bank_id)] = (
+                tuple(sorted(set(existing) | set(chosen))) if existing else chosen
+            )
+        object.__setattr__(
+            self,
+            "init_banks",
+            tuple(sorted((bank, slots) for bank, slots in normalised.items())),
         )
 
 
@@ -268,6 +337,12 @@ def _intent_dict(intent: WholeBankIntent) -> Dict[str, Any]:
         # A retry that already landed some banks is a different plan
         # from the first attempt, and from a retry that skipped others.
         "skipped_banks": list(intent.skipped_banks),
+        # The remediation is part of the plan: the banks a green-field
+        # plan clears and the slots an init-affected plan sets to Init
+        # are what was approved, not menu state.
+        "remediation": intent.remediation,
+        "cleared_banks": list(intent.cleared_banks),
+        "init_banks": [[bank, list(slots)] for bank, slots in intent.init_banks],
         # Write order is part of the plan: companions before the source
         # is a different request from the source before them.
         "writes": [_bank_dict(bank) for bank in intent.writes],
@@ -662,6 +737,9 @@ def build_intent(
     companion_only: bool = False,
     companion_all_init: bool = False,
     skipped_banks: Sequence[str] = (),
+    remediation: str = "",
+    cleared_banks: Sequence[str] = (),
+    init_banks: Sequence[Tuple[str, Sequence[int]]] = (),
 ) -> WholeBankIntent:
     """The finalized intent behind one whole-bank choice, from the planners.
 
@@ -766,4 +844,10 @@ def build_intent(
         session_id=session_id,
         pass_slots=slots,
         skipped_banks=tuple(str(bank) for bank in skipped_banks),
+        remediation=str(remediation),
+        cleared_banks=tuple(str(bank) for bank in cleared_banks),
+        init_banks=tuple(
+            (str(bank), tuple(int(slot) for slot in slots))
+            for bank, slots in init_banks
+        ),
     )

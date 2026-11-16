@@ -627,6 +627,150 @@ class TestBuildIntent:
         assert not approval_matches(approval, other)
 
 
+class TestRemediationInFingerprint:
+    """The remediation answer is part of the canonical plan (P5).
+
+    A token minted for one answer must not authorize another: green
+    field clears banks, init-affected sets named slots to Init, leave
+    sends no remediation at all. The cleared banks and the Init-ed slots
+    are sets, not sequences: the same set in a different order is the
+    same plan.
+    """
+
+    def test_the_answer_changes_the_fingerprint(self):
+        assert self._changed(remediation="leave")
+        assert self._changed(remediation="green_field")
+        assert self._changed(remediation="init_affected")
+
+    def test_unknown_answers_are_refused(self):
+        with pytest.raises(ValueError, match="unknown remediation"):
+            _intent(remediation="reverb_everything")
+
+    def test_the_two_write_kinds_exclude_each_other(self):
+        with pytest.raises(ValueError, match="no Init-ed slots"):
+            _intent(
+                remediation="green_field",
+                cleared_banks=("RAM3",),
+                init_banks=(("RAM2", (1, 2)),),
+            )
+        with pytest.raises(ValueError, match="clears no bank"):
+            _intent(
+                remediation="init_affected",
+                cleared_banks=("RAM3",),
+                init_banks=(("RAM2", (1,)),),
+            )
+
+    def test_cleared_banks_change_it_and_are_order_insensitive(self):
+        first = _intent(remediation="green_field", cleared_banks=("RAM3", "RAM2"))
+        second = _intent(remediation="green_field", cleared_banks=("RAM2", "RAM3"))
+        plain = _intent(remediation="green_field")
+        assert fingerprint(first) != fingerprint(plain)
+        assert fingerprint(first) == fingerprint(second)
+        assert first.cleared_banks == ("RAM2", "RAM3")
+        # A bank listed twice is recorded once.
+        once = _intent(remediation="green_field", cleared_banks=("RAM2", "RAM2"))
+        assert once.cleared_banks == ("RAM2",)
+        assert fingerprint(once) == _fingerprint_of_green(("RAM2",))
+
+    def test_init_banks_change_it_and_are_order_insensitive(self):
+        first = _intent(
+            remediation="init_affected",
+            init_banks=(("RAM2", (1, 2)), ("RAM3", (5,))),
+        )
+        second = _intent(
+            remediation="init_affected",
+            init_banks=(("RAM3", (5,)), ("RAM2", (2, 1))),
+        )
+        plain = _intent(remediation="init_affected")
+        assert fingerprint(first) != fingerprint(plain)
+        assert fingerprint(first) == fingerprint(second)
+        assert first.init_banks == (("RAM2", (1, 2)), ("RAM3", (5,)))
+        # A slot listed twice is recorded once, and an empty bank carries
+        # no slots at all.
+        once = _intent(
+            remediation="init_affected", init_banks=(("RAM2", (2, 1, 2)), ("RAM9", ()))
+        )
+        assert once.init_banks == (("RAM2", (1, 2)),)
+
+    def test_a_leave_token_refuses_green_field_and_init(self):
+        leave = _intent(remediation="leave")
+        approval = new_approval(leave, nonce_factory=lambda: "fixed")
+        assert approval_matches(approval, leave)
+        assert not approval_matches(
+            approval,
+            _intent(remediation="green_field", cleared_banks=("RAM3",)),
+        )
+        assert not approval_matches(
+            approval,
+            _intent(remediation="init_affected", init_banks=(("RAM2", (1,)),)),
+        )
+
+    def test_init_slots_are_part_of_the_fingerprint(self):
+        base = _intent(remediation="init_affected", init_banks=(("RAM2", (1, 2)),))
+        wider = _intent(remediation="init_affected", init_banks=(("RAM2", (1, 2, 3)),))
+        assert fingerprint(wider) != fingerprint(base)
+
+    def test_the_encoding_carries_the_remediation(self):
+        payload = json.loads(
+            canonical_bytes(
+                _intent(
+                    remediation="green_field",
+                    cleared_banks=("RAM3",),
+                )
+            )
+        )
+        assert payload["remediation"] == "green_field"
+        assert payload["cleared_banks"] == ["RAM3"]
+        assert payload["init_banks"] == []
+        # The schema moved when the encoding grew the remediation fields.
+        assert INTENT_SCHEMA >= 2
+
+    def _changed(self, **overrides: object) -> bool:
+        return fingerprint(_intent(**overrides)) != fingerprint(_intent())
+
+
+def _fingerprint_of_green(cleared: Tuple[str, ...]) -> str:
+    return fingerprint(_intent(remediation="green_field", cleared_banks=cleared))
+
+
+class TestBuildIntentRemediation:
+    """The shared builder carries the remediation fields through."""
+
+    def test_build_intent_passes_the_remediation_through(self):
+        sources, source = _file()
+        intent = build_intent(
+            source_id="file:one",
+            source_scope="RAM1",
+            sources=sources,
+            source=source,
+            target=kws_banks.bank("RAM3"),
+            mode=ImportMode.AS_IS,
+            remediation="init_affected",
+            init_banks=(("RAM2", (2, 1)),),
+        )
+        assert intent.remediation == "init_affected"
+        assert intent.init_banks == (("RAM2", (1, 2)),)
+        assert intent.cleared_banks == ()
+
+    def test_the_same_remediation_twice_fingerprints_identically(self):
+        sources, source = _file()
+        kwargs: Dict[str, Any] = {
+            "source_id": "file:one",
+            "source_scope": "RAM1",
+            "sources": sources,
+            "source": source,
+            "target": kws_banks.bank("RAM3"),
+            "mode": ImportMode.AS_IS,
+            "remediation": "green_field",
+            "cleared_banks": ("RAM3",),
+        }
+        first = build_intent(**kwargs)
+        second = build_intent(**kwargs)
+        assert fingerprint(first) == fingerprint(second)
+        other = build_intent(**{**kwargs, "cleared_banks": ("RAM2", "RAM3")})
+        assert fingerprint(other) != fingerprint(first)
+
+
 def _simple_namespace_source() -> Any:
     """A source shaped like the screen's own fixtures (SimpleNamespace)."""
     from types import SimpleNamespace
