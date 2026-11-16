@@ -19,7 +19,8 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any, Dict, Mapping, Optional, Sequence, Tuple
+from enum import Enum
+from typing import TYPE_CHECKING, Any, Dict, Mapping, Optional, Sequence, Tuple, Union
 
 from textual.app import ComposeResult
 from textual.binding import Binding
@@ -45,9 +46,12 @@ if TYPE_CHECKING:
     from kws.importers import ImportedBank
 
 __all__ = [
+    "AffectedCountsScreen",
+    "AffectedImportScreen",
     "DanglingRefsScreen",
     "ImportPassState",
     "PreflightImportScreen",
+    "Remediation",
     "SpilloverCompanion",
     "WholeBankChoice",
     "WholeBankImportScreen",
@@ -106,6 +110,18 @@ OVERFLOW_KIND_CHOICES: Tuple[str, ...] = (
 )
 
 
+class Remediation(Enum):
+    """The answer to the affected-performances remediation question.
+
+    ``NONE`` means the question has not been asked yet (the default).
+    """
+
+    GREEN_FIELD = "green_field"
+    INIT_AFFECTED = "init_affected"
+    LEAVE = "leave"
+    NONE = "none"
+
+
 @dataclass(frozen=True)
 class WholeBankChoice:
     source_index: int
@@ -153,6 +169,22 @@ class WholeBankChoice:
     #: app checks it at the write boundary (P3); until then it travels
     #: with the choice and is not required.
     approval: Optional[import_intent.PlanApproval] = None
+    #: The affected-performances remediation chosen for this write. The
+    #: app asks the question before any write (P5) and carries the
+    #: answer into the plan: a token minted for one answer does not
+    #: authorize another.
+    remediation: "Remediation" = Remediation.NONE
+    #: The physical bank ids a green-field answer clears first (all
+    #: three kinds, Init state), as the plan carries them. RAM banks
+    #: only; the Card is never among them.
+    cleared_banks: Tuple[str, ...] = ()
+    #: The Init-ed performance slots per surviving bank, as sorted
+    #: ``(bank id, sorted slots)`` pairs, for an init-affected answer.
+    init_banks: Tuple[Tuple[str, Tuple[int, ...]], ...] = ()
+    #: One plain line about the remediation for the pre-write status --
+    #: what a green-field or init write did, or, for "leave", what the
+    #: affected performances are in for.
+    remediation_note: str = ""
 
 
 @dataclass(frozen=True)
@@ -425,6 +457,236 @@ class PreflightImportScreen(ModalScreen[Optional[str]]):
         self.dismiss(None)
 
 
+class AffectedImportScreen(ModalScreen[Optional[Union["Remediation", str]]]):
+    """Stage 1 of the affected-performances remediation question.
+
+    Shown before the plan is approved: names the banks this import writes
+    and offers green field / decide with counts / cancel. Green field is
+    offered only where at least one eligible RAM bank would be cleared --
+    a write that touches no RAM bank (a Card target, or a cards-only pass)
+    offers decide-with-counts and cancel only, because the Card is never
+    cleared.
+    """
+
+    DEFAULT_CSS = """
+    AffectedImportScreen { align: center middle; }
+    AffectedImportScreen Vertical {
+        width: 84; height: auto; border: thick $accent;
+        padding: 1 2; background: $panel;
+    }
+    AffectedImportScreen #affected-title { text-style: bold; height: auto; }
+    AffectedImportScreen #affected-body { height: auto; padding: 1 0; }
+    AffectedImportScreen #affected-choices { height: auto; padding: 1 0; }
+    AffectedImportScreen #affected-note { height: auto; color: $warning; }
+    AffectedImportScreen #affected-hint { height: auto; color: $text-muted; }
+    """
+
+    BINDINGS = [
+        Binding("1", "green", "Green field"),
+        Binding("2", "decide", "Decide with counts"),
+        Binding("3", "cancel", "Cancel"),
+        Binding("escape", "cancel", "Cancel"),
+        Binding("q", "cancel", "Cancel"),
+    ]
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        banks = kwargs.pop("banks", None)
+        body = kwargs.pop("body", None)
+        summary = kwargs.pop("summary", None)
+        banks_text = kwargs.pop("banks_text", None)
+        green_field = kwargs.pop("green_field", True)
+        if args:
+            first = args[0]
+            if isinstance(first, str):
+                if body is None and "Green field" in first:
+                    body = first
+                elif banks_text is None and banks is None:
+                    banks_text = first
+            elif isinstance(first, (list, tuple)):
+                banks = first
+        if banks is not None and banks_text is None:
+            banks_text = " and ".join(str(item) for item in banks)
+        if banks_text is None:
+            banks_text = ""
+        self._banks_text = banks_text
+        self._green_field = bool(green_field)
+        self._summary = "" if summary is None else str(summary)
+        if body is not None:
+            self._body = str(body)
+        else:
+            phrase = self._banks_text or "these banks"
+            self._body = (
+                f"This import writes {phrase}.\n\n"
+                "Green field: clear those banks first — performances, patches and "
+                "wave sequences — each backed up before clearing. The Card is "
+                "never touched.\n\n"
+                "Note: RAM 3 and the Card can hold performances pointing at these "
+                "patches; clearing the banks above does not fix those, and their "
+                "sound can still change."
+            )
+        super().__init__()
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Static(
+                "This import replaces patches other performances use",
+                id="affected-title",
+            )
+            yield Static(self._body, id="affected-body", markup=False)
+            yield Static(
+                "1  green field\n2  decide with counts\n3  cancel"
+                if self._green_field
+                else "2  decide with counts\n3  cancel",
+                id="affected-choices",
+                markup=False,
+            )
+            yield Static("", id="affected-note", markup=False)
+            yield Static(
+                "1 / 2 / 3 choose · esc cancel"
+                if self._green_field
+                else "2 / 3 choose · esc cancel",
+                id="affected-hint",
+                markup=False,
+            )
+
+    def action_green(self) -> None:
+        if not self._green_field:
+            # The write touches no RAM bank this import would clear: the
+            # Card is never cleared, so green field is not offered. Saying
+            # so beats a dead key.
+            try:
+                self.query_one("#affected-note", Static).update(
+                    "green field is not available for this write: it clears "
+                    "no RAM bank (the Card is never cleared)"
+                )
+            except Exception:
+                _ = None
+            return
+        self.dismiss(Remediation.GREEN_FIELD)
+
+    def action_decide(self) -> None:
+        # The application answers this one: it reads the candidate banks'
+        # performance dumps (a device worker's job, never a screen's) and
+        # shows the counts, or goes straight to the write when there is
+        # nothing affected.
+        self.dismiss("decide")
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
+class AffectedCountsScreen(ModalScreen[Optional[Union["Remediation", str]]]):
+    """Stage 2: show the pre-formatted counts and choose init/leave/back.
+
+    ``allow_init`` is ``False`` when no affected slot is known -- every
+    candidate bank failed to read, so there is nothing to Init. The ``i``
+    key is then not offered at all, and pressing it anyway is refused with
+    a line that says why, rather than dismissing with an answer that has
+    nothing to act on.
+    """
+
+    DEFAULT_CSS = """
+    AffectedCountsScreen { align: center middle; }
+    AffectedCountsScreen Vertical {
+        width: 84; height: auto; border: thick $warning;
+        padding: 1 2; background: $panel;
+    }
+    AffectedCountsScreen #affected-counts-title { text-style: bold; height: auto; }
+    AffectedCountsScreen #affected-counts-body { height: auto; padding: 1 0; }
+    AffectedCountsScreen #affected-counts-choices { height: auto; padding: 1 0; }
+    AffectedCountsScreen #affected-counts-note { height: auto; color: $warning; }
+    AffectedCountsScreen #affected-counts-hint { height: auto; color: $text-muted; }
+    """
+
+    BINDINGS = [
+        Binding("i", "init", "Init affected"),
+        Binding("l", "leave", "Leave as is"),
+        Binding("b", "back", "Back"),
+        Binding("escape", "cancel", "Cancel"),
+        Binding("q", "cancel", "Cancel"),
+    ]
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        summary = kwargs.pop("summary", None)
+        body = kwargs.pop("body", None)
+        text = kwargs.pop("text", None)
+        unread = kwargs.pop("unread", None)
+        allow_init = kwargs.pop("allow_init", True)
+        if args:
+            first = args[0]
+            if (
+                isinstance(first, str)
+                and summary is None
+                and body is None
+                and text is None
+            ):
+                summary = first
+            elif isinstance(first, (list, tuple)) and unread is None:
+                unread = first
+        self._unread = [str(item) for item in (unread or ())]
+        self._allow_init = bool(allow_init)
+        if summary is None:
+            summary = body if body is not None else (text if text is not None else "")
+        self._summary = "" if summary is None else str(summary)
+        lines = [self._summary] if self._summary else []
+        if self._unread:
+            names = ", ".join(self._unread)
+            lines.append(
+                f"{names} could not be read: the affected count there is "
+                "unknown, and Init is not available for it."
+            )
+        line = "Init the affected performances, leave them, or go back."
+        lines.append(line)
+        self._body = "\n".join(lines)
+        super().__init__()
+
+    def compose(self) -> ComposeResult:
+        with Vertical():
+            yield Static("Affected performances", id="affected-counts-title")
+            yield Static(self._body, id="affected-counts-body", markup=False)
+            yield Static(
+                "Init the affected performances, leave them, or go back."
+                if self._allow_init
+                else "Leave the performances as they are, or go back.",
+                id="affected-counts-choices",
+                markup=False,
+            )
+            yield Static("", id="affected-counts-note", markup=False)
+            yield Static(
+                "i  Init affected · l  leave as is · b  back · esc  cancel"
+                if self._allow_init
+                else "l  leave as is · b  back · esc  cancel",
+                id="affected-counts-hint",
+                markup=False,
+            )
+
+    def action_init(self) -> None:
+        if not self._allow_init:
+            # No affected slot is known: every candidate read failed (or
+            # there was nothing to read), so there is nothing this answer
+            # could set to Init.
+            try:
+                self.query_one("#affected-counts-note", Static).update(
+                    "Init is not available: no affected slot is known "
+                    "(the banks could not be read)"
+                )
+            except Exception:
+                _ = None
+            return
+        self.dismiss(Remediation.INIT_AFFECTED)
+
+    def action_leave(self) -> None:
+        self.dismiss(Remediation.LEAVE)
+
+    def action_back(self) -> None:
+        # Back to the first question, not a cancel: the stage-1 modal is
+        # offered again and nothing has been written either way.
+        self.dismiss("back")
+
+    def action_cancel(self) -> None:
+        self.dismiss(None)
+
+
 class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
     DEFAULT_CSS = """
     WholeBankImportScreen { align: center middle; }
@@ -527,6 +789,11 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
         self._companion_loaded: Dict[str, Sequence[Any]] = (
             dict(companion_loaded) if companion_loaded else {}
         )
+        # The affected-performances remediation answer is deliberately not
+        # held here: the question is asked after this screen is gone, the
+        # application owns the answer, and the amended choice it mints
+        # from carries it. A screen field that was never set (and so never
+        # matched the answer actually given) would only mislead.
 
     @property
     def banks(self) -> list["ImportedBank"]:
@@ -1060,7 +1327,7 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
             return "at their own slots"
         return f"packed into slots 0-{max(this_pass - 1, 0)}"
 
-    def _plan_sentence(self) -> str:
+    def _plan_sentence_base(self) -> str:
         """One plain outcome sentence, shown before the gate can be armed.
 
         The same audit and pass counts the mode line states, said as the
@@ -1565,6 +1832,9 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
             self.query_one(f"#{MODE_ID}", Static).update(self._mode_line())
         except Exception:
             _ = None
+
+    def _plan_sentence(self) -> str:
+        return self._plan_sentence_base()
 
     def _update_plan(self) -> None:
         try:
