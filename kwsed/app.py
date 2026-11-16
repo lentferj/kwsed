@@ -5524,6 +5524,50 @@ class KwsedApp(App[None]):
             return
         self._resolve_remediation_then_write(bank, choice, banks_list, path)
 
+    def _pending_remediation_choice(self, choice: Any) -> Optional[Any]:
+        """A remediation answer carried forward from a partial remediation.
+
+        After a remediation write stopped part way, the session records
+        the answer and the banks it originally covered together with the
+        landed remediation banks. A retry must clear/Init only the banks
+        not already remediated, so the pending plan is the same answer
+        restricted to the remaining banks. ``None`` when no partial
+        remediation is pending.
+        """
+        session_key = str(getattr(choice, "session_key", "") or "")
+        if not session_key:
+            return None
+        state = self._import_passes.get(session_key) or {}
+        answer_name = str(state.get("remediation_answer") or "")
+        if not answer_name:
+            return None
+        try:
+            answer = Remediation(answer_name)
+        except ValueError:
+            return None
+        skipped = set(self._skipped_banks_for(session_key))
+        cleared = tuple(
+            str(b)
+            for b in state.get("remediation_cleared") or ()
+            if str(b) not in skipped
+        )
+        init = tuple(
+            (str(b), tuple(int(s) for s in slots))
+            for b, slots in state.get("remediation_init") or ()
+            if str(b) not in skipped
+        )
+        if answer is Remediation.GREEN_FIELD and not cleared:
+            return None
+        if answer is Remediation.INIT_AFFECTED and not init:
+            return None
+        return replace(
+            choice,
+            remediation=answer,
+            cleared_banks=cleared,
+            init_banks=init,
+            preflight=str(state.get("remediation_preflight") or ""),
+        )
+
     def _resolve_remediation_then_write(
         self,
         bank: Any,
@@ -5539,6 +5583,29 @@ class KwsedApp(App[None]):
         companions second, the target last. Cancelling at the question
         writes nothing at all.
         """
+        pending = self._pending_remediation_choice(choice)
+        if pending is not None:
+            # A previous remediation attempt landed part of its banks: the
+            # answer is carried forward for the remainder only. The retry
+            # still needs a fresh approval (no automatic write).
+            choice = replace(pending, approval=None)
+            approval = self._mint_whole_bank_approval(bank, choice, banks_list, path)
+            if approval is None:
+                return
+            choice = replace(choice, approval=approval)
+        else:
+            session_key = str(getattr(choice, "session_key", "") or "")
+            if session_key:
+                state = self._import_passes.get(session_key) or {}
+                if state.get("remediation_answer"):
+                    # The recorded remediation has no remaining banks.
+                    for k in (
+                        "remediation_answer",
+                        "remediation_cleared",
+                        "remediation_init",
+                        "remediation_preflight",
+                    ):
+                        state.pop(k, None)
         if self._remediation_gate_needed(bank, choice, banks_list):
             self._ask_remediation(bank, choice, banks_list, path)
             return
@@ -5752,8 +5819,11 @@ class KwsedApp(App[None]):
             self._companion_write_patches_only(choice)
         )
         companion_all_init = companion_only and not companion_patches_only
+        skipped_banks = self._skipped_banks_for(
+            str(getattr(choice, "session_key", "") or "")
+        )
         remediation_name, cleared_banks, init_banks = self._choice_remediation_fields(
-            choice
+            choice, skipped_banks=skipped_banks
         )
         try:
             target, _target_scope = self._resolve_whole_bank_target(choice)
@@ -5854,8 +5924,11 @@ class KwsedApp(App[None]):
             companion_all_init = bool(
                 getattr(choice, "companion_only", False)
             ) and not self._companion_write_patches_only(choice)
+        skipped_banks = self._skipped_banks_for(
+            str(getattr(choice, "session_key", "") or "")
+        )
         remediation_name, cleared_banks, init_banks = self._choice_remediation_fields(
-            choice
+            choice, skipped_banks=skipped_banks
         )
         try:
             target, _target_scope = self._resolve_whole_bank_target(choice)
@@ -6121,13 +6194,16 @@ class KwsedApp(App[None]):
         token minted for a retry of a partial attempt and the plan the
         write boundary rebuilds from that same token must agree on which
         banks the session has already landed, or every retry would be
-        refused. Two flows record what landed:
+        refused. Flows record what landed:
 
         - a patches-only overflow whose target write failed leaves
           ``overflow_written`` in the session state -- the retry sends
           the target only;
         - a split or cards-only pass records the landed groups'
-          physical bank ids as ``banks_written``.
+          physical bank ids as ``banks_written``;
+        - a remediation that stopped part way records the completed
+          remediation banks as ``remediation_written`` -- the retry
+          clears/Init-s only the remainder.
 
         A fresh session key maps to no state, so a first attempt (and
         every companion write, which carries no session key at all)
@@ -6141,6 +6217,9 @@ class KwsedApp(App[None]):
         if overflow:
             skipped.add(overflow)
         for bank_id in state.get("banks_written") or ():
+            if bank_id:
+                skipped.add(str(bank_id))
+        for bank_id in state.get("remediation_written") or ():
             if bank_id:
                 skipped.add(str(bank_id))
         return tuple(sorted(skipped))
@@ -6172,21 +6251,46 @@ class KwsedApp(App[None]):
     # answer is part of the approved plan.
 
     def _choice_remediation_fields(
-        self, choice: Any
+        self, choice: Any, *, skipped_banks: Sequence[str] = ()
     ) -> Tuple[str, Tuple[str, ...], Tuple[Tuple[str, Tuple[int, ...]], ...]]:
-        """The choice's remediation as the intent builder's arguments."""
+        """The choice's remediation as the intent builder's arguments.
+
+        Banks an earlier partial attempt already remediated are in
+        ``skipped_banks`` (the session's landed set): they are removed
+        from the remaining remediation work so a retry clears/Init-s only
+        what is left and the plan does not present landed banks as work
+        still to do.
+
+        The "nothing remains" clearance fires only when that filtering
+        actually removed a landed bank from this answer's own work: a
+        LEAVE answer has no clear or Init banks at all, and a plain
+        LEAVE choice (no retry, nothing landed) must still fingerprint
+        ``leave`` -- the answer the token was minted for.
+        """
         answer = getattr(choice, "remediation", Remediation.NONE)
         if answer is Remediation.NONE:
             name = ""
         else:
             name = str(getattr(answer, "value", answer))
-        cleared = tuple(
+        skipped = {str(bank) for bank in skipped_banks}
+        whole_cleared = tuple(
             str(bank) for bank in getattr(choice, "cleared_banks", ()) or ()
         )
-        init = tuple(
+        whole_init = tuple(
             (str(bank), tuple(int(slot) for slot in slots))
             for bank, slots in getattr(choice, "init_banks", ()) or ()
         )
+        cleared = tuple(bank for bank in whole_cleared if bank not in skipped)
+        init = tuple((bank, slots) for bank, slots in whole_init if bank not in skipped)
+        landed_out = any(bank in skipped for bank in whole_cleared) or any(
+            bank in skipped for bank, _slots in whole_init
+        )
+        if landed_out and not cleared and not init and answer is not Remediation.NONE:
+            # The landed banks covered the whole remediation: nothing of
+            # this answer remains to do (the target's write may still be
+            # pending after remediation completed).
+            name = ""
+            answer = Remediation.NONE
         return name, cleared, init
 
     def _remediation_gate_needed(
@@ -6743,18 +6847,64 @@ class KwsedApp(App[None]):
         except (LookupError, ValueError) as exc:
             self.notify_status(f"import: {exc}", refused=True)
             return
+        session_key = str(getattr(choice, "session_key", "") or "")
+        skipped = self._skipped_banks_for(session_key)
         answer = getattr(choice, "remediation", Remediation.NONE)
+        remaining_cleared = tuple(
+            str(b)
+            for b in getattr(choice, "cleared_banks", ()) or ()
+            if str(b) not in set(skipped)
+        )
+        remaining_init = tuple(
+            (str(b), tuple(int(s) for s in slots))
+            for b, slots in getattr(choice, "init_banks", ()) or ()
+            if str(b) not in set(skipped)
+        )
+        if answer is Remediation.GREEN_FIELD and not remaining_cleared:
+            # All remediation banks already landed in this session; nothing
+            # remains to clear (the target may still be pending).
+            amended = replace(
+                choice,
+                remediation=Remediation.NONE,
+                cleared_banks=(),
+                init_banks=(),
+            )
+            approval = self._mint_whole_bank_approval(bank, amended, banks_list, path)
+            if approval is None:
+                return
+            self._whole_bank_write_continue(
+                bank, replace(amended, approval=approval), banks_list, path, sources
+            )
+            return
+        if answer is Remediation.INIT_AFFECTED and not remaining_init:
+            amended = replace(
+                choice,
+                remediation=Remediation.NONE,
+                cleared_banks=(),
+                init_banks=(),
+            )
+            approval = self._mint_whole_bank_approval(bank, amended, banks_list, path)
+            if approval is None:
+                return
+            self._whole_bank_write_continue(
+                bank, replace(amended, approval=approval), banks_list, path, sources
+            )
+            return
         if answer is Remediation.GREEN_FIELD:
             label = "clearing " + ", ".join(
-                self._bank_label(bank_id)
-                for bank_id in getattr(choice, "cleared_banks", ())
+                self._bank_label(bank_id) for bank_id in remaining_cleared
             )
         else:
             label = "setting the affected performances to Init"
         self.notify_status(f"{label} before the write...")
 
         def work() -> Any:
-            return self._remediation_write_work(choice, target)
+            return self._remediation_write_work(
+                choice,
+                target,
+                cleared_banks=remaining_cleared,
+                init_banks=remaining_init,
+            )
 
         def done(result: Any, failure: BaseException | None) -> None:
             self._remediation_write_done(
@@ -6776,7 +6926,12 @@ class KwsedApp(App[None]):
             return bank_id
 
     def _remediation_write_work(
-        self, choice: Any, target: Any
+        self,
+        choice: Any,
+        target: Any,
+        *,
+        cleared_banks: Optional[Sequence[str]] = None,
+        init_banks: Optional[Sequence[Tuple[str, Sequence[int]]]] = None,
     ) -> Tuple[MultiBankOutcome, Dict[str, Any]]:
         """Build and write the remediation, one fenced bundle per bank.
 
@@ -6795,6 +6950,11 @@ class KwsedApp(App[None]):
         built: Dict[str, Any] = {}
         builders: List[Tuple[Any, Callable[[], Dict[str, Any]]]] = []
         if answer is Remediation.GREEN_FIELD:
+            effective_cleared = (
+                [str(bank) for bank in getattr(choice, "cleared_banks", ()) or ()]
+                if cleared_banks is None
+                else [str(bank) for bank in cleared_banks]
+            )
             perf_blob, patch_blob, ws_blob = _remediation_mod.cleared_bank()
 
             def build_clear(
@@ -6808,17 +6968,19 @@ class KwsedApp(App[None]):
                     "waveseq": ws_blob,
                 }
 
-            for bank_id in self._remediation_write_order(
-                [str(bank) for bank in getattr(choice, "cleared_banks", ())],
-                target,
-            ):
+            for bank_id in self._remediation_write_order(effective_cleared, target):
                 entry = _banks_mod.bank(bank_id)
                 built[bank_id] = SimpleNamespace(
                     performances=perf_blob, patches=patch_blob, waveseq=ws_blob
                 )
                 builders.append((entry, build_clear))
         else:
-            for bank_id, slots in getattr(choice, "init_banks", ()) or ():
+            effective_init = (
+                list(getattr(choice, "init_banks", ()) or ())
+                if init_banks is None
+                else list(init_banks)
+            )
+            for bank_id, slots in effective_init:
                 entry = _banks_mod.bank(bank_id)
                 chosen = tuple(int(slot) for slot in slots)
 
@@ -6895,27 +7057,61 @@ class KwsedApp(App[None]):
             self.notify_status(f"remediation: {failure}", refused=True)
             return
         outcome, built = result
+        landed_ids = [
+            str(getattr(entry.bank, "id", ""))
+            for entry in outcome.completed
+            if getattr(entry.bank, "id", None)
+        ]
         for entry in outcome.completed:
             bank_id = str(getattr(entry.bank, "id", ""))
             self._remember_remediated_bank(bank_id, built.get(bank_id), entry.result)
+        session_key = str(getattr(choice, "session_key", "") or "")
+        if landed_ids and session_key:
+            state = self._import_passes.setdefault(
+                session_key, {"written": {}, "targets": []}
+            )
+            state.setdefault("remediation_written", set()).update(landed_ids)
         if not outcome.ok:
             # Nothing goes on to the import's own write: the person sees
-            # which banks landed and which did not, and nothing retries
-            # silently.
+            # which banks landed and which did not, the session records
+            # them and the remaining remediation answer, and the screen
+            # comes back so the remainder can be approved and retried. No
+            # automatic second attempt.
+            self._record_remediation_pending(session_key, choice)
             self.notify_status(self._remediation_partial_status(outcome), refused=True)
+            if session_key and banks_list and getattr(self, "is_running", False):
+                landed = ", ".join(
+                    getattr(
+                        entry.bank,
+                        "label",
+                        str(getattr(entry.bank, "id", entry.bank)),
+                    )
+                    for entry in outcome.completed
+                )
+                self._reopen_whole_bank_import(
+                    banks_list,
+                    path,
+                    session_key,
+                    getattr(choice, "mode", perfcopy.ImportMode.AS_IS),
+                    notice=(
+                        f"remediation landed for {landed}; the remaining work "
+                        "still needs approval"
+                        if landed
+                        else "remediation stopped; the remaining work "
+                        "still needs approval"
+                    ),
+                )
             return
-        answer = getattr(choice, "remediation", Remediation.NONE)
-        if answer is Remediation.GREEN_FIELD:
-            cleared = ", ".join(
-                self._bank_label(str(bank_id))
-                for bank_id in getattr(choice, "cleared_banks", ())
-            )
-            note = f"cleared {cleared} first (performances, patches, wave sequences)"
-        else:
-            counts = []
-            for bank_id, slots in getattr(choice, "init_banks", ()) or ():
-                counts.append(f"{len(slots)} in {self._bank_label(str(bank_id))}")
-            note = "set the affected performances to Init first: " + ", ".join(counts)
+        if session_key:
+            state = self._import_passes.get(session_key) or {}
+            for k in (
+                "remediation_answer",
+                "remediation_cleared",
+                "remediation_init",
+                "remediation_preflight",
+            ):
+                state.pop(k, None)
+        note = self._remediation_done_note(choice)
         amended = replace(
             choice,
             remediation=Remediation.NONE,
@@ -6932,6 +7128,43 @@ class KwsedApp(App[None]):
             banks_list=banks_list,
             path=path,
         )
+
+    def _record_remediation_pending(self, session_key: str, choice: Any) -> None:
+        """Keep a stopped remediation's answer so the retry can resume it.
+
+        The screen comes back with the remaining work; these fields are
+        what the re-offered choice is derived from.
+        """
+        if not session_key:
+            return
+        state = self._import_passes.setdefault(
+            session_key, {"written": {}, "targets": []}
+        )
+        answer = getattr(choice, "remediation", Remediation.NONE)
+        if answer is not Remediation.NONE:
+            state["remediation_answer"] = str(getattr(answer, "value", answer))
+            state["remediation_cleared"] = tuple(
+                str(b) for b in getattr(choice, "cleared_banks", ()) or ()
+            )
+            state["remediation_init"] = tuple(
+                (str(b), tuple(int(s) for s in slots))
+                for b, slots in getattr(choice, "init_banks", ()) or ()
+            )
+            state["remediation_preflight"] = str(getattr(choice, "preflight", "") or "")
+
+    def _remediation_done_note(self, choice: Any) -> str:
+        """What the approved remediation did, for the carry-forward note."""
+        answer = getattr(choice, "remediation", Remediation.NONE)
+        if answer is Remediation.GREEN_FIELD:
+            cleared = ", ".join(
+                self._bank_label(str(bank_id))
+                for bank_id in getattr(choice, "cleared_banks", ())
+            )
+            return f"cleared {cleared} first (performances, patches, wave sequences)"
+        counts = []
+        for bank_id, slots in getattr(choice, "init_banks", ()) or ():
+            counts.append(f"{len(slots)} in {self._bank_label(str(bank_id))}")
+        return "set the affected performances to Init first: " + ", ".join(counts)
 
     def _remediation_partial_status(self, outcome: MultiBankOutcome) -> str:
         """One honest line for a remediation that stopped part way."""
@@ -8059,7 +8292,12 @@ class KwsedApp(App[None]):
             source if source is not None else getattr(entry, "source", None)
         )
         remediation_name, cleared_banks, init_banks = (
-            self._choice_remediation_fields(choice)
+            self._choice_remediation_fields(
+                choice,
+                skipped_banks=self._skipped_banks_for(
+                    str(getattr(choice, "session_key", "") or "")
+                ),
+            )
             if choice is not None
             else ("", (), ())
         )
