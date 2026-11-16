@@ -4333,6 +4333,92 @@ async def test_companion_write_refuses_a_token_minted_for_another_bank(
 
 
 @pytest.mark.asyncio
+async def test_companion_write_freezes_the_records_at_the_boundary(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """The companion write sends exactly what the token was checked for (P7c).
+
+    The snapshot is taken at the write boundary, before the token is
+    validated, and the worker writes only that snapshot. Records that
+    change between the check and the worker -- here, mutated while the
+    boundary is still planning -- change nothing on the unit: the patch
+    and wave-sequence bytes are the frozen ones, and the companion's
+    performances never travel at all.
+    """
+    from tests.test_bankbuild import make_patch, make_waveseq
+
+    app, recorded = _armed_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(bankstore, "save", lambda *a, **k: None)
+    file_banks = _two_bank_file()
+    entry = file_banks[1]
+    companion = banks.bank("RAM2")
+    app._sources["RAM2"] = _make_bank(scope="RAM2", active_slots=[]).source
+    # The frozen records: what the boundary snapshot carries.
+    frozen_patches = [bytes(record) for record in entry.source.patches]
+    frozen_waveseq, _starts = make_waveseq({0: [40]})
+    entry.source.waveseq = frozen_waveseq
+    mode = perfcopy.ImportMode.AS_IS
+    choice = WholeBankChoice(1, "RAM2", True, mode, companion_only=True)
+    approval = app._mint_whole_bank_approval(
+        entry, choice, file_banks, "two.syx", companion_all_init=False
+    )
+    assert approval is not None
+    done: list[int] = []
+
+    original_intent = KwsedApp._companion_write_intent
+
+    def _mutating(self: KwsedApp, *a: Any, **k: Any) -> Any:
+        # Runs inside the boundary, after the plan inputs were frozen and
+        # before the worker runs: the live records change, the snapshot
+        # does not. Every name is invented.
+        entry.source.patches[2] = make_patch("Late Swap")
+        entry.source.waveseq = b"late-seq"
+        app._sources["RAM2"].patches[3] = make_patch("Store Swap")
+        return original_intent(self, *a, **k)
+
+    monkeypatch.setattr(KwsedApp, "_companion_write_intent", _mutating)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._write_companion_patches(
+            entry,
+            companion,
+            lambda: done.append(1),
+            approval=approval,
+            banks_list=file_banks,
+            path="two.syx",
+            mode=mode,
+        )
+        await _wait_for_writes(app, pilot, 1)
+        await _settle(pilot)
+        assert done == [1], "the frozen write landed and the caller was told"
+        assert app.device.bundle_write_count == 1
+        write = app.device.bundle_writes[0]
+        assert write["bank"] == companion.label
+        assert write["kinds"] == ["waveseq", "patches"]
+        assert ("RAM2", banks.Kind.PERFORMANCE) not in app.device._written, (
+            "a companion write never sends performances"
+        )
+        # The bytes are the frozen records: neither the file's mutated
+        # copies nor the session copy's reach the unit.
+        patch_blob = _pass_blob(app.device, "RAM2", banks.Kind.PATCH)
+        assert patch_blob == b"".join(frozen_patches)
+        assert b"Late Swap" not in patch_blob
+        assert _pass_blob(app.device, "RAM2", "waveseq") == frozen_waveseq
+        assert approval.nonce in app._consumed_plan_nonces
+        assert recorded, "the frozen write is recorded for undo"
+        # The session copy keeps its own performances and takes the
+        # frozen patches, so a later check sees the bank as written.
+        session_source = app._sources["RAM2"]
+        untouched = _make_bank(scope="RAM2", active_slots=[]).source
+        assert list(session_source.performances) == [
+            bytes(record) for record in untouched.performances
+        ]
+        assert b"Store Swap" not in b"".join(session_source.patches)
+
+    assert app.device.bundle_write_count == 1
+
+
+@pytest.mark.asyncio
 async def test_preflight_both_two_companions_one_token_each(
     tmp_path: Any, monkeypatch: Any
 ) -> None:
@@ -5031,6 +5117,180 @@ async def test_overflow_failure_on_the_target_keeps_the_overflow_bank(
     assert any("the overflow bank already held them" in s for s in statuses)
     assert app._sources["CARD"] is not card_before
     assert len(recorded) == 2
+
+
+@pytest.mark.asyncio
+async def test_overflow_partial_reoffers_the_screen_and_the_retry_is_target_only(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """The patches-overflow partial gives the screen back, target-only (P7c).
+
+    The overflow bank landed, the target did not: the import screen is
+    re-offered with the same session, its pass state naming the landed
+    bank as ``skipped_banks``. The retry minted there is the plan the
+    write boundary rebuilds, the pre-write status says the target is all
+    this pass sends, and ctrl+s then writes exactly the target once --
+    never the landed bank again -- with one undo record for that write.
+    The first token is spent, and replaying it writes nothing.
+    """
+    app, statuses, recorded, _saved = _partial_app(tmp_path, monkeypatch)
+    bank = _mixed_bank()
+    card_no = banks.bank("CARD").number
+    ram3_no = banks.bank("RAM3").number
+    original = app.device.write_bank_bundle
+    calls: list[int] = []
+    fails = {"armed": True}
+
+    def failing(bank_number: int, **k: Any) -> dict[str, Any]:
+        if fails["armed"] and bank_number == card_no:
+            raise RuntimeError("card refused the write")
+        calls.append(bank_number)
+        return cast(dict[str, Any], original(bank_number, **k))
+
+    app.device.write_bank_bundle = failing
+    choice = WholeBankChoice(
+        0,
+        "CARD",
+        True,
+        perfcopy.ImportMode.AS_IS,
+        "overflow-reoffer",
+        True,
+        "RAM3",
+        OVERFLOW_PATCHES,
+    )
+    # The first attempt's token, held so the replay refusal can use it.
+    first = _approved(choice, bank, [bank], "two.syx")
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._import_whole_bank_write(bank, first, banks_list=[bank], path="two.syx")
+        await _await_partial(app, pilot)
+        await _settle(pilot)
+
+        # Exactly one bundle went out: the overflow bank, and it landed.
+        assert calls == [ram3_no]
+        assert len(recorded) == 1
+        closing = statuses[-1]
+        assert closing.startswith("import: card refused the write")
+        assert "write the target again" in closing
+        assert not any("imported" in s for s in statuses), statuses
+        # The session keeps the landed bank, and it is what the screen's
+        # mint and the write boundary both skip (P7b derivation).
+        assert app._import_passes["overflow-reoffer"]["overflow_written"] == "RAM3"
+        assert app._skipped_banks_for("overflow-reoffer") == ("RAM3",)
+
+        # The screen is back with the same session (P7c): no fresh visit,
+        # no fresh key, the landed bank already in the pass state.
+        assert isinstance(app.screen, WholeBankImportScreen)
+        reopened = app.screen
+        assert reopened._pass_state is not None
+        assert reopened._pass_state.session_key == "overflow-reoffer"
+        assert reopened._pass_state.skipped_banks == ("RAM3",)
+
+        # The retry, minted by the screen itself: target Card, overflow
+        # RAM 3 (the same plan), and the pass state's skip in the token.
+        fails["armed"] = False
+        await pilot.press("b")  # RAM 1 -> RAM 2
+        await _settle(pilot)
+        await pilot.press("b")  # -> RAM 3
+        await _settle(pilot)
+        await pilot.press("b")  # -> Card
+        await _settle(pilot)
+        await pilot.press("o")
+        await _settle(pilot)
+        await pilot.press("enter")  # the patches-only kind
+        await _settle(pilot)
+        await pilot.press("down")  # RAM 2 -- the parts name it
+        await _settle(pilot)
+        await pilot.press("down")  # RAM 1
+        await _settle(pilot)
+        await pilot.press("enter")  # RAM 3 -- the bank that landed
+        await _wait_for_writes(app, pilot, 2)
+        await _settle(pilot)
+
+        # The pre-write status says the target is all the retry sends.
+        assert any(
+            "RAM 3 already landed; this write sends the target only" in s
+            for s in statuses
+        ), statuses
+        # Exactly one bundle for the retry, to the target only: the
+        # landed overflow bank was never sent again.
+        assert calls == [ram3_no, card_no]
+        # One undo record for that write, with its backup on disk.
+        assert len(recorded) == 2
+        assert recorded[1]["bank"] == banks.bank("CARD").label
+        retry_backup = recorded[1]["backup"]
+        assert isinstance(retry_backup, str) and os.path.exists(retry_backup)
+
+        # The first token is spent, and a replayed token is refused.
+        assert first.approval is not None
+        assert first.approval.nonce in app._consumed_plan_nonces
+        before = len(calls)
+        app._import_whole_bank_write(bank, first, banks_list=[bank], path="two.syx")
+        await _settle(pilot)
+        assert len(calls) == before, "a replayed token must not reach the unit"
+        assert len(recorded) == 2
+
+    assert calls == [ram3_no, card_no]
+    assert any("the overflow bank already held them" in s for s in statuses)
+
+
+@pytest.mark.asyncio
+async def test_overflow_partial_without_a_session_keeps_today_s_message(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """No session key, no re-offer: the plain partial message (P7c).
+
+    A sessionless write cannot carry a retry's skip state, so the
+    partial stays what it was -- the message that says the overflow bank
+    landed and the target must be written again -- and no import screen
+    is pushed over whatever is on the stack.
+    """
+    app, statuses, recorded, _saved = _partial_app(tmp_path, monkeypatch)
+    bank = _mixed_bank()
+    card_no = banks.bank("CARD").number
+    ram3_no = banks.bank("RAM3").number
+    original = app.device.write_bank_bundle
+    calls: list[int] = []
+    fails = {"armed": True}
+
+    def failing(bank_number: int, **k: Any) -> dict[str, Any]:
+        if fails["armed"] and bank_number == card_no:
+            raise RuntimeError("card refused the write")
+        calls.append(bank_number)
+        return cast(dict[str, Any], original(bank_number, **k))
+
+    app.device.write_bank_bundle = failing
+    choice = WholeBankChoice(
+        0,
+        "CARD",
+        True,
+        perfcopy.ImportMode.AS_IS,
+        "",  # no session key
+        True,
+        "RAM3",
+        OVERFLOW_PATCHES,
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._import_whole_bank_write(
+            bank,
+            _approved(choice, bank, [bank], "two.syx"),
+            banks_list=[bank],
+            path="two.syx",
+        )
+        await _await_partial(app, pilot)
+        await _settle(pilot)
+
+        assert calls == [ram3_no]
+        assert len(recorded) == 1
+        closing = statuses[-1]
+        assert closing.startswith("import: card refused the write")
+        assert "write the target again" in closing
+        # No session: nothing recorded under any key, and no screen.
+        assert app._import_passes == {}
+        assert not isinstance(app.screen, WholeBankImportScreen)
+
+    assert calls == [ram3_no]
 
 
 @pytest.mark.asyncio

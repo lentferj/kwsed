@@ -6350,24 +6350,48 @@ class KwsedApp(App[None]):
         landed_overflow = bool(overflow_id) and any(
             getattr(entry.bank, "id", "") == overflow_id for entry in outcome.completed
         )
-        if landed_overflow and overflow_kind == OVERFLOW_PATCHES:
+        patches_overflow = landed_overflow and overflow_kind == OVERFLOW_PATCHES
+        if patches_overflow:
             # The overflow bank carries the patches the target's
             # performances name: it landed, the target did not. Mark the
             # session so a retry sends the target only, and say so.
-            if session_key:
-                state = self._import_passes.setdefault(
-                    session_key, {"written": {}, "targets": []}
-                )
-                state["overflow_written"] = overflow_id
-            try:
-                overflow_label = banks.bank(overflow_id).label
-            except LookupError:
-                overflow_label = overflow_id
-            message += (
-                f" — the overflow bank {overflow_label} holds the patches "
-                "the target's performances name; write the target again"
-            )
+            message += self._patches_overflow_partial_note(overflow_id, session_key)
         self.notify_status(message, refused=True)
+        if (
+            patches_overflow
+            and session_key
+            and banks_list
+            and getattr(choice, "continue_pass", False)
+            and getattr(self, "is_running", False)
+        ):
+            # The screen comes back with the same session (P7c): its pass
+            # state carries this session key and the landed overflow bank
+            # as ``skipped_banks``, so a retry minted there is the same
+            # plan the write boundary rebuilds from the session's state --
+            # and the boundary then skips the landed bank itself. Without
+            # the re-offer, the next visit minted a fresh session's plan
+            # and rewrote the bank that already landed.
+            self._reopen_whole_bank_import(banks_list, path, session_key, mode)
+
+    def _patches_overflow_partial_note(self, overflow_id: str, key: str) -> str:
+        """Mark the session's landed overflow bank, and say what is left.
+
+        The session keeps ``overflow_written`` so the retry's mint and
+        the write boundary both skip the landed bank; the note is the
+        line the partial status carries, and it never says the import
+        succeeded.
+        """
+        if key:
+            state = self._import_passes.setdefault(key, {"written": {}, "targets": []})
+            state["overflow_written"] = overflow_id
+        try:
+            overflow_label = banks.bank(overflow_id).label
+        except LookupError:
+            overflow_label = overflow_id
+        return (
+            f" — the overflow bank {overflow_label} holds the patches "
+            "the target's performances name; write the target again"
+        )
 
     def _multi_bank_partial_split(
         self,
@@ -6970,6 +6994,28 @@ class KwsedApp(App[None]):
             mode=getattr(choice, "mode", perfcopy.ImportMode.AS_IS),
         )
 
+    def _frozen_companion_sources(
+        self, entry: Any, banks_list: Sequence[Any]
+    ) -> Tuple[Dict[str, deps.Source], Optional[deps.Source]]:
+        """The companion write's frozen plan inputs (P7c).
+
+        Every file bank's records become a frozen copy, exactly as the
+        whole-bank write freezes its own sources; the companion entry's
+        own frozen records come back as the second element -- the source
+        the intent is planned from, and the only records the worker
+        writes. An entry with no records freezes nothing of its own and
+        comes back as ``None``; the caller reports that as before.
+        """
+        intent_sources: Dict[str, deps.Source] = {
+            scope: self._frozen_source(source)
+            for scope, source in self._whole_bank_intent_sources(banks_list).items()
+        }
+        frozen_entry = intent_sources.get(str(getattr(entry, "scope", "") or ""))
+        if frozen_entry is None and getattr(entry, "source", None) is not None:
+            frozen_entry = self._frozen_source(entry.source)
+            intent_sources[str(getattr(entry, "scope", "") or "")] = frozen_entry
+        return intent_sources, frozen_entry
+
     def _companion_write_intent(
         self,
         entry: Any,
@@ -6977,6 +7023,9 @@ class KwsedApp(App[None]):
         banks_list: Sequence[Any],
         path: str,
         mode: Any,
+        *,
+        sources: Optional[Mapping[str, deps.Source]] = None,
+        source: Optional[deps.Source] = None,
     ) -> Optional[import_intent.WholeBankIntent]:
         """The intent one companion write must be approved for.
 
@@ -6987,13 +7036,24 @@ class KwsedApp(App[None]):
         bank's records travel as they are. The same shared builder every
         other whole-bank intent comes from, so a mint made anywhere
         against it and this check cannot spell one plan two ways.
+
+        ``sources`` and ``source`` are the frozen snapshot the write
+        boundary took (P7c); given, the intent is planned from it, so the
+        token is validated against exactly the records the worker will
+        write. Without them the intent is planned from the live file
+        banks, as every other intent builder here does.
         """
+        if sources is None:
+            sources = self._whole_bank_intent_sources(banks_list)
+        planned_source: Any = (
+            source if source is not None else getattr(entry, "source", None)
+        )
         try:
             return import_intent.build_intent(
                 source_id=f"{path}|{getattr(entry, 'scope', '')}",
                 source_scope=str(getattr(entry, "scope", "")),
-                sources=self._whole_bank_intent_sources(banks_list),
-                source=entry.source,
+                sources=sources,
+                source=planned_source,
                 target=companion,
                 mode=mode,
                 companion_only=True,
@@ -7059,6 +7119,17 @@ class KwsedApp(App[None]):
         what a multi-companion run still owed when this write started; a
         failure reports it, so the banks that succeeded are never
         silently swallowed by the one that did not.
+
+        The plan's inputs are frozen here too, once, on the main thread
+        (P7c): the snapshot of the companion entry's records -- its
+        performance list, patch list and wave-sequence bytes -- is taken
+        before the token is checked, the token is validated against that
+        same snapshot, and the worker writes only what the snapshot
+        carries. Between the check and the worker, other code can run --
+        another device worker's completion lands on the main thread and
+        may re-point a source's records -- so planning and writing read
+        records no other code can mutate, exactly as the whole-bank
+        write does (:meth:`_frozen_plan_sources`, P7b).
         """
         from kws import backup as _backup
         from kws import banks as _banks
@@ -7069,7 +7140,19 @@ class KwsedApp(App[None]):
                 refused=True,
             )
             return
-        intent = self._companion_write_intent(entry, companion, banks_list, path, mode)
+        # The snapshot is taken before the intent is built from it: the
+        # token is then validated against exactly these records, and the
+        # worker below reads only this frozen copy.
+        intent_sources, frozen_entry = self._frozen_companion_sources(entry, banks_list)
+        intent = self._companion_write_intent(
+            entry,
+            companion,
+            banks_list,
+            path,
+            mode,
+            sources=intent_sources,
+            source=frozen_entry,
+        )
         if intent is None:
             return
         refusal = self._companion_token_check(approval, intent, pending_note)
@@ -7077,7 +7160,7 @@ class KwsedApp(App[None]):
             self.notify_status(refusal, refused=True)
             return
         self._consumed_plan_nonces.add(approval.nonce)
-        source = getattr(entry, "source", None)
+        source = frozen_entry
         if source is None:
             self.notify_status(
                 f"import: the file carries no records for {companion.label}, "
