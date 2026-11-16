@@ -22,7 +22,15 @@ from tests.test_bankbuild import make_patch, make_performance
 
 RAM1 = banks.bank("RAM1").number
 RAM2 = banks.bank("RAM2").number
+RAM3 = banks.bank("RAM3").number
 ROM5 = banks.bank("ROM5").number
+ROM11 = banks.bank("ROM11").number
+CARD = banks.bank("CARD").number
+
+# Display positions (what banks.bank, PartRef.bank and written_banks use):
+# RAM 2 = 1, RAM 3 = 2, ROM 5 = 4, ROM 11 = 10, Card = 11.
+# Wire bytes (Bank.sysex) differ: RAM 3 = 4, Card = 3, ROM 11 = 2.
+assert (RAM1, RAM2, RAM3, ROM5, ROM11, CARD) == (0, 1, 2, 4, 10, 11)
 
 
 def _source(scope_id: str, performances: List[bytes]) -> deps.Source:
@@ -156,3 +164,53 @@ def test_determinism_and_alias_resolution():
             p.slot for p in entry.performances
         )
         assert list(entry.banks) == sorted(set(entry.banks))
+
+
+def test_card_part_is_matched_by_position_not_wire_byte():
+    """Card is display position 11, wire byte 3; the analyser uses positions."""
+    source = _source("RAM2", [make_performance("Invented Card", ((CARD, 4),))])
+    got = affected.affected_performances({"RAM2": source}, {CARD})
+    assert list(got) == ["RAM2"]
+    entry = got["RAM2"]
+    assert entry.count == 1
+    assert entry.part_total == 1
+    assert entry.performances == (affected.AffectedPerformance(0, 1, (CARD,)),)
+    assert entry.banks == (CARD,)
+    # Writing ROM 11 (position 10) must not touch a Card part, even though the
+    # Card's wire byte is 3 and could be mistaken for another position.
+    assert affected.affected_performances({"RAM2": source}, {ROM11}) == {}
+
+
+def test_split_bank_field_is_matched_by_position_not_wire_byte():
+    """RAM 3 spans two byte halves: position 2, wire byte 4."""
+    source = _source("RAM1", [make_performance("Split Field", ((RAM3, 6),))])
+    got = affected.affected_performances({"RAM1": source}, {RAM3})
+    assert got["RAM1"].performances == (affected.AffectedPerformance(0, 1, (RAM3,)),)
+    assert got["RAM1"].banks == (RAM3,)
+    # Position 4 is ROM 5; 4 is only RAM 3's *wire* byte, not its position.
+    # A {4} write must therefore not count a RAM 3 part.
+    assert affected.affected_performances({"RAM1": source}, {ROM5}) == {}
+
+
+def test_mixed_self_card_rom_counts_only_the_named_position():
+    """Self is RAM 2 = position 1, never 2 (that is RAM 3).
+
+    The one performance below, in RAM 2, names self (1), Card (11) and
+    ROM 5 (4). So {11} affects exactly the Card part (parts == 1), while
+    {2} affects nothing: position 2 is RAM 3, which no part names here.
+    The wire bytes (Card 3, RAM 3 4) and the self position 1 are deliberately
+    different, so the assertion is unambiguous about which one is compared.
+    """
+    parts = ((RAM2, 0), (CARD, 4), (ROM5, 3))
+    source = _source("RAM2", [make_performance("Mixed Banks", parts)])
+    got = affected.affected_performances({"RAM2": source}, {CARD})
+    assert got["RAM2"].performances == (affected.AffectedPerformance(0, 1, (CARD,)),)
+    assert got["RAM2"].part_total == 1
+    assert got["RAM2"].banks == (CARD,)
+    assert affected.affected_performances({"RAM2": source}, {RAM3}) == {}
+    # The self part does name position 1, so {1} affects it -- the exact
+    # number matters, not a nearby one.
+    self_got = affected.affected_performances({"RAM2": source}, {RAM2})
+    assert self_got["RAM2"].performances == (
+        affected.AffectedPerformance(0, 1, (RAM2,)),
+    )
