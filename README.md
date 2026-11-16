@@ -554,6 +554,14 @@ opens `WholeBankImportScreen`:
   source's parts name;
 - `w` arms the write gate; `c` saves to the local cache only; `ctrl+s` writes
   the whole bank to the unit in one fenced bundle;
+- a write needs two approvals, not one: the write gate (`w`, or `--allow-write`)
+  only says the session may write at all, while a per-plan approval names the
+  exact physical banks and kinds that will be written and in what order. One
+  approval covers one finalized plan (for example an overflow bank followed by
+  its target); a preflight's companion banks, each continuation pass and the
+  source bank each carry their own token. `--allow-write` opens the broad gate,
+  never a plan. Every bank in a plan is still separately read, backed up and
+  verified;
 - interior `PartRef`/`WaveRef` bank numbers are relocated to the destination
   bank automatically; ROM references stay in ROM;
 - the reference rule is the same in all three modes: self-references move to

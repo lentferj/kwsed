@@ -856,3 +856,41 @@ for that run.
 **Staging note.** That run wrote into RAM 3, the bank named by
 `preaudit_target_patches`; the screen warned about overwriting those staging
 patch slots before it wrote, and the backup covered them.
+
+---
+
+## 19. Whole-bank import: the shared gate could authorize an unseen plan
+
+**Verified gap.** The write gate is a single boolean: armed or locked. The
+whole-bank screen also kept a screen-local fingerprint, captured when `w` armed
+the gate on that screen. Overflow selection (`o`) and the preflight question
+(`both` / `only` / `cancel`) are material choices that decide which physical
+banks and kinds are written, and they can be made *after* the gate is already
+armed. They were not in the fingerprint, and the fingerprint itself never
+reached the application's write boundary. An armed gate could therefore start a
+write whose banks and kinds differed from the plan the person approved when they
+pressed `w`. Screen-level disarming on some edits was not equivalent to
+validating the final request.
+
+**Fix.** The plan is now data, not a screen state. `kwsed/import_intent` builds
+an immutable `WholeBankIntent` from the same planners the write uses: source
+identity and a digest of its records, mode, overflow kind, preflight answer,
+session and pass slots, and an ordered list of physical bank writes with their
+kinds and slot/remap digests. It carries a schema version and a deterministic
+fingerprint (SHA-256 over canonical JSON). `PlanApproval` pairs that fingerprint
+with a one-shot nonce.
+
+The application rebuilds the same intent at `_import_whole_bank_write` before
+any device read, backup or write, and requires an armed gate plus a matching,
+unspent approval; the nonce is consumed there. A missing, foreign or replayed
+token refuses with zero device calls. Companion writes and the preflight's
+companion banks each carry and consume their own token at their own boundary.
+Continuation passes re-derive their slots and mint their own approval. A
+companion write sends patches and wave sequences only unless the loaded copy of
+that bank is empty of performances (all Init), in which case it travels whole;
+that branch is decided from loaded copies both at mint and at check.
+
+**Counts only.** No performance, patch, wave-sequence, instrument or card name
+is recorded by this change; only bank ids, kinds, slot numbers and counts are
+part of a plan. This entry records the safety fix and its verification; it does
+not describe a hardware run.

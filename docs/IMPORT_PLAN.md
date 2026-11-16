@@ -369,6 +369,45 @@ builds the plan on the UI thread, then hands the write to `_device_worker`
 bar under the status line and reports back via `call_from_thread`. Each bank
 written is still its own fenced write with backup and read-back.
 
+### 6.11 Plan-bound write approval
+
+The write gate is broad permission; it is not a plan. A whole-bank write also
+needs a one-shot approval bound to the exact plan the person saw.
+
+- **Canonical intent.** `kwsed/import_intent` describes the request as an
+  immutable `WholeBankIntent`: source identity and a digest of the source
+  records, mode, overflow kind, preflight answer, session id, continuation pass
+  slots, and an ordered list of `BankWriteIntent` entries. Each entry names one
+  physical bank, the kinds written to it, the source and target performance
+  slots, and digests of the patch and wave-sequence assignment maps. Write
+  order is part of the plan.
+- **Versioned fingerprint.** The intent is encoded as canonical JSON (sorted
+  keys, fixed separators, length-prefixed records) with a schema version, then
+  hashed (SHA-256). Equal plans fingerprint identically; any change to bank,
+  kind, slot, remap, preflight, companion or pass slot changes it. A schema
+  bump invalidates old approvals.
+- **One-shot nonce.** `PlanApproval` carries the fingerprint and a nonce. The
+  app records spent nonces; a replayed token is refused.
+- **Boundary check.** Before any device read, backup or write,
+  `_import_whole_bank_write` requires an armed gate and an approval whose
+  fingerprint matches a plan rebuilt from the same file banks and planners, and
+  consumes the nonce. A missing, foreign or replayed approval refuses with zero
+  device calls. Companion writes (`x`, and the preflight's companions) validate
+  and consume their own token at their own boundary.
+- **Companion branch.** A companion write sends patches and wave sequences only
+  unless the loaded copy of that bank is empty of performances (all Init), where
+  it travels whole. The branch is decided from loaded copies (session or cache,
+  never the unit) both when the approval is minted and when it is checked, so
+  the token names the branch that runs.
+- **Continuation passes.** `n` passes do not reuse an earlier token. Their source
+  slots are re-derived at the boundary from the session's written-slot map and
+  the containment audit, so a pass carries exactly the performances no earlier
+  pass placed; each pass is minted and consumed on its own.
+- **Safe-direction corner.** Consumption happens before device I/O, so a plan
+  that is approved and then refused or fails later has already spent its nonce.
+  Repeating it is not a replay: the retry finalizes a new plan and mints a new
+  token. Nothing is silently re-run on a consumed approval.
+
 ---
 
 ## Implementation status (2026-11-11)
