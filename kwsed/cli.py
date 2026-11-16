@@ -327,7 +327,7 @@ def _cmd_find(_device: Any, args: argparse.Namespace) -> None:
     # archive row would say the same thing a second time.
     active = _cards.load_active()
     seen = set(hits)
-    for number, captured in sorted(_cards.load().items()):
+    for number, captured in sorted(_cards.load(_cards_path(args)).items()):
         for row in _cards.search_captured(
             captured, args.name, label=f"Card {number:02d}"
         ):

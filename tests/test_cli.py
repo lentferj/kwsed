@@ -107,8 +107,22 @@ class TestOfflineCommands:
         with pytest.raises(SystemExit):
             run(["list", "NOPE", "patch"])
 
-    def test_find_with_no_catalog_reports_nothing(self, capsys):
-        assert run(["find", "glass"]) == 0
+    def test_find_with_no_catalog_reports_nothing(self, capsys, tmp_path):
+        # Search covers the catalog and the HCard archive; point both at
+        # files that do not exist so the real ones cannot answer.
+        assert (
+            run(
+                [
+                    "--cards",
+                    str(tmp_path / "no-cards.json"),
+                    "--live-names",
+                    str(tmp_path / "no-live.json"),
+                    "find",
+                    "glass",
+                ]
+            )
+            == 0
+        )
         assert "nothing matching" in capsys.readouterr().err
 
     def test_find_searches_a_catalog_that_exists(self, tmp_path, capsys):
@@ -123,7 +137,21 @@ class TestOfflineCommands:
             ),
             encoding="utf-8",
         )
-        assert cli.main(["--catalog", str(path), "find", "chime"]) == 0
+        assert (
+            cli.main(
+                [
+                    "--catalog",
+                    str(path),
+                    "--cards",
+                    str(tmp_path / "no-cards.json"),
+                    "--live-names",
+                    str(tmp_path / "no-live.json"),
+                    "find",
+                    "chime",
+                ]
+            )
+            == 0
+        )
         assert "Invented Chime" in capsys.readouterr().out
 
 

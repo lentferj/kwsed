@@ -24,6 +24,10 @@ class EditGate:
         self.armed = not self.armed
         return self.armed
 
+    def lock(self) -> None:
+        """Lock the gate without toggling: the approval no longer applies."""
+        self.armed = False
+
     def describe(self) -> str:
         return "write gate ARMED" if self.armed else "write gate locked"
 
