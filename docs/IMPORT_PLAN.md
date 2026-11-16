@@ -282,17 +282,28 @@ The on-screen hint reads
 ### 6.6 Overflow kinds behind `o`
 
 After the RAM bank is chosen (`o` is only offered when parts name another
-writable bank), two kinds are planned:
+writable bank), three kinds are offered:
 
 - **patches only** — the target keeps every performance and the patches
   they name in their own bank; the patches they name in other writable
   banks go to the overflow bank, and the parts are repointed there. The
   overflow bank is written first, then the target, so a performance that
-  names it finds its patches in place.
+  names it finds its patches in place. `plan_overflow_import` reports a
+  rejection (and nothing is written) when the external patches do not fit
+  the overflow bank's patch slots, when their wave sequences do not fit its
+  sequence slots, or when the destination bank's patch, sequence or step
+  budget is exceeded (via `plan_atomic_bank`). A step-budget overflow on
+  the overflow side is not checked at plan time; it surfaces as a
+  `ValueError` while building.
 - **self-contained split** — the performances whose parts leave their own
   bank move to the overflow bank together with every patch they name;
   patches used by performances in both banks are duplicated so each bank is
   self-contained. The target keeps the contained performances.
+- **cards only** — no RAM bank is written at all. Every non-empty
+  performance is packed into self-contained groups that each fit one card
+  (`pack_self_contained_into`); one group is written per pass, one card at
+  a time, so the import visits card after card. The physical Card slot is
+  the target; archived card banks are never targets.
 
 ### 6.7 Partition rule for the self-contained split
 
@@ -307,8 +318,12 @@ asks for the card to be switched: `n` then packs one more group into
 whatever card is in the slot, repeating until nothing remains. Nothing is
 dropped and no earlier group is overwritten. A split that cannot be planned
 at all (a patch it names is not loaded, or one performance alone exceeds a
-bank) is refused before any write. The patches-only kind is a single-bank
-overflow and is never refused on size.
+bank) is refused before any write. The patches-only kind is refused too
+when the destination bank's patch, sequence or step budget is exceeded
+(via `plan_atomic_bank`) or the overflow bank's patch or wave-sequence
+budget is exceeded at plan time (`plan_overflow_import` reports those
+rejections); a step-budget overflow on the overflow side surfaces as an
+error during the build. It is not "never refused on size".
 
 A third kind, **cards only**, never touches a RAM bank: every non-empty
 performance is packed into self-contained groups that each fit one card,
@@ -322,7 +337,37 @@ Whole-bank writes pass no `before_blocks` to the bridge, so the bridge
 reads the unit first. Handing it a before-block built from the cached bank
 let the bridge skip kinds that matched, which on a cache hit sent no SysEx
 at all while the status reported success, and recorded cache bytes instead
-of the unit's in the backup. See `docs/RESOLUTION_NOTES.md` §18.
+of the unit's in the backup. See `docs/RESOLUTION_NOTES.md` §18. A cache is
+not evidence of what the unit holds; the bridge must read the destination
+from the unit itself before writing.
+
+### 6.9 Preflight question (before a plain write)
+
+On `ctrl+s`/`n`, for a plain write (as-is / 1:1 / packed) with no
+overflow of its own, when the source bank's audit shows parts naming
+another writable bank that the same file carries, and the target is not
+that bank, the app asks before anything is sent. It is asked every time,
+regardless of what the unit already holds. The three answers are:
+
+1. Write both — the companion bank's patches and wave sequences only
+   (its performances untouched), then the target as requested (two fenced
+   writes, two backups).
+2. Write only this bank — just the target; external parts keep pointing
+   where the file points (an explicit, informed choice).
+3. Cancel — nothing; the import screen is reopened with guidance to use
+   `o` for a self-contained/cards-only pass or `x` for companions.
+
+Ordering: companion first, always. A performance must not be written
+before the patches it names exist. After choosing 2, no post-write
+nagging: the answer was explicit.
+
+### 6.10 Device worker and progress
+
+Whole-bank writes do not run synchronously on the UI thread. `_import_whole_bank_write`
+builds the plan on the UI thread, then hands the write to `_device_worker`
+(`kwsed/app.py`), which runs it on a background thread with a progress
+bar under the status line and reports back via `call_from_thread`. Each bank
+written is still its own fenced write with backup and read-back.
 
 ---
 
@@ -336,5 +381,5 @@ of the unit's in the backup. See `docs/RESOLUTION_NOTES.md` §18.
 - [x] **Browser `I` integration** — Whole bank (cache or unit) and Single/multiple performances; `y` copy and `kwscli copy-perf` use the slot-preserving planner and `before_blocks`.
 - [x] **Tests** — planner adversarial tests, screen pilot tests, app-flow tests, fast-bundle tests.
 - [x] **Same-scope and multi-source single import** — imported banks can be held under unique session aliases with the real `Source.bank_number`; several files, including several RAM1 banks, can be assembled into one target bank with assignments preserved across `s`.
-- [ ] **Long writes off the UI thread** — the TUI import write paths are fenced but currently run synchronously; a worker + wait screen is still wanted for multi-second sends.
+- [x] **Long writes off the UI thread** — whole-bank writes run through `_device_worker` with a progress bar; see §6.10.
 - [ ] **Optional CLI `--slot` / explicit replace mode** — append and clean are supported; explicit slot replace is in the TUI copy screen, not yet in `kwscli copy-perf`.

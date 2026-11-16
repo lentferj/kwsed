@@ -5,6 +5,15 @@ SPDX-FileCopyrightText: Copyright (C) 2026  kwsed contributors
 
 # Subagent prompts — self-contained whole-bank import
 
+> **Status: historical design record.** This document is the orchestration
+> recipe as proposed on 2026-11-14; the work it planned has shipped. It is
+> superseded by the shipped behaviour documented in `README.md`,
+> `docs/IMPORT_PLAN.md` and the code in `kwsed/import_bank.py` and
+> `kwsed/app.py`. Any instruction here that names **archived HCard/card banks
+> as import targets** is obsolete: archived card banks are never import
+> targets, only the single physical Card slot is. The design history below is
+> kept for reference.
+
 Companion to `docs/IMPORT_SELFCONTAINED_PLAN.md` (the design). This file is
 the orchestration recipe: one small task per subagent, in order.
 

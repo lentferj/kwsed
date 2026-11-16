@@ -537,7 +537,7 @@ opens `WholeBankImportScreen`:
   physical writable banks; archived card banks are never targets);
 - `m` cycles the import mode: as-is, self-contained 1:1, self-contained
   packed;
-- `o` overflows what the target cannot hold, in two kinds: patches only
+- `o` overflows what the target cannot hold, in three kinds: patches only
   (every performance stays on the target and the patches it names in other
   writable banks go to a RAM bank, repointed there), or a self-contained
   split (the performances that point outside the target move to the RAM bank
@@ -556,9 +556,14 @@ opens `WholeBankImportScreen`:
   the whole bank to the unit in one fenced bundle;
 - interior `PartRef`/`WaveRef` bank numbers are relocated to the destination
   bank automatically; ROM references stay in ROM;
-- the app reuses the destination bank it already read, and the bridge skips
-  unchanged kinds, so a whole-bank write does not re-read and resend all three
-  banks blindly.
+- the reference rule is the same in all three modes: self-references move to
+  the target bank; references to other writable banks stay where they point;
+  ROM references stay in ROM, and no ROM patch or wave sequence is ever
+  copied into a writable bank;
+- every unit write reads the destination from the **unit** first: the cache
+  is never treated as proof of what the bank holds. The bridge backs those
+  frames up, then skips kinds that already match, so an unchanged bank is
+  reported as "already matches — nothing was sent" rather than as a write.
 
 **Single / multiple performances** first asks for a source: a file, or any
 unit bank (`RAM 1`–`RAM 3`, `ROM 4`–`ROM 11`, or the active `Card`). It then

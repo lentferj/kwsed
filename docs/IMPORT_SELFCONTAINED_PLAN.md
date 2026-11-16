@@ -5,6 +5,15 @@ SPDX-FileCopyrightText: Copyright (C) 2026  kwsed contributors
 
 # Self-contained whole-bank import — plan
 
+> **Status: historical design record.** This document records the design as
+> proposed on 2026-11-14; the behaviour it describes has since shipped and
+> may differ in detail. It is superseded by the shipped behaviour documented
+> in `README.md`, `docs/IMPORT_PLAN.md` and the code in `kwsed/import_bank.py`
+> and `kwsed/app.py`. The directions in this document that name **archived
+> HCard/card banks as import targets** are obsolete: archived card banks are
+> never import targets, only the single physical Card slot is. The design
+> history below is kept for reference.
+
 Status: proposed 2026-11-14 · companion: `docs/IMPORT_SELFCONTAINED_PROMPTS.md`
 (subagent tasks + prompts)
 
