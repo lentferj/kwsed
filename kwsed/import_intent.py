@@ -64,6 +64,7 @@ __all__ = [
     "canonical_bytes",
     "fingerprint",
     "digest_map",
+    "companion_write_patches_only",
     "new_approval",
     "approval_matches",
     "build_intent",
@@ -295,6 +296,40 @@ def _active_slots(source: deps.Source) -> Tuple[int, ...]:
         if not empty:
             out.append(index)
     return tuple(out)
+
+
+def companion_write_patches_only(
+    loaded_performances: Optional[Sequence[bytes]],
+) -> bool:
+    """Whether a companion write must leave the bank's performances alone.
+
+    A companion (``x``) write exists to fill the patch slots other
+    performances' parts name; replacing that RAM bank's performances too
+    was more than the choice asked for. When the *loaded copy* of the
+    bank is empty of performances (all Init), a whole-bank write carries
+    nothing away, so the bank travels whole instead. A bank whose
+    contents are not loaded (``None``) counts as not empty: nothing is
+    guessed about what the write would replace.
+
+    This is the one rule the screen and the application both apply when
+    they decide which of the two companion branches a choice will run --
+    the branch is part of the plan, so both must decide it the same way
+    from the same loaded copies. It is pure: the caller hands in the
+    performances the session or cache holds for that bank.
+    """
+    if loaded_performances is None:
+        return True
+    performances = list(loaded_performances)
+    if not performances:
+        return True
+    for record in performances:
+        try:
+            if not perfcopy.is_empty_performance(record):
+                return True
+        except (ValueError, TypeError):
+            if record and any(record):
+                return True
+    return False
 
 
 def _patch_items(plan: perfcopy.AtomicPlan) -> List[Tuple[str, int]]:
@@ -560,6 +595,7 @@ def build_intent(
     session_id: str = "",
     pass_slots: Sequence[int] = (),
     companion_only: bool = False,
+    companion_all_init: bool = False,
 ) -> WholeBankIntent:
     """The finalized intent behind one whole-bank choice, from the planners.
 
@@ -569,7 +605,11 @@ def build_intent(
     about what a choice would write.
 
     The branch is the choice's own: ``companion_only`` writes the target's
-    patches and wave sequences only; non-empty ``pass_slots`` is a
+    patches and wave sequences only -- unless ``companion_all_init`` says
+    the unit's copy of that bank is empty of performances, where the
+    whole-bank branch runs instead and the write carries all three kinds
+    (nothing there can be destroyed, and the token must say which branch
+    runs); non-empty ``pass_slots`` is a
     continuation pass whose first packed group travels; ``cards_only``
     writes the first self-contained group into the physical card slot; a
     ``patches`` overflow writes the overflow bank first, then the target;
@@ -592,7 +632,7 @@ def build_intent(
     slots = tuple(int(slot) for slot in pass_slots)
     writes: Tuple[BankWriteIntent, ...]
     recorded_kind = ""
-    if companion_only:
+    if companion_only and not companion_all_init:
         writes = (_companion_write(target, source),)
     elif slots:
         writes = (_pass_write(sources, source_scope, slots, target, import_mode),)

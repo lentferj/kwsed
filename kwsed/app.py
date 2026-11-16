@@ -107,7 +107,6 @@ from kwsed.import_bank import (
     WholeBankChoice,
     WholeBankImportScreen,
     _entry_bank,
-    _is_empty_performance,
 )
 from kwsed import import_intent
 from kwsed.import_single import SingleImportScreen
@@ -5393,6 +5392,7 @@ class KwsedApp(App[None]):
                 banks=whole_banks,
                 gate=self._write_gate,
                 card_mode=self._card_mode,
+                companion_loaded=self._companion_loaded_snapshot(),
             ),
             lambda picked: self._import_whole_bank_chosen(whole_banks, picked, origin),
         )
@@ -5434,6 +5434,7 @@ class KwsedApp(App[None]):
                     banks=banks_list,
                     gate=self._write_gate,
                     card_mode=self._card_mode,
+                    companion_loaded=self._companion_loaded_snapshot(),
                 ),
                 lambda choice: self._import_whole_bank_chosen(banks_list, choice, path),
             )
@@ -5601,6 +5602,23 @@ class KwsedApp(App[None]):
                 sources[scope] = source
         return sources
 
+    def _companion_loaded_snapshot(self) -> Dict[str, Tuple[Any, ...]]:
+        """The loaded copies' performances, keyed by scope, for the screen.
+
+        The import screen decides a companion choice's branch -- the
+        bank's patches and wave sequences only, or the whole bank when
+        the loaded copy is empty of performances -- at the moment it
+        mints the approval, and the app decides the same branch at the
+        write boundary from the same loaded copies. Nothing writes while
+        the modal is up, so a snapshot taken here is the state both will
+        see; a bank absent from the map counts as not loaded, which is
+        the conservative branch.
+        """
+        snapshot: Dict[str, Tuple[Any, ...]] = {}
+        for scope, source in self._sources_with_store().items():
+            snapshot[scope] = tuple(getattr(source, "performances", []) or ())
+        return snapshot
+
     def _intent_pass_slots(
         self,
         choice: Any,
@@ -5648,10 +5666,16 @@ class KwsedApp(App[None]):
         token, a missing file, a plan the planners refuse, a fingerprint
         that does not match, or a token already spent refuses here --
         before any device read, backup or write, and before the preflight
-        question or the overflow planning runs. The nonce is consumed at
-        the same point, on the main thread: a companion-only write starts
-        its own worker inside the deferred step, so validation is the one
-        place every whole-bank write passes through.
+        question or the overflow planning runs.
+
+        The nonce is consumed here too, on the main thread, with one
+        exception (P4): a companion choice whose write is the patches-and-
+        wave-sequences branch goes through
+        :meth:`_write_companion_patches`, which validates and consumes the
+        same token itself at its own write boundary; consuming it here as
+        well would be a double spend. Every other whole-bank write -- the
+        plain, overflow, split and all-Init companion branches -- is
+        validated and consumed in this one place.
         """
         approval = getattr(choice, "approval", None)
         if approval is None:
@@ -5669,6 +5693,14 @@ class KwsedApp(App[None]):
             )
             return None
         sources = self._whole_bank_intent_sources(banks_list)
+        # The branch a companion choice runs is decided here, from the
+        # same loaded copies the screen decided it from when it minted:
+        # the token must name the branch that actually runs.
+        companion_only = bool(getattr(choice, "companion_only", False))
+        companion_patches_only = companion_only and (
+            self._companion_write_patches_only(choice)
+        )
+        companion_all_init = companion_only and not companion_patches_only
         try:
             target, _target_scope = self._resolve_whole_bank_target(choice)
             intent = import_intent.build_intent(
@@ -5687,6 +5719,7 @@ class KwsedApp(App[None]):
                 session_id=str(getattr(choice, "session_key", "") or ""),
                 pass_slots=self._intent_pass_slots(choice, sources, str(bank.scope)),
                 companion_only=bool(getattr(choice, "companion_only", False)),
+                companion_all_init=companion_all_init,
             )
         except (IndexError, LookupError, ValueError, TypeError, AttributeError) as exc:
             self.notify_status(
@@ -5704,7 +5737,12 @@ class KwsedApp(App[None]):
                 "import: this plan approval was already used", refused=True
             )
             return None
-        self._consumed_plan_nonces.add(approval.nonce)
+        # A companion write on the patches-only branch starts its own
+        # worker inside the deferred step; its token is validated and
+        # consumed there, at that write's boundary. Consuming it here too
+        # would be a double spend.
+        if not companion_patches_only:
+            self._consumed_plan_nonces.add(approval.nonce)
         return intent, sources
 
     def _mint_whole_bank_approval(
@@ -5713,6 +5751,7 @@ class KwsedApp(App[None]):
         choice: Any,
         banks_list: Optional[Sequence[Any]],
         path: str,
+        companion_all_init: Optional[bool] = None,
     ) -> Optional[import_intent.PlanApproval]:
         """Mint the approval an answer given after the screen just confirmed.
 
@@ -5722,6 +5761,15 @@ class KwsedApp(App[None]):
         app mints its one-shot approval for the amended choice here --
         from the same file banks, through the same shared builder. A plan
         the planners refuse mints nothing and says why.
+
+        A companion choice's branch -- the bank's patches and wave
+        sequences only, or the whole bank when its loaded copy is empty
+        of performances -- is part of the plan. ``companion_all_init``
+        decides it explicitly when the caller already knows which branch
+        the write will run (the preflight chain's companion writes are
+        always the patches-only kind); ``None`` decides it from the same
+        loaded copies the write boundary will, so a mint made here can
+        never disagree with the check that follows it.
         """
         if banks_list is None:
             self.notify_status(
@@ -5730,6 +5778,10 @@ class KwsedApp(App[None]):
             )
             return None
         sources = self._whole_bank_intent_sources(banks_list)
+        if companion_all_init is None:
+            companion_all_init = bool(
+                getattr(choice, "companion_only", False)
+            ) and not self._companion_write_patches_only(choice)
         try:
             target, _target_scope = self._resolve_whole_bank_target(choice)
             intent = import_intent.build_intent(
@@ -5748,6 +5800,7 @@ class KwsedApp(App[None]):
                 session_id=str(getattr(choice, "session_key", "") or ""),
                 pass_slots=self._intent_pass_slots(choice, sources, str(bank.scope)),
                 companion_only=bool(getattr(choice, "companion_only", False)),
+                companion_all_init=companion_all_init,
             )
         except (IndexError, LookupError, ValueError, TypeError, AttributeError) as exc:
             self.notify_status(
@@ -6390,7 +6443,7 @@ class KwsedApp(App[None]):
             self._ask_preflight(bank, choice, banks_list, path, named)
             return True
         if self._companion_write_patches_only(choice):
-            self._write_companion_patches_only(bank, choice)
+            self._write_companion_patches_only(bank, choice, banks_list, path)
             return True
         return False
 
@@ -6622,11 +6675,26 @@ class KwsedApp(App[None]):
         own write follows only after every companion has landed, marked
         so neither the preflight nor the post-write popup runs again. A
         companion that fails stops the run: what was written and what was
-        not is reported, and the source bank is not sent.
+        not is reported, and the source bank is not sent. The ordered
+        banks are said here, before the chain starts (P4): one approved
+        token per physical write, in this order.
         """
         if not self._write_gate.armed:
             self.notify_status("write gate is locked", refused=True)
             return
+        order = [
+            f"{companion.label} (patches and wave sequences only)"
+            for _count, _index, companion in named
+        ]
+        order.append(
+            f"{getattr(bank, 'label', '') or 'the source bank'} (the whole bank)"
+        )
+        self.notify_status(
+            "import: the writes, in order — "
+            + "; ".join(order)
+            + "; each bank is backed up and verified, and needs its own "
+            "approval before it is sent"
+        )
         self._preflight_companion_chain(bank, choice, banks_list, path, named, 0, [])
 
     def _preflight_companion_chain(
@@ -6641,7 +6709,10 @@ class KwsedApp(App[None]):
     ) -> None:
         """Write companion ``index``, then the rest, then the source bank.
 
-        Each companion is its own fenced write. ``completed`` carries the
+        Each companion is its own fenced write, and its own approved one
+        (P4): a token is minted for exactly that companion's write
+        immediately before it runs, and the write validates and consumes
+        it before any device I/O. ``completed`` carries the
         labels of the companions that already landed, so a later failure
         can name exactly what succeeded and what was never written.
         """
@@ -6672,6 +6743,31 @@ class KwsedApp(App[None]):
             + "; not written: "
             + ", ".join(pending)
         )
+        # The companion's write is its own approved request (P4): one
+        # token per physical bank write, minted here, immediately before
+        # this companion's write, and consumed by it. The chain's
+        # companion writes are always the patches-only kind, so the
+        # branch is decided explicitly, never inferred from the bank's
+        # loaded copy.
+        mode = getattr(choice, "mode", perfcopy.ImportMode.AS_IS)
+        companion_choice = WholeBankChoice(
+            companion_index, companion.id, True, mode, companion_only=True
+        )
+        approval = self._mint_whole_bank_approval(
+            companion_entry,
+            companion_choice,
+            banks_list,
+            path,
+            companion_all_init=False,
+        )
+        if approval is None:
+            self.notify_status(
+                self._companion_failure_message(
+                    "the next companion could not be approved", note
+                ),
+                refused=True,
+            )
+            return
 
         def after_companion() -> None:
             completed.append(companion.label)
@@ -6680,45 +6776,130 @@ class KwsedApp(App[None]):
             )
 
         self._write_companion_patches(
-            companion_entry, companion, after_companion, pending_note=note
+            companion_entry,
+            companion,
+            after_companion,
+            approval=approval,
+            banks_list=banks_list,
+            path=path,
+            mode=mode,
+            pending_note=note,
         )
 
     def _companion_write_patches_only(self, choice: Any) -> bool:
         """Whether a companion write must leave the bank's performances alone.
 
-        A companion (``x``) write exists to fill the patch slots other
-        performances' parts name; replacing that RAM bank's performances
-        too was more than the choice asked for. When the unit's copy of
-        the bank is empty of performances (all Init), a whole-bank write
-        carries nothing away, so the bank travels whole as before. A bank
-        whose contents are not loaded counts as not empty: nothing is
-        guessed about what the write would replace.
+        The branch a companion choice will run, decided by the shared
+        rule (:func:`kwsed.import_intent.companion_write_patches_only`)
+        from the loaded copy of the chosen bank -- the session's or the
+        cache's, never a fresh reading of the unit. The import screen
+        decided the same branch from the snapshot it was opened with, so
+        the token it minted names the branch that actually runs.
         """
         if not bool(getattr(choice, "companion_only", False)):
             return False
         bank_id = str(getattr(choice, "target_bank", "") or "")
         current = self._sources_with_store().get(bank_id)
-        if current is None:
-            return True
-        performances = list(getattr(current, "performances", []) or [])
-        if not performances:
-            return True
-        for record in performances:
-            try:
-                if not _is_empty_performance(record):
-                    return True
-            except (ValueError, TypeError):
-                if record and any(record):
-                    return True
-        return False
+        loaded: Optional[Sequence[Any]] = None
+        if current is not None:
+            performances = list(getattr(current, "performances", []) or [])
+            loaded = tuple(performances)
+        return import_intent.companion_write_patches_only(loaded)
 
-    def _write_companion_patches_only(self, bank: Any, choice: Any) -> None:
-        """The ``x`` companion write, patches and wave sequences only."""
+    def _write_companion_patches_only(
+        self,
+        bank: Any,
+        choice: Any,
+        banks_list: Optional[Sequence[Any]],
+        path: str,
+    ) -> None:
+        """The ``x`` companion write, patches and wave sequences only.
+
+        The choice carries the token the screen minted for exactly this
+        companion write; the write validates and consumes it itself,
+        before anything touches the unit.
+        """
         try:
             companion, _companion_scope = self._resolve_whole_bank_target(choice)
         except (LookupError, ValueError):
             return
-        self._write_companion_patches(bank, companion)
+        approval = getattr(choice, "approval", None)
+        if approval is None:
+            self.notify_status(
+                "import: no plan approval for this companion write; approve "
+                "it on the import screen first",
+                refused=True,
+            )
+            return
+        self._write_companion_patches(
+            bank,
+            companion,
+            approval=approval,
+            banks_list=banks_list if banks_list is not None else [bank],
+            path=path,
+            mode=getattr(choice, "mode", perfcopy.ImportMode.AS_IS),
+        )
+
+    def _companion_write_intent(
+        self,
+        entry: Any,
+        companion: Any,
+        banks_list: Sequence[Any],
+        path: str,
+        mode: Any,
+    ) -> Optional[import_intent.WholeBankIntent]:
+        """The intent one companion write must be approved for.
+
+        Exactly this companion write and nothing else: the companion's
+        own physical bank, the kinds its entry's source carries (patches
+        and wave sequences; a companion write never sends performances),
+        the entry's scope as the source scope, and no placements -- the
+        bank's records travel as they are. The same shared builder every
+        other whole-bank intent comes from, so a mint made anywhere
+        against it and this check cannot spell one plan two ways.
+        """
+        try:
+            return import_intent.build_intent(
+                source_id=f"{path}|{getattr(entry, 'scope', '')}",
+                source_scope=str(getattr(entry, "scope", "")),
+                sources=self._whole_bank_intent_sources(banks_list),
+                source=entry.source,
+                target=companion,
+                mode=mode,
+                companion_only=True,
+            )
+        except (IndexError, LookupError, ValueError, TypeError, AttributeError) as exc:
+            self.notify_status(
+                f"import: this companion write cannot be planned: {exc}",
+                refused=True,
+            )
+            return None
+
+    def _companion_token_check(
+        self,
+        approval: import_intent.PlanApproval,
+        intent: import_intent.WholeBankIntent,
+        pending_note: str,
+    ) -> Optional[str]:
+        """The refusal a companion token earns, or ``None`` when it may write.
+
+        The token must have been minted for exactly the intent this write
+        would run, and never have been spent: a mismatched or replayed
+        token refuses before any device call for that bank. The message
+        carries the run's ``pending_note``, so a chain that stops here
+        still names what landed and what did not.
+        """
+        if not import_intent.approval_matches(approval, intent):
+            return self._companion_failure_message(
+                "the companion write's plan approval does not match it",
+                pending_note,
+            )
+        if approval.nonce in self._consumed_plan_nonces:
+            return self._companion_failure_message(
+                "this companion write's plan approval was already used",
+                pending_note,
+            )
+        return None
 
     def _write_companion_patches(
         self,
@@ -6726,6 +6907,10 @@ class KwsedApp(App[None]):
         companion: Any,
         on_done: Optional[Callable[[], None]] = None,
         *,
+        approval: import_intent.PlanApproval,
+        banks_list: Sequence[Any],
+        path: str,
+        mode: Any = perfcopy.ImportMode.AS_IS,
         pending_note: str = "",
     ) -> None:
         """Write one companion bank's patches and wave sequences only.
@@ -6733,16 +6918,35 @@ class KwsedApp(App[None]):
         The RAM bank's performances are left exactly as they are: a
         companion write exists to fill the patch slots other
         performances' parts name, not to replace the performances that
-        bank already holds. The write is fenced like any other: the
-        destination is backed up before anything is sent, and the
-        read-back decides whether it landed. ``pending_note`` is what a
-        multi-companion run still owed when this write started; a failure
-        reports it, so the banks that succeeded are never silently
-        swallowed by the one that did not.
+        bank already holds. The write is its own approved request (P4):
+        before anything touches the unit, the armed gate is checked and
+        ``approval`` is held against the intent built for exactly this
+        companion write -- its own physical bank, its own entry's source
+        scope, the patches and wave sequences the file carries -- and its
+        one-shot nonce is consumed. A missing, mismatched or replayed
+        token refuses with zero device calls for that bank, and the run
+        stops there: nothing claims the bank landed. ``pending_note`` is
+        what a multi-companion run still owed when this write started; a
+        failure reports it, so the banks that succeeded are never
+        silently swallowed by the one that did not.
         """
         from kws import backup as _backup
         from kws import banks as _banks
 
+        if not self._write_gate.armed:
+            self.notify_status(
+                self._companion_failure_message("write gate is locked", pending_note),
+                refused=True,
+            )
+            return
+        intent = self._companion_write_intent(entry, companion, banks_list, path, mode)
+        if intent is None:
+            return
+        refusal = self._companion_token_check(approval, intent, pending_note)
+        if refusal is not None:
+            self.notify_status(refusal, refused=True)
+            return
+        self._consumed_plan_nonces.add(approval.nonce)
         source = getattr(entry, "source", None)
         if source is None:
             self.notify_status(
@@ -7855,6 +8059,7 @@ class KwsedApp(App[None]):
                     source_index=int(state.get("source_index") or 0),
                 ),
                 notice=notice,
+                companion_loaded=self._companion_loaded_snapshot(),
             ),
             lambda picked: self._import_whole_bank_chosen(banks_list, picked, path),
         )

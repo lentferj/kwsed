@@ -778,13 +778,16 @@ def _approved(
     banks_list: Any = None,
     path: str = "one.syx",
     pass_slots: Any = (),
+    companion_all_init: bool = False,
 ) -> Any:
     """Mint the plan approval a whole-bank write carries (P3).
 
     The same shared builder the import screen mints with
     (``kwsed.import_intent.build_intent``), planned from the file banks
     the write names -- so a direct ``_import_whole_bank_write`` call site
-    presents the approval the write boundary requires.
+    presents the approval the write boundary requires. A companion
+    choice's branch is decided by ``companion_all_init``, exactly as the
+    app decides it at the boundary.
     """
     from kwsed import import_intent
 
@@ -818,8 +821,22 @@ def _approved(
         session_id=str(getattr(choice, "session_key", "") or ""),
         pass_slots=tuple(pass_slots),
         companion_only=bool(getattr(choice, "companion_only", False)),
+        companion_all_init=companion_all_init,
     )
     return replace(choice, approval=import_intent.new_approval(intent))
+
+
+def _companion_loaded_map(app: Any) -> dict[str, Any]:
+    """The app's loaded copies, as the screen's branch snapshot (P4).
+
+    The import screen decides a companion choice's branch from the same
+    loaded copies the app decides it from at the write boundary; tests
+    that open the screen by hand hand it this snapshot.
+    """
+    return {
+        scope: tuple(getattr(src, "performances", []) or ())
+        for scope, src in app._sources_with_store().items()
+    }
 
 
 def _armed_app(tmp_path: Any, monkeypatch: Any) -> tuple[Any, list[dict[str, Any]]]:
@@ -1982,7 +1999,10 @@ async def test_spillover_is_one_fenced_write_to_the_audited_bank(
         await pilot.pause()
         app.push_screen(
             WholeBankImportScreen(
-                path="two.syx", banks=file_banks, gate=app._write_gate
+                path="two.syx",
+                banks=file_banks,
+                gate=app._write_gate,
+                companion_loaded=_companion_loaded_map(app),
             ),
             lambda picked: app._import_whole_bank_chosen(file_banks, picked, "two.syx"),
         )
@@ -4175,7 +4195,10 @@ async def test_x_writes_the_whole_bank_when_the_performances_are_all_init(
         await pilot.pause()
         app.push_screen(
             WholeBankImportScreen(
-                path="two.syx", banks=file_banks, gate=app._write_gate
+                path="two.syx",
+                banks=file_banks,
+                gate=app._write_gate,
+                companion_loaded=_companion_loaded_map(app),
             ),
             lambda picked: app._import_whole_bank_chosen(file_banks, picked, "two.syx"),
         )
@@ -4195,6 +4218,329 @@ async def test_x_writes_the_whole_bank_when_the_performances_are_all_init(
     assert "performances" in app.device.bundle_writes[0]["kinds"]
     assert ("RAM2", banks.Kind.PERFORMANCE) in app.device._written
     assert recorded
+
+
+@pytest.mark.asyncio
+async def test_companion_x_without_a_token_refuses_with_zero_bundles(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """A companion choice nobody approved never reaches the unit."""
+    app, recorded = _armed_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(bankstore, "save", lambda *a, **k: None)
+    file_banks = _two_bank_file()
+    app._import_whole_bank_write(
+        file_banks[1],
+        WholeBankChoice(
+            1, "RAM2", True, perfcopy.ImportMode.AS_IS, companion_only=True
+        ),
+        banks_list=file_banks,
+        path="two.syx",
+    )
+    assert app.device.bundle_write_count == 0
+    assert recorded == [], "no undo record for a refused write"
+    assert app._import_passes == {}, "no session state for a refused write"
+
+
+@pytest.mark.asyncio
+async def test_companion_write_validates_and_consumes_its_own_token(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """The companion write is its own approved request, spent once (P4)."""
+    from kwsed import import_intent
+
+    app, recorded = _armed_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(bankstore, "save", lambda *a, **k: None)
+    file_banks = _two_bank_file()
+    entry = file_banks[1]
+    companion = banks.bank("RAM2")
+    mode = perfcopy.ImportMode.AS_IS
+    choice = WholeBankChoice(1, "RAM2", True, mode, companion_only=True)
+    approval = app._mint_whole_bank_approval(
+        entry, choice, file_banks, "two.syx", companion_all_init=False
+    )
+    assert approval is not None
+    done: list[int] = []
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._write_companion_patches(
+            entry,
+            companion,
+            lambda: done.append(1),
+            approval=approval,
+            banks_list=file_banks,
+            path="two.syx",
+            mode=mode,
+        )
+        await _wait_for_writes(app, pilot, 1)
+        await _settle(pilot)
+        assert app.device.bundle_write_count == 1
+        write = app.device.bundle_writes[0]
+        assert write["bank"] == banks.bank("RAM2").label
+        assert write["kinds"] == ["patches"]
+        assert done == [1], "the caller is told the write landed"
+        assert approval.nonce in app._consumed_plan_nonces
+        assert recorded, "a landed write is recorded for undo"
+        # A replayed token is refused: one approved write, spent once.
+        app._write_companion_patches(
+            entry,
+            companion,
+            lambda: done.append(1),
+            approval=approval,
+            banks_list=file_banks,
+            path="two.syx",
+            mode=mode,
+        )
+        await _wait_for_writes(app, pilot, 1)
+        await _settle(pilot)
+    assert app.device.bundle_write_count == 1, "the replay wrote nothing"
+    assert done == [1], "a refused replay never reports the bank as landed"
+
+
+@pytest.mark.asyncio
+async def test_companion_write_refuses_a_token_minted_for_another_bank(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """A token for one companion does not authorize a different one."""
+    app, recorded = _armed_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(bankstore, "save", lambda *a, **k: None)
+    file_banks = _two_bank_file()
+    entry = file_banks[1]
+    mode = perfcopy.ImportMode.AS_IS
+    other = WholeBankChoice(1, "RAM3", True, mode, companion_only=True)
+    approval = app._mint_whole_bank_approval(
+        entry, other, file_banks, "two.syx", companion_all_init=False
+    )
+    assert approval is not None
+    done: list[int] = []
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._write_companion_patches(
+            entry,
+            banks.bank("RAM2"),
+            lambda: done.append(1),
+            approval=approval,
+            banks_list=file_banks,
+            path="two.syx",
+            mode=mode,
+        )
+        await _settle(pilot)
+        await _settle(pilot)
+    assert app.device.bundle_write_count == 0
+    assert done == []
+    assert recorded == []
+    assert approval.nonce not in app._consumed_plan_nonces
+    assert "RAM2" not in app._sources, "a refused write leaves no cache update"
+
+
+@pytest.mark.asyncio
+async def test_preflight_both_two_companions_one_token_each(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """'both' mints one token per physical write, in the shown order (P4)."""
+    from kwsed.import_bank import PreflightImportScreen
+
+    app, recorded = _preflight_app(tmp_path, monkeypatch)
+    statuses: list[str] = []
+    app.notify_status = lambda msg, *a, **k: statuses.append(str(msg))
+    file_banks = _three_bank_file()
+    minted: list[Any] = []
+
+    original = KwsedApp._mint_whole_bank_approval
+
+    def _recording(
+        self: KwsedApp, bank: Any, choice: Any, banks: Any, path: str, *a: Any, **k: Any
+    ) -> Any:
+        approval = original(self, bank, choice, banks, path, *a, **k)
+        minted.append(approval)
+        return approval
+
+    monkeypatch.setattr(KwsedApp, "_mint_whole_bank_approval", _recording)
+    async with app.run_test() as pilot:
+        modal = await _raise_preflight_on_card(pilot, app, file_banks, "three.syx")
+        assert app.device.bundle_write_count == 0
+        assert isinstance(modal, PreflightImportScreen)
+        await pilot.press("1")  # write every named bank, then this bank
+        for _ in range(300):
+            await pilot.pause()
+            if app.device.bundle_write_count == 3:
+                break
+        await _settle(pilot)
+    assert app.device.bundle_write_count == 3
+    ram3, ram2, source = app.device.bundle_writes
+    assert ram3["bank"] == banks.bank("RAM3").label
+    assert ram2["bank"] == banks.bank("RAM2").label
+    assert source["bank"] == banks.bank("CARD").label
+    # One token per physical write: the two companions and the head, each
+    # minted at the answer, each distinct, each spent exactly once.
+    assert len(minted) == 3
+    assert all(minted), "every write in the chain was approved"
+    nonces = [approval.nonce for approval in minted]
+    assert len(set(nonces)) == 3
+    assert set(nonces) <= app._consumed_plan_nonces
+    assert recorded, "every landed write has its undo record"
+    # The person saw the ordered banks before the chain started.
+    order = next(s for s in statuses if "the writes, in order" in s)
+    assert order.index("RAM 3") < order.index("RAM 2")
+
+
+@pytest.mark.asyncio
+async def test_preflight_chain_stops_when_the_second_token_is_tampered(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """A tampered token for companion two stops the chain after one (P4)."""
+    from kwsed.import_bank import PreflightImportScreen
+
+    app, recorded = _preflight_app(tmp_path, monkeypatch)
+    statuses: list[str] = []
+    app.notify_status = lambda msg, *a, **k: statuses.append(str(msg))
+    file_banks = _three_bank_file()
+    original = KwsedApp._mint_whole_bank_approval
+    mints = {"count": 0}
+
+    def _tampering(
+        self: KwsedApp, bank: Any, choice: Any, banks: Any, path: str, *a: Any, **k: Any
+    ) -> Any:
+        approval = original(self, bank, choice, banks, path, *a, **k)
+        mints["count"] += 1
+        if mints["count"] == 2 and approval is not None:
+            approval = replace(approval, fingerprint="0" * 64)
+        return approval
+
+    monkeypatch.setattr(KwsedApp, "_mint_whole_bank_approval", _tampering)
+    async with app.run_test() as pilot:
+        modal = await _raise_preflight_on_card(pilot, app, file_banks, "three.syx")
+        assert isinstance(modal, PreflightImportScreen)
+        await pilot.press("1")
+        for _ in range(300):
+            await pilot.pause()
+            if any("not written" in s for s in statuses):
+                break
+        await _settle(pilot)
+    # The first companion landed; the tampered second stopped the chain,
+    # and neither the other companion nor the source bank was sent.
+    assert app.device.bundle_write_count == 1
+    assert app.device.bundle_writes[0]["bank"] == banks.bank("RAM3").label
+    assert ("RAM2", banks.Kind.PATCH) not in app.device._written
+    assert ("CARD", banks.Kind.PERFORMANCE) not in app.device._written
+    assert any(
+        "does not match" in s and "written so far" in s and "not written" in s
+        for s in statuses
+    ), statuses
+    assert recorded, "the one landed write still has its undo record"
+
+
+@pytest.mark.asyncio
+async def test_the_all_init_branch_refuses_a_patches_only_token(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """A token for patches+waveseq does not cover the whole-bank branch.
+
+    When the loaded copy of the companion bank is all Init the write
+    carries all three kinds; the token must have been minted for that
+    branch, and a patches-only one is refused before anything is sent.
+    """
+    app, recorded = _armed_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(bankstore, "save", lambda *a, **k: None)
+    file_banks = _spillover_banks()
+    app._sources["RAM2"] = _make_bank(scope="RAM2", active_slots=[]).source
+    choice = WholeBankChoice(
+        1, "RAM2", True, perfcopy.ImportMode.AS_IS, companion_only=True
+    )
+    # What a screen without the branch snapshot would have minted.
+    approved = _approved(choice, file_banks[1], file_banks, "two.syx")
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._import_whole_bank_write(
+            file_banks[1],
+            approved,
+            banks_list=file_banks,
+            path="two.syx",
+        )
+        await _settle(pilot)
+        await _settle(pilot)
+    assert app.device.bundle_write_count == 0
+    assert recorded == []
+    assert app._import_passes == {}
+    assert approved.approval is not None
+    assert approved.approval.nonce not in app._consumed_plan_nonces
+
+
+@pytest.mark.asyncio
+async def test_cards_only_pass_two_refuses_a_pass_one_token(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """A continuation token binds this pass's slots and the Card (P4).
+
+    A token minted for pass 1's slots is refused once the session has
+    advanced to pass 2; a fresh token for the remaining slots proceeds
+    onto the card, and replaying it is refused again.
+    """
+    from kwsed.import_bank import OVERFLOW_CARDS_ONLY, OVERFLOW_SELF_CONTAINED
+
+    app = _split_pass_app(tmp_path, monkeypatch)
+    recorded: list[Any] = []
+    app._record_write = recorded.append  # type: ignore[method-assign]
+    statuses: list[str] = []
+    app.notify_status = lambda msg, *a, **k: statuses.append(str(msg))  # type: ignore[method-assign]
+    file_banks = _cards_only_banks()
+    bank = file_banks[0]
+    key = "cards.syx|RAM1|p4pass"
+    app._import_passes[key] = {
+        "pass_kind": OVERFLOW_CARDS_ONLY,
+        "split_remaining": list(range(50, 60)),
+        "split_target": "CARD",
+        "source_index": 0,
+        "written": dict.fromkeys(range(50), "Card"),
+        "mode": perfcopy.ImportMode.SELF_CONTAINED_PACKED,
+    }
+    choice = WholeBankChoice(
+        0,
+        "CARD",
+        True,
+        perfcopy.ImportMode.SELF_CONTAINED_PACKED,
+        key,
+        True,
+        "",
+        OVERFLOW_SELF_CONTAINED,
+    )
+    stale = _approved(choice, bank, file_banks, "cards.syx", pass_slots=range(50))
+    fresh = _approved(choice, bank, file_banks, "cards.syx", pass_slots=range(50, 60))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        # Pass 1's token, offered after the session advanced: refused.
+        app._import_whole_bank_write(
+            bank, stale, banks_list=file_banks, path="cards.syx"
+        )
+        await _settle(pilot)
+        await _settle(pilot)
+        assert app.device.bundle_write_count == 0
+        assert any("does not match" in s for s in statuses), statuses
+        assert stale.approval is not None
+        assert stale.approval.nonce not in app._consumed_plan_nonces
+        state_before = dict(app._import_passes[key])
+        assert state_before["split_remaining"] == list(range(50, 60)), (
+            "a refused pass left the session as it was"
+        )
+        # A fresh token for exactly this pass's slots proceeds onto Card.
+        app._import_whole_bank_write(
+            bank, fresh, banks_list=file_banks, path="cards.syx"
+        )
+        await _wait_for_writes(app, pilot, 1)
+        await _settle(pilot)
+        assert app.device.bundle_write_count == 1
+        assert app.device.bundle_writes[0]["bank"] == banks.bank("CARD").label
+        assert recorded, "the landed pass is recorded"
+        # The same token again is a replay: refused, nothing new written.
+        app._import_whole_bank_write(
+            bank, fresh, banks_list=file_banks, path="cards.syx"
+        )
+        await _settle(pilot)
+        await _settle(pilot)
+    assert app.device.bundle_write_count == 1
+    assert any("refused" in s or "does not match" in s for s in statuses), statuses
+    assert fresh.approval is not None
+    assert fresh.approval.nonce in app._consumed_plan_nonces, "the pass spent its token"
+    assert len(recorded) == 1, "the refused replay added no undo record"
 
 
 @pytest.mark.asyncio

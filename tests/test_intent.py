@@ -36,6 +36,7 @@ from kwsed.import_intent import (
     approval_matches,
     build_intent,
     canonical_bytes,
+    companion_write_patches_only,
     digest_map,
     fingerprint,
     new_approval,
@@ -345,6 +346,47 @@ class TestBuildIntent:
         )
         assert intent.writes[0].kinds == ("patches",)
 
+    def test_the_all_init_companion_branch_records_all_three_kinds(self):
+        """The whole-bank branch of an ``x`` choice names every kind (P4).
+
+        When the loaded copy of the companion bank is empty of
+        performances, the bank travels whole: the token must say so, not
+        promise patches and wave sequences only.
+        """
+        sources, source = _file(waveseq=True)
+        intent = build_intent(
+            source_id="file:one",
+            source_scope="RAM1",
+            sources=sources,
+            source=source,
+            target=kws_banks.bank("RAM2"),
+            mode=ImportMode.AS_IS,
+            companion_only=True,
+            companion_all_init=True,
+        )
+        write = intent.writes[0]
+        assert len(intent.writes) == 1
+        assert write.bank_id == "RAM2"
+        assert write.kinds == ALL_KINDS
+        assert intent.pass_slots == ()
+
+    def test_the_two_companion_branches_never_share_a_fingerprint(self):
+        """Patches-only and all-Init ``x`` writes are different plans."""
+        sources, source = _file(waveseq=True)
+        common: Dict[str, Any] = {
+            "source_id": "file:one",
+            "source_scope": "RAM1",
+            "sources": sources,
+            "source": source,
+            "target": kws_banks.bank("RAM2"),
+            "mode": ImportMode.AS_IS,
+            "companion_only": True,
+        }
+        patches_only = build_intent(**common)
+        whole_bank = build_intent(**common, companion_all_init=True)
+        assert patches_only.writes[0].kinds != whole_bank.writes[0].kinds
+        assert fingerprint(patches_only) != fingerprint(whole_bank)
+
     def test_a_continuation_pass_plans_the_first_packed_group(self):
         intent = build_intent(
             **self._args(
@@ -481,3 +523,33 @@ class TestBuildIntentOnScreenShapedSources:
         )
         assert first.writes[0].source_slots == (0,)
         assert fingerprint(first) == fingerprint(second)
+
+
+class TestCompanionBranchRule:
+    """The one rule that decides an ``x`` choice's branch (P4).
+
+    The screen and the application must decide the branch the same way,
+    from the same loaded copies, or the token names a plan the write does
+    not follow. These records are invented, like every other fixture.
+    """
+
+    def test_a_bank_that_is_not_loaded_counts_as_not_empty(self):
+        assert companion_write_patches_only(None) is True
+
+    def test_a_loaded_bank_of_init_slots_travels_whole(self):
+        from tests.test_bankbuild import make_performance
+
+        performances = [bytes(r.PERFORMANCE_SIZE)] * 50
+        performances[0] = bytes(r.PERFORMANCE_SIZE)
+        assert companion_write_patches_only(performances) is False
+
+    def test_a_loaded_bank_with_real_work_keeps_its_performances(self):
+        performances = [bytes(r.PERFORMANCE_SIZE)] * 50
+        performances[4] = make_performance("Anchor Line", ((0, 0),))
+        assert companion_write_patches_only(performances) is True
+
+    def test_a_copy_with_no_performances_at_all_is_treated_as_loaded(self):
+        assert companion_write_patches_only([]) is True
+
+    def test_an_unparseable_record_is_carried_when_it_holds_bytes(self):
+        assert companion_write_patches_only([bytes([9]) * 8]) is True

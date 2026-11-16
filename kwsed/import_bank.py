@@ -462,6 +462,7 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
         mode: Optional[ImportMode] = None,
         pass_state: Optional[ImportPassState] = None,
         notice: str = "",
+        companion_loaded: Optional[Mapping[str, Sequence[Any]]] = None,
     ) -> None:
         super().__init__()
         self._path = path
@@ -504,6 +505,18 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
         # onto another card by switching the card on the unit, not by
         # naming a different archive.
         del card_mode, hcard_banks
+        #: The loaded copies of the unit's banks, keyed by scope, as the
+        #: app saw them when it opened this screen. A companion (``x``)
+        #: choice has two branches -- the bank's patches and wave
+        #: sequences only, or the whole bank when that copy is empty of
+        #: performances (all Init) -- and the branch is part of the plan
+        #: the approval is minted for, so it must be decided here, at the
+        #: mint, from the same state the application will decide it from
+        #: at the write boundary. A bank missing from this map counts as
+        #: not loaded: nothing is guessed.
+        self._companion_loaded: Dict[str, Sequence[Any]] = (
+            dict(companion_loaded) if companion_loaded else {}
+        )
 
     @property
     def banks(self) -> list["ImportedBank"]:
@@ -1305,7 +1318,11 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
         The intent comes from the shared builder
         (:func:`kwsed.import_intent.build_intent`), which plans the
         choice with the same planners the write itself uses, so what is
-        approved is what would be sent. The approval is minted only
+        approved is what would be sent. A companion choice's branch --
+        the bank's patches and wave sequences only, or the whole bank
+        when the loaded copy is all Init -- is decided here, before the
+        mint, from ``_companion_loaded``: the token must say which branch
+        will run. The approval is minted only
         here, for a choice this method is about to dismiss with; a plan
         the planners refuse mints nothing, and the status says why.
         """
@@ -1316,6 +1333,11 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
             sources = dict(self._sources())
             sources[scope] = source
             target = kws_banks.bank(choice.target_bank)
+            companion_all_init = False
+            if choice.companion_only:
+                companion_all_init = not import_intent.companion_write_patches_only(
+                    self._companion_loaded.get(choice.target_bank)
+                )
             intent = import_intent.build_intent(
                 source_id=f"{self._path}|{scope}",
                 source_scope=scope,
@@ -1329,6 +1351,7 @@ class WholeBankImportScreen(ModalScreen[Optional[WholeBankChoice]]):
                 session_id=choice.session_key,
                 pass_slots=tuple(int(slot) for slot in pass_slots),
                 companion_only=choice.companion_only,
+                companion_all_init=companion_all_init,
             )
         except (IndexError, LookupError, ValueError, TypeError, AttributeError) as exc:
             self._set_status(f"this write cannot be planned: {exc}")
