@@ -953,3 +953,38 @@ verified.
 is recorded by this change; only bank ids, kinds, slot numbers and counts are
 part of a plan. This entry records the safety fix and its verification; it does
 not describe a hardware run.
+
+---
+
+## 21. Whole-bank import: plan approval, follow-ups
+
+The plan-approval work closed five review findings after its first
+round. Each is a small correctness rule rather than a feature.
+
+**Every planner input is fingerprinted.** The approved intent digests the
+whole source map, not only the selected bank. An overflow or split copies
+patch and sequence records out of sibling banks, so a change there changes
+the bytes written; it now changes the fingerprint too.
+
+**The worker plans from a frozen snapshot.** Validation happens on the
+main thread, and the records it approved are copied at that moment.
+Nothing reads the session's live sources afterwards, so a record changed
+between approval and send cannot alter what is written.
+
+**Retry state is part of the plan.** A bank that landed before a later
+failure is recorded as skipped, and a retry's token names it. A token
+minted for the first attempt cannot be replayed for the remainder, and a
+patches-only overflow whose target failed re-offers the screen so the
+retry sends the target only.
+
+**Cache-only mints nothing.** Saving to the local cache writes no unit, so
+it no longer requires a plan that could be planned for one; material that
+cannot be placed on the device can still be filed.
+
+**Token granularity is stated, not implied.** One approval covers one
+ordered sequence (an overflow bank and its target, or a split's groups).
+A companion chain mints one token per answer. Every bank is still
+separately read, backed up and verified; the token never implies
+atomicity.
+
+Verified: 1478 tests pass; lint, formatting and strict typing are clean.
