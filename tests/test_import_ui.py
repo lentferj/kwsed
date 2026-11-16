@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 from dataclasses import replace
 from types import SimpleNamespace
-from typing import Any, Optional, cast
+from typing import Any, Optional, Sequence, cast
 from unittest.mock import patch
 
 import pytest
@@ -44,6 +44,9 @@ from kwsed.file_picker import FilePickerScreen
 from kwsed.gate import EditGate
 from kwsed.import_bank import (
     OVERFLOW_PATCHES,
+    AffectedCountsScreen,
+    AffectedImportScreen,
+    Remediation,
     WholeBankChoice,
     WholeBankImportScreen,
 )
@@ -822,8 +825,21 @@ def _approved(
         pass_slots=tuple(pass_slots),
         companion_only=bool(getattr(choice, "companion_only", False)),
         companion_all_init=companion_all_init,
+        # The remediation is part of the plan, exactly as the write
+        # boundary rebuilds it from the choice.
+        remediation=_remediation_name(choice),
+        cleared_banks=tuple(getattr(choice, "cleared_banks", ()) or ()),
+        init_banks=tuple(getattr(choice, "init_banks", ()) or ()),
     )
     return replace(choice, approval=import_intent.new_approval(intent))
+
+
+def _remediation_name(choice: Any) -> str:
+    """The choice's remediation as the intent builder spells it."""
+    answer = getattr(choice, "remediation", None)
+    if answer is None or answer is Remediation.NONE:
+        return ""
+    return str(getattr(answer, "value", answer))
 
 
 def _companion_loaded_map(app: Any) -> dict[str, Any]:
@@ -2013,6 +2029,10 @@ async def test_spillover_is_one_fenced_write_to_the_audited_bank(
         await _settle(pilot)
         assert isinstance(app.screen, TargetBankScreen)
         await pilot.press("enter")
+        # The affected-performances question stands between the choice
+        # and the write now; deciding and leaving goes straight through
+        # when nothing is affected.
+        await _answer_remediation_with_leave(app, pilot)
         for _ in range(100):
             await pilot.pause()
             if app.device.bundle_write_count:
@@ -2305,6 +2325,7 @@ async def test_two_pass_import_splits_disjoint_targets(
         await pilot.press("b")  # target RAM 2
         await _settle(pilot)
         await pilot.press("ctrl+s")
+        await _answer_remediation_with_leave(app, pilot)
         await _wait_for_writes(app, pilot, 1)
         second = app.screen
         assert isinstance(second, WholeBankImportScreen)
@@ -2325,6 +2346,7 @@ async def test_two_pass_import_splits_disjoint_targets(
         for _ in range(2):  # RAM 1 -> RAM 3
             await pilot.press("down")
         await pilot.press("enter")
+        await pilot.press("2")  # the next pass is asked the same question
         await _wait_for_writes(app, pilot, 2)
         await _settle(pilot)
         assert app.device.bundle_write_count == 2
@@ -2649,6 +2671,9 @@ async def test_the_popup_writes_the_companion_bank_on_x(
                 break
         assert isinstance(app.screen, DanglingRefsScreen)
         await pilot.press("x")
+        # The companion write is asked the affected-performances question
+        # now; deciding and leaving goes straight through.
+        await _answer_remediation_with_leave(app, pilot)
         for _ in range(100):
             await pilot.pause()
             if app.device.bundle_write_count == 2:
@@ -3131,6 +3156,7 @@ async def test_self_contained_split_continues_onto_the_next_card(
         await pilot.press("down")  # RAM 1 sits between them
         await _settle(pilot)
         await pilot.press("enter")  # RAM 3
+        await _answer_remediation_with_leave(app, pilot)
         await _wait_for_writes(app, pilot, 2)
         await _settle(pilot)
 
@@ -3173,6 +3199,7 @@ async def test_self_contained_split_continues_onto_the_next_card(
         card_pass1_patch = _pass_blob(app.device, "CARD", banks.Kind.PATCH)
 
         await pilot.press("n")
+        await _answer_remediation_with_leave(app, pilot)
         await _wait_for_writes(app, pilot, 3)
         await _settle(pilot)
         assert app.device.bundle_write_count == 3
@@ -3383,6 +3410,10 @@ async def test_cards_only_first_pass_writes_one_card_and_records_the_rest(
         await pilot.press("down")
         await _settle(pilot)
         await pilot.press("enter")  # cards only: no bank step at all
+        # A cards-only write is asked the affected-performances question,
+        # without green field (no RAM bank would be cleared); deciding and
+        # leaving goes straight through when nothing is affected.
+        await _answer_remediation_with_leave(app, pilot)
         await _wait_for_writes(app, pilot, 1)
         await _settle(pilot)
 
@@ -3432,6 +3463,7 @@ async def test_cards_only_first_pass_writes_one_card_and_records_the_rest(
         card_pass1_patch = _pass_blob(app.device, "CARD", banks.Kind.PATCH)
 
         await pilot.press("n")
+        await _answer_remediation_with_leave(app, pilot)
         await _wait_for_writes(app, pilot, 2)
         await _settle(pilot)
         assert app.device.bundle_write_count == 2
@@ -3598,6 +3630,9 @@ async def test_cards_only_from_the_default_target_writes_the_card(
         await pilot.press("m")  # self-contained packed
         await _settle(pilot)
         await _press_cards_only(pilot)
+        # A cards-only write is asked the affected-performances question,
+        # without green field; deciding and leaving goes straight through.
+        await _answer_remediation_with_leave(app, pilot)
         await _wait_for_writes(app, pilot, 1)
         await _settle(pilot)
 
@@ -3645,6 +3680,7 @@ async def test_cards_only_after_picking_ram3_still_writes_the_card(
         await pilot.press("m")  # self-contained packed
         await _settle(pilot)
         await _press_cards_only(pilot)
+        await _answer_remediation_with_leave(app, pilot)
         await _wait_for_writes(app, pilot, 1)
         await _settle(pilot)
 
@@ -3688,6 +3724,7 @@ async def test_cards_only_continuation_stays_on_the_card(
         await pilot.press("m")  # self-contained packed
         await _settle(pilot)
         await _press_cards_only(pilot)
+        await _answer_remediation_with_leave(app, pilot)
         await _wait_for_writes(app, pilot, 1)
         await _settle(pilot)
         assert [w["bank"] for w in app.device.bundle_writes] == [
@@ -3705,6 +3742,7 @@ async def test_cards_only_continuation_stays_on_the_card(
         assert second._target_bank().id == "RAM3"
         assert second._split_target_bank().id == "CARD"
         await pilot.press("n")
+        await _answer_remediation_with_leave(app, pilot)
         await _wait_for_writes(app, pilot, 2)
         await _settle(pilot)
 
@@ -3908,15 +3946,13 @@ async def test_a_matching_unit_bank_is_disclosed_but_not_re_offered(
         await pilot.press("b")
         await pilot.press("b")  # target RAM 3
         await pilot.press("ctrl+s")
-        for _ in range(100):
-            await pilot.pause()
-            if isinstance(app.screen, PreflightImportScreen):
-                break
-        assert isinstance(app.screen, PreflightImportScreen)
+        await _wait_for_screen(app, pilot, PreflightImportScreen)
+        await _settle(pilot)
         body = _static_text(app.screen, "preflight-body")
         assert "loaded copies, not of the unit" in body
         assert "already shows these patches" in body
         await pilot.press("2")  # source only
+        await _answer_remediation_with_leave(app, pilot)
         for _ in range(100):
             await pilot.pause()
             if app.device.bundle_write_count:
@@ -3961,13 +3997,8 @@ async def test_preflight_ctrl_s_asks_before_the_write_and_both_writes_the_compan
         await pilot.press("b")
         await pilot.press("b")  # target RAM 3, not the companion's RAM 2
         await pilot.press("ctrl+s")
-        for _ in range(100):
-            await pilot.pause()
-            if isinstance(app.screen, PreflightImportScreen):
-                break
+        modal = await _wait_for_screen(app, pilot, PreflightImportScreen)
         await _settle(pilot)
-        modal = app.screen
-        assert isinstance(modal, PreflightImportScreen)
         assert app.device.bundle_write_count == 0, "nothing is written yet"
         body = _static_text(modal, "preflight-body")
         assert "2 parts" in body
@@ -3978,6 +4009,9 @@ async def test_preflight_ctrl_s_asks_before_the_write_and_both_writes_the_compan
         assert "wave sequences only" in choices
         assert "its performances stay as they are" in choices
         await pilot.press("1")  # write both, companion first
+        # The remediation question is resolved before anything is written;
+        # deciding and leaving goes straight through when nothing is on.
+        await _answer_remediation_with_leave(app, pilot)
         for _ in range(200):
             await pilot.pause()
             if app.device.bundle_write_count == 2:
@@ -4023,12 +4057,10 @@ async def test_preflight_only_choice_writes_one_bundle_without_the_popup(
         await pilot.press("b")
         await pilot.press("b")  # target RAM 3, not the companion's RAM 2
         await pilot.press("ctrl+s")
-        for _ in range(100):
-            await pilot.pause()
-            if isinstance(app.screen, PreflightImportScreen):
-                break
+        await _wait_for_screen(app, pilot, PreflightImportScreen)
         await _settle(pilot)
         await pilot.press("2")  # write only this bank
+        await _answer_remediation_with_leave(app, pilot)
         for _ in range(200):
             await pilot.pause()
             if app.device.bundle_write_count == 1:
@@ -4061,12 +4093,9 @@ async def test_preflight_cancel_writes_nothing_and_reopens_the_screen(
         )
         await _settle(pilot)
         await pilot.press("b")
-        await pilot.press("b")  # target RAM 3, not the companion's RAM 2
+        await pilot.press("b")  # target RAM 3
         await pilot.press("ctrl+s")
-        for _ in range(100):
-            await pilot.pause()
-            if isinstance(app.screen, PreflightImportScreen):
-                break
+        await _wait_for_screen(app, pilot, PreflightImportScreen)
         await _settle(pilot)
         await pilot.press("3")  # cancel
         await _settle(pilot)
@@ -4098,10 +4127,7 @@ async def test_preflight_escape_cancels_like_3(tmp_path: Any, monkeypatch: Any) 
         await pilot.press("b")
         await pilot.press("b")  # target RAM 3, not the companion's RAM 2
         await pilot.press("ctrl+s")
-        for _ in range(100):
-            await pilot.pause()
-            if isinstance(app.screen, PreflightImportScreen):
-                break
+        await _wait_for_screen(app, pilot, PreflightImportScreen)
         await _settle(pilot)
         await pilot.press("escape")
         await _settle(pilot)
@@ -4128,6 +4154,7 @@ async def test_preflight_never_rises_for_a_one_bank_file(
         await pilot.press("b")
         await pilot.press("b")  # target RAM 3, not the companion's RAM 2
         await pilot.press("ctrl+s")
+        await _answer_remediation_with_leave(app, pilot)
         for _ in range(100):
             await pilot.pause()
             if app.device.bundle_write_count:
@@ -4165,6 +4192,9 @@ async def test_x_writes_patches_only_keeping_the_performances(
         await _settle(pilot)
         assert isinstance(app.screen, TargetBankScreen)
         await pilot.press("enter")  # the suggested RAM 2 target
+        # The companion write is asked the affected-performances question;
+        # deciding and leaving goes straight through when nothing is on.
+        await _answer_remediation_with_leave(app, pilot)
         for _ in range(200):
             await pilot.pause()
             if app.device.bundle_write_count:
@@ -4208,6 +4238,7 @@ async def test_x_writes_the_whole_bank_when_the_performances_are_all_init(
         await pilot.press("enter")
         await _settle(pilot)
         await pilot.press("enter")
+        await _answer_remediation_with_leave(app, pilot)
         for _ in range(200):
             await pilot.pause()
             if app.device.bundle_write_count:
@@ -4446,6 +4477,9 @@ async def test_preflight_both_two_companions_one_token_each(
         assert app.device.bundle_write_count == 0
         assert isinstance(modal, PreflightImportScreen)
         await pilot.press("1")  # write every named bank, then this bank
+        # The remediation question is resolved before anything is written;
+        # deciding and leaving goes straight through when nothing is on.
+        await _answer_remediation_with_leave(app, pilot)
         for _ in range(300):
             await pilot.pause()
             if app.device.bundle_write_count == 3:
@@ -4488,7 +4522,10 @@ async def test_preflight_chain_stops_when_the_second_token_is_tampered(
     ) -> Any:
         approval = original(self, bank, choice, banks, path, *a, **k)
         mints["count"] += 1
-        if mints["count"] == 2 and approval is not None:
+        # Mint 1 is the remediation answer's plan (the target write); the
+        # chain's companions follow it, so the second companion's token is
+        # mint 3.
+        if mints["count"] == 3 and approval is not None:
             approval = replace(approval, fingerprint="0" * 64)
         return approval
 
@@ -4497,6 +4534,7 @@ async def test_preflight_chain_stops_when_the_second_token_is_tampered(
         modal = await _raise_preflight_on_card(pilot, app, file_banks, "three.syx")
         assert isinstance(modal, PreflightImportScreen)
         await pilot.press("1")
+        await _answer_remediation_with_leave(app, pilot)
         for _ in range(300):
             await pilot.pause()
             if any("not written" in s for s in statuses):
@@ -4657,13 +4695,8 @@ async def test_preflight_asks_even_when_the_unit_already_has_the_patches(
         await pilot.press("b")
         await pilot.press("b")  # target RAM 3
         await pilot.press("ctrl+s")
-        for _ in range(100):
-            await pilot.pause()
-            if isinstance(app.screen, PreflightImportScreen):
-                break
+        modal = await _wait_for_screen(app, pilot, PreflightImportScreen)
         await _settle(pilot)
-        modal = app.screen
-        assert isinstance(modal, PreflightImportScreen)
         body = _static_text(modal, "preflight-body")
         assert "2 parts name it" in body
         # The state is a snapshot of the loaded copy, never a claim about
@@ -4769,6 +4802,9 @@ async def test_preflight_lists_both_named_companions_and_writes_each_then_the_so
         assert "wave sequences only" in choices
         assert "its performances stay as they are" in choices
         await pilot.press("1")  # write every named bank, then this bank
+        # The remediation question is resolved before anything is written;
+        # deciding and leaving goes straight through when nothing is on.
+        await _answer_remediation_with_leave(app, pilot)
         for _ in range(300):
             await pilot.pause()
             if app.device.bundle_write_count == 3:
@@ -4846,6 +4882,7 @@ async def test_preflight_with_two_companions_source_only_sends_one_bundle(
     async with app.run_test() as pilot:
         await _raise_preflight_on_card(pilot, app, file_banks, "three.syx")
         await pilot.press("2")  # write only this bank
+        await _answer_remediation_with_leave(app, pilot)
         for _ in range(200):
             await pilot.pause()
             if app.device.bundle_write_count == 1:
@@ -4884,6 +4921,7 @@ async def test_preflight_second_companion_failure_names_what_completed(
     async with app.run_test() as pilot:
         await _raise_preflight_on_card(pilot, app, file_banks, "three.syx")
         await pilot.press("1")
+        await _answer_remediation_with_leave(app, pilot)
         for _ in range(200):
             await pilot.pause()
             if any("written so far" in s for s in statuses):
@@ -5204,6 +5242,9 @@ async def test_overflow_partial_reoffers_the_screen_and_the_retry_is_target_only
         await pilot.press("down")  # RAM 1
         await _settle(pilot)
         await pilot.press("enter")  # RAM 3 -- the bank that landed
+        # The retry is asked the affected-performances question too;
+        # deciding and leaving goes straight through when nothing is on.
+        await _answer_remediation_with_leave(app, pilot)
         await _wait_for_writes(app, pilot, 2)
         await _settle(pilot)
 
@@ -5367,6 +5408,9 @@ async def test_split_failure_keeps_the_landed_groups_and_n_writes_the_rest(
         assert "7 performances remain" in _static_text(second, "whole-bank-status")
         fails["armed"] = False
         await pilot.press("n")
+        # The continuation choice is asked the affected-performances
+        # question too; deciding and leaving goes straight through.
+        await _answer_remediation_with_leave(app, pilot)
         await _wait_for_writes(app, pilot, 2)
         await _settle(pilot)
 
@@ -5774,6 +5818,16 @@ async def test_armed_gate_with_an_unchanged_plan_writes(
         await _settle(pilot)
         assert app._write_gate.armed
         await pilot.press("ctrl+s")
+        # The demo unit's banks name RAM 1, the target here, so the counts
+        # question has numbers; "l" leaves them and the write proceeds.
+        await pilot.press("2")
+        from kwsed.import_bank import AffectedCountsScreen
+
+        for _ in range(100):
+            await pilot.pause()
+            if isinstance(app.screen, AffectedCountsScreen):
+                break
+        await pilot.press("l")
         await _wait_for_writes(app, pilot, 1)
         await _settle(pilot)
         assert app.device.bundle_write_count == 1
@@ -6235,3 +6289,979 @@ def test_a_companion_write_keeps_the_banks_performances_in_the_session(
     kept = app._sources["RAM2"]
     assert len(kept.performances) == 50
     assert not perfcopy.is_empty_performance(kept.performances[0])
+
+
+# ---------------------------------------------------------------------------
+# The affected-performances remediation (P5): the question, the counts, the
+# green field, and the Init write. Every name here is invented.
+# ---------------------------------------------------------------------------
+
+
+def _named_perf(name: str, bank_number: int, patch: int) -> bytes:
+    from tests.test_bankbuild import make_performance
+
+    return cast(bytes, make_performance(name, ((bank_number, patch),)))
+
+
+def _seed_bank_blob(entries: dict[int, bytes]) -> bytes:
+    """A whole performance bank with the named slots filled in."""
+    out = bytearray()
+    for slot in range(banks.PERFORMANCES_PER_BANK):
+        out += entries.get(slot, bytes(PERF_RECORD_SIZE))
+    return bytes(out)
+
+
+def _counts_app(tmp_path: Any, monkeypatch: Any) -> tuple[Any, list[dict[str, Any]]]:
+    """An armed app for the counts flow, with its cache and backups sandboxed."""
+    from kws import backup as _backup
+
+    app = _make_app(tmp_path, bankstore_dir=str(tmp_path / "store"))
+    app._sources["RAM3"] = _make_bank(scope="RAM3", active_slots=[]).source
+    app._write_gate = EditGate(armed=True)
+    app.notify_status = lambda *a, **k: None  # type: ignore[method-assign]
+    backup_dir = str(tmp_path / "counts-backups")
+    os.makedirs(backup_dir, exist_ok=True)
+    monkeypatch.setattr(_backup, "default_dir", lambda root=None: backup_dir)
+    recorded: list[dict[str, Any]] = []
+    app._record_write = recorded.append  # type: ignore[method-assign]
+    return app, recorded
+
+
+async def _wait_for_screen(
+    app: KwsedApp, pilot: Any, kind: Any, limit: int = 200
+) -> Any:
+    for _ in range(limit):
+        await pilot.pause()
+        if isinstance(app.screen, kind):
+            return app.screen
+    raise AssertionError(f"{kind.__name__} never appeared")
+
+
+async def _answer_remediation_with_leave(app: KwsedApp, pilot: Any) -> None:
+    """Resolve the affected-performances question: decide, then leave.
+
+    Stage 1 offers green field / decide-with-counts / cancel only, so the
+    plain way past it is decide: the unit is read and the counts modal
+    offers leave -- or, when nothing is affected, the write goes
+    straight on and there is no counts modal at all.
+    """
+    await _wait_for_screen(app, pilot, AffectedImportScreen)
+    before = app.device.bundle_write_count
+    await pilot.press("2")  # decide with counts
+    for _ in range(600):
+        await pilot.pause()
+        if isinstance(app.screen, AffectedCountsScreen):
+            await pilot.press("l")  # leave as is
+            return
+        if app.device.bundle_write_count > before:
+            return  # nothing affected: the write went straight on
+    raise AssertionError("the counts never came and nothing was written")
+
+
+async def _run_to_counts(
+    app: KwsedApp,
+    pilot: Any,
+    file_banks: Sequence[Any],
+    path: str = "one.syx",
+) -> Any:
+    """From a whole-bank choice to the counts modal: stage 1, then decide."""
+    app._import_whole_bank_chosen(file_banks, WholeBankChoice(0, "RAM3", True), path)
+    await _wait_for_screen(app, pilot, AffectedImportScreen)
+    await pilot.press("2")
+    return await _wait_for_screen(app, pilot, AffectedCountsScreen)
+
+
+@pytest.mark.asyncio
+async def test_the_remediation_question_rises_before_any_write(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """A whole-bank write is asked the question first; cancelling writes nothing."""
+    from kwsed.import_bank import WholeBankImportScreen
+
+    app, _recorded = _counts_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(bankstore, "save", lambda *a, **k: None)
+    bank = _mixed_bank()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.push_screen(
+            WholeBankImportScreen(path="one.syx", banks=[bank], gate=app._write_gate),
+            lambda picked: app._import_whole_bank_chosen([bank], picked, "one.syx"),
+        )
+        await _settle(pilot)
+        await pilot.press("b")
+        await pilot.press("b")  # target RAM 3
+        await pilot.press("ctrl+s")
+        modal = await _wait_for_screen(app, pilot, AffectedImportScreen)
+        body = _static_text(modal, "affected-body")
+        assert "RAM 3" in body
+        assert app.device.bundle_write_count == 0
+        await pilot.press("escape")
+        await _settle(pilot)
+        assert isinstance(app.screen, WholeBankImportScreen)
+    assert app.device.bundle_write_count == 0
+
+
+@pytest.mark.asyncio
+async def test_the_question_names_the_overflow_bank_and_the_companion(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """The body names every bank whose patches the import replaces."""
+    app, _recorded = _counts_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(bankstore, "save", lambda *a, **k: None)
+    file_banks = _two_bank_file()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        choice = WholeBankChoice(
+            0,
+            "RAM3",
+            True,
+            perfcopy.ImportMode.AS_IS,
+            "",
+            True,
+            "RAM2",
+            OVERFLOW_PATCHES,
+        )
+        app._import_whole_bank_chosen(file_banks, choice, "two.syx")
+        modal = await _wait_for_screen(app, pilot, AffectedImportScreen)
+        body = _static_text(modal, "affected-body")
+        assert "RAM 3" in body
+        assert "RAM 2" in body
+        assert app.device.bundle_write_count == 0
+        await pilot.press("escape")
+        await _settle(pilot)
+    assert app.device.bundle_write_count == 0
+
+
+@pytest.mark.asyncio
+async def test_green_field_clears_the_imports_bank_without_reading_the_unit(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """Green field clears the bank the import writes, then writes it.
+
+    No candidate performance dump is read, the clear is its own fenced
+    bundle before the target write, and the session and cache end up
+    showing the Init state for the cleared bank.
+    """
+    from kws.initbank import (
+        INIT_PATCH,
+        INIT_PERFORMANCE,
+        init_patches,
+        init_performances,
+        init_waveseq,
+    )
+
+    app, recorded = _counts_app(tmp_path, monkeypatch)
+    saved: list[dict[str, Any]] = []
+
+    def fake_save(
+        scope_id: Any,
+        *,
+        performances: Any = None,
+        patches: Any = None,
+        waveseq: Any = None,
+        directory: Any = None,
+    ) -> None:
+        saved.append(
+            {
+                "scope": scope_id,
+                "performances": performances,
+                "patches": patches,
+                "waveseq": waveseq,
+            }
+        )
+
+    monkeypatch.setattr(bankstore, "save", fake_save)
+    bank = _mixed_bank()
+    reads: list[tuple[int, int]] = []
+    original_read = app.device.read_raw
+
+    def recording_read(bank_number: int, function: int, **k: Any) -> bytes:
+        reads.append((bank_number, function))
+        return cast(bytes, original_read(bank_number, function, **k))
+
+    app.device.read_raw = recording_read
+    choice = WholeBankChoice(0, "RAM3", True, remediation=Remediation.GREEN_FIELD)
+    choice = replace(choice, cleared_banks=("RAM3",))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._import_whole_bank_write(
+            bank,
+            _approved(choice, bank),
+            banks_list=[bank],
+            path="one.syx",
+        )
+        await _wait_for_writes(app, pilot, 2)
+        await _settle(pilot)
+    ram3_sysex = banks.bank("RAM3").sysex
+    # No candidate performance dump was read: green field reads nothing.
+    assert all(
+        function != m.Function.ALL_PERFORMANCE_DUMP or number == ram3_sysex
+        for number, function in reads
+    ), reads
+    clear_write, target_write = app.device.bundle_writes
+    assert clear_write["bank"] == banks.bank("RAM3").label
+    assert clear_write["kinds"] == ["waveseq", "patches", "performances"]
+    # The target write follows, carrying the import's own bank.
+    assert target_write["bank"] == banks.bank("RAM3").label
+    assert len(recorded) == 2, "each bank write has its own undo record"
+    # The session shows what the unit holds now: the import landed on
+    # top of the clear, so the browser shows the imported bank.
+    source = app._sources["RAM3"]
+    expected = perfcopy.relocate_bank(bank.source, banks.bank("RAM3"))
+    assert (
+        source.performances[2]
+        == expected.performances[2 * PERF_RECORD_SIZE : 3 * PERF_RECORD_SIZE]
+    )
+    clear_saved = next(
+        entry for entry in saved if entry["scope"] == "RAM3" and entry["performances"]
+    )
+    assert clear_saved["performances"] == init_performances()
+    assert clear_saved["patches"] == init_patches()
+    assert clear_saved["waveseq"] == init_waveseq()
+
+
+@pytest.mark.asyncio
+async def test_a_cleared_bank_shows_init_when_the_write_fails_after_it(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """The cleared bank's session and cache show Init, not stale names.
+
+    When the import's own write fails after the clear landed, what the
+    unit holds is the Init state: the browser must not keep the old
+    names, and the cache must not claim the import arrived.
+    """
+    from kws.initbank import INIT_PATCH, INIT_PERFORMANCE, init_waveseq
+
+    app, recorded = _counts_app(tmp_path, monkeypatch)
+    saved: list[dict[str, Any]] = []
+
+    def fake_save(
+        scope_id: Any,
+        *,
+        performances: Any = None,
+        patches: Any = None,
+        waveseq: Any = None,
+        directory: Any = None,
+    ) -> None:
+        saved.append(
+            {
+                "scope": scope_id,
+                "performances": performances,
+                "patches": patches,
+                "waveseq": waveseq,
+            }
+        )
+
+    monkeypatch.setattr(bankstore, "save", fake_save)
+    bank = _mixed_bank()
+    calls: list[int] = []
+    original_write = app.device.write_bank_bundle
+
+    def failing_second(bank_number: int, **k: Any) -> dict[str, Any]:
+        calls.append(bank_number)
+        if len(calls) == 1:
+            return cast(dict[str, Any], original_write(bank_number, **k))
+        raise RuntimeError("the unit refused the second transfer")
+
+    app.device.write_bank_bundle = failing_second
+    choice = WholeBankChoice(0, "RAM3", True, remediation=Remediation.GREEN_FIELD)
+    choice = replace(choice, cleared_banks=("RAM3",))
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._import_whole_bank_write(
+            bank,
+            _approved(choice, bank),
+            banks_list=[bank],
+            path="one.syx",
+        )
+        await _wait_for_writes(app, pilot, 1)
+        await _settle(pilot)
+    assert len(recorded) == 1, "only the clear landed, and it has its record"
+    source = app._sources["RAM3"]
+    assert all(record == INIT_PERFORMANCE for record in source.performances)
+    assert all(record == INIT_PATCH for record in source.patches)
+    assert source.waveseq == init_waveseq()
+    assert saved and saved[-1]["scope"] == "RAM3"
+    assert saved[-1]["performances"] == INIT_PERFORMANCE * banks.PERFORMANCES_PER_BANK
+
+
+@pytest.mark.asyncio
+async def test_counts_reads_each_candidate_once_and_shows_the_summary(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """Deciding with counts reads the candidate dumps once, then asks."""
+    app, _recorded = _counts_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(bankstore, "save", lambda *a, **k: None)
+    ram3_no = banks.bank("RAM3").number
+    seeded = _seed_bank_blob(
+        {
+            3: _named_perf("Crossing Deck", ram3_no, 0),
+            5: _named_perf("Drift Path", ram3_no, 0),
+        }
+    )
+    app.device._written[("RAM2", banks.Kind.PERFORMANCE)] = seeded
+    bank = _mixed_bank()
+    reads: list[tuple[int, int]] = []
+    original_read = app.device.read_raw
+
+    def recording_read(bank_number: int, function: int, **k: Any) -> bytes:
+        reads.append((bank_number, function))
+        return cast(bytes, original_read(bank_number, function, **k))
+
+    app.device.read_raw = recording_read
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        modal = await _run_to_counts(app, pilot, [bank])
+        body = _static_text(modal, "affected-counts-body")
+        assert "RAM 2" in body
+        assert "2 performances" in body
+        assert "RAM 3" in body, "the summary names the bank the parts point at"
+        # Each candidate's performance dump was read exactly once, and
+        # the wholesale-replaced target was never read for the counts.
+        ram1_sysex = banks.bank("RAM1").sysex
+        ram2_sysex = banks.bank("RAM2").sysex
+        ram3_sysex = banks.bank("RAM3").sysex
+        counted = [
+            number
+            for number, function in reads
+            if function == m.Function.ALL_PERFORMANCE_DUMP
+        ]
+        assert counted.count(ram1_sysex) == 1
+        assert counted.count(ram2_sysex) == 1
+        assert ram3_sysex not in counted
+        # Nothing has been written while the question stands.
+        assert app.device.bundle_write_count == 0
+        await pilot.press("escape")
+        await _settle(pilot)
+    assert app.device.bundle_write_count == 0
+
+
+@pytest.mark.asyncio
+async def test_init_writes_only_the_affected_slots_byte_for_byte(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """`i` sets the affected slots to Init; every other byte stays as it was."""
+    from kws.initbank import INIT_PERFORMANCE
+
+    app, _recorded = _counts_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(bankstore, "save", lambda *a, **k: None)
+    ram3_no = banks.bank("RAM3").number
+    seeded = _seed_bank_blob(
+        {
+            3: _named_perf("Crossing Deck", ram3_no, 0),
+            5: _named_perf("Drift Path", ram3_no, 0),
+        }
+    )
+    app.device._written[("RAM2", banks.Kind.PERFORMANCE)] = seeded
+    bank = _mixed_bank()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _run_to_counts(app, pilot, [bank])
+        await pilot.press("i")
+        await _wait_for_writes(app, pilot, 2)
+        await _settle(pilot)
+    init_write, target_write = app.device.bundle_writes
+    assert init_write["bank"] == banks.bank("RAM2").label
+    assert init_write["kinds"] == ["performances"], "patches stay untouched"
+    blob = app.device._written[("RAM2", banks.Kind.PERFORMANCE)]
+    assert _perf_at(blob, 3) == INIT_PERFORMANCE
+    assert _perf_at(blob, 5) == INIT_PERFORMANCE
+    for slot in range(banks.PERFORMANCES_PER_BANK):
+        if slot in (3, 5):
+            continue
+        assert _perf_at(blob, slot) == _perf_at(seeded, slot), slot
+    assert target_write["bank"] == banks.bank("RAM3").label
+    # The session shows the Init-ed slots.
+    source = app._sources["RAM2"]
+    assert source.performances[3] == INIT_PERFORMANCE
+    assert source.performances[5] == INIT_PERFORMANCE
+    assert source.performances[0] == _perf_at(seeded, 0)
+
+
+@pytest.mark.asyncio
+async def test_leaving_writes_no_remediation_and_says_what_changes(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """`l` sends the import's own write only, with the warning spelled out."""
+    app, _recorded = _counts_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(bankstore, "save", lambda *a, **k: None)
+    statuses: list[str] = []
+    app.notify_status = lambda msg, *a, **k: statuses.append(str(msg))
+    ram3_no = banks.bank("RAM3").number
+    seeded = _seed_bank_blob(
+        {3: _named_perf("Crossing Deck", ram3_no, 0)},
+    )
+    app.device._written[("RAM2", banks.Kind.PERFORMANCE)] = seeded
+    bank = _mixed_bank()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _run_to_counts(app, pilot, [bank])
+        await pilot.press("l")
+        await _wait_for_writes(app, pilot, 1)
+        await _settle(pilot)
+    assert app.device.bundle_write_count == 1
+    assert app.device.bundle_writes[0]["bank"] == banks.bank("RAM3").label
+    blob = app.device._written[("RAM2", banks.Kind.PERFORMANCE)]
+    assert _perf_at(blob, 3) == _perf_at(seeded, 3), "nothing was Init-ed"
+    assert any(
+        "sound will change" in status and "RAM 2" in status for status in statuses
+    ), statuses
+
+
+@pytest.mark.asyncio
+async def test_back_and_cancel_at_the_counts_write_nothing(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """`b` returns to the first question; esc cancels and writes nothing."""
+    from kwsed.import_bank import WholeBankImportScreen
+
+    app, _recorded = _counts_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(bankstore, "save", lambda *a, **k: None)
+    ram3_no = banks.bank("RAM3").number
+    app.device._written[("RAM2", banks.Kind.PERFORMANCE)] = _seed_bank_blob(
+        {3: _named_perf("Crossing Deck", ram3_no, 0)}
+    )
+    bank = _mixed_bank()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await _run_to_counts(app, pilot, [bank])
+        await pilot.press("b")
+        await _wait_for_screen(app, pilot, AffectedImportScreen)
+        assert app.device.bundle_write_count == 0
+        await pilot.press("escape")
+        await _settle(pilot)
+        assert isinstance(app.screen, WholeBankImportScreen)
+    assert app.device.bundle_write_count == 0
+
+
+@pytest.mark.asyncio
+async def test_a_read_failure_names_the_bank_and_init_skips_it(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """A candidate the unit will not answer stays unknown; Init is off for it."""
+    from kws.initbank import INIT_PERFORMANCE
+
+    app, _recorded = _counts_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(bankstore, "save", lambda *a, **k: None)
+    ram1_no = banks.bank("RAM1").number
+    ram3_no = banks.bank("RAM3").number
+    seeded = _seed_bank_blob({3: _named_perf("Crossing Deck", ram3_no, 0)})
+    app.device._written[("RAM2", banks.Kind.PERFORMANCE)] = seeded
+    bank = _mixed_bank()
+    original_read = app.device.read_raw
+
+    def failing_read(bank_number: int, function: int, **k: Any) -> bytes:
+        if bank_number == ram1_no and function == m.Function.ALL_PERFORMANCE_DUMP:
+            raise RuntimeError("no answer")
+        return cast(bytes, original_read(bank_number, function, **k))
+
+    app.device.read_raw = failing_read
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        modal = await _run_to_counts(app, pilot, [bank])
+        body = _static_text(modal, "affected-counts-body")
+        assert "RAM 1" in body and "could not be read" in body
+        await pilot.press("i")
+        await _wait_for_writes(app, pilot, 2)
+        await _settle(pilot)
+    # The unread bank got no Init write: the read banks' slots only.
+    banks_written = [entry["bank"] for entry in app.device.bundle_writes]
+    assert banks.bank("RAM1").label not in banks_written
+    init_write, target_write = app.device.bundle_writes
+    assert init_write["bank"] == banks.bank("RAM2").label
+    blob = app.device._written[("RAM2", banks.Kind.PERFORMANCE)]
+    assert _perf_at(blob, 3) == INIT_PERFORMANCE
+    assert target_write["bank"] == banks.bank("RAM3").label
+
+
+@pytest.mark.asyncio
+async def test_a_wholesale_replaced_target_is_never_a_candidate(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """A bank the import replaces wholesale contributes nothing to the counts.
+
+    The import writes RAM 1 itself: its performances do not survive, it
+    is not read for the counts, and it is not Init-ed — the import's own
+    write replaces it.
+    """
+    from kws.initbank import INIT_PERFORMANCE
+
+    app, _recorded = _counts_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(bankstore, "save", lambda *a, **k: None)
+    ram1_sysex = banks.bank("RAM1").sysex
+    seeded = _seed_bank_blob(
+        {4: _named_perf("Anchor Line", banks.bank("RAM1").number, 0)}
+    )
+    app.device._written[("RAM2", banks.Kind.PERFORMANCE)] = seeded
+    bank = _make_bank(scope="RAM1", active_slots=[3])
+    reads: list[tuple[int, int]] = []
+    original_read = app.device.read_raw
+
+    def recording_read(bank_number: int, function: int, **k: Any) -> bytes:
+        reads.append((bank_number, function))
+        return cast(bytes, original_read(bank_number, function, **k))
+
+    app.device.read_raw = recording_read
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        choice = WholeBankChoice(0, "RAM1", True)
+        app._import_whole_bank_chosen([bank], choice, "one.syx")
+        await _wait_for_screen(app, pilot, AffectedImportScreen)
+        await pilot.press("2")
+        modal = await _wait_for_screen(app, pilot, AffectedCountsScreen)
+        body = _static_text(modal, "affected-counts-body")
+        assert "RAM 2" in body
+        assert "RAM 1:" not in body, "the wholesale-replaced target is not analysed"
+        counts_reads = list(reads)
+        await pilot.press("i")
+        await _wait_for_writes(app, pilot, 3)
+        await _settle(pilot)
+    counted = [
+        number
+        for number, function in counts_reads
+        if function == m.Function.ALL_PERFORMANCE_DUMP
+    ]
+    assert ram1_sysex not in counted, "the target is not a candidate"
+    init_ram2, init_ram3, target_write = app.device.bundle_writes
+    assert init_ram2["bank"] == banks.bank("RAM2").label
+    blob = app.device._written[("RAM2", banks.Kind.PERFORMANCE)]
+    assert _perf_at(blob, 4) == INIT_PERFORMANCE
+    assert init_ram3["bank"] == banks.bank("RAM3").label
+    assert target_write["bank"] == banks.bank("RAM1").label
+
+
+@pytest.mark.asyncio
+async def test_a_leave_token_does_not_authorize_green_field(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """The remediation answer is part of the plan the token was minted for."""
+    app = _make_app(tmp_path)
+    bank = _mixed_bank()
+    leave = WholeBankChoice(0, "RAM3", True, remediation=Remediation.LEAVE)
+    approval = _approved(leave, bank).approval
+    green = replace(
+        WholeBankChoice(0, "RAM3", True, remediation=Remediation.GREEN_FIELD),
+        cleared_banks=("RAM3",),
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        refused = app._whole_bank_intent(
+            bank, replace(green, approval=approval), [bank], "one.syx"
+        )
+        assert refused is None, "a leave token does not authorize green field"
+        assert approval.nonce not in app._consumed_plan_nonces
+        accepted = app._whole_bank_intent(
+            bank, replace(leave, approval=approval), [bank], "one.syx"
+        )
+        assert accepted is not None
+        assert approval.nonce in app._consumed_plan_nonces
+
+
+# ---------------------------------------------------------------------------
+# Review fixes: the companion plan resolved before any remediation write,
+# one consistent bank set behind the question, and the paths that used to
+# skip the question. Every name here is invented.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_preflight_both_then_green_field_clears_before_the_companions(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """'both' then green field: the clears land before any companion bundle.
+
+    The preflight answer is resolved first, so a cancel at either
+    question leaves the unit untouched; the remediation's own writes --
+    the clear of the confirmed companion and of the target -- go out
+    before the companion's patches and before the target write.
+    """
+    from kws.initbank import init_performances
+    from kwsed.import_bank import PreflightImportScreen
+
+    app, _recorded = _preflight_app(tmp_path, monkeypatch)
+    file_banks = _two_bank_file()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.push_screen(
+            WholeBankImportScreen(
+                path="two.syx", banks=file_banks, gate=app._write_gate
+            ),
+            lambda picked: app._import_whole_bank_chosen(file_banks, picked, "two.syx"),
+        )
+        await _settle(pilot)
+        await pilot.press("b")
+        await pilot.press("b")  # target RAM 3, not the companion's RAM 2
+        await pilot.press("ctrl+s")
+        await _wait_for_screen(app, pilot, PreflightImportScreen)
+        await _settle(pilot)
+        await pilot.press("1")  # both: companions confirmed
+        await _wait_for_screen(app, pilot, AffectedImportScreen)
+        assert app.device.bundle_write_count == 0
+        await pilot.press("1")  # green field
+        for _ in range(600):
+            await pilot.pause()
+            if app.device.bundle_write_count == 4:
+                break
+        await _settle(pilot)
+    writes = app.device.bundle_writes
+    assert [w["bank"] for w in writes] == [
+        banks.bank("RAM2").label,  # the confirmed companion is cleared first
+        banks.bank("RAM3").label,  # then the target, the clear order's last
+        banks.bank("RAM2").label,  # the companion's patches, after the clears
+        banks.bank("RAM3").label,  # the target write, last of all
+    ]
+    clear_companion, clear_target, companion, target = writes
+    assert clear_companion["kinds"] == ["waveseq", "patches", "performances"]
+    assert clear_target["kinds"] == ["waveseq", "patches", "performances"]
+    # The cleared companion holds the Init state, and the later companion
+    # write left its performances exactly there.
+    assert app.device._written[("RAM2", banks.Kind.PERFORMANCE)] == init_performances()
+    assert companion["kinds"] == ["patches"], "no performances travel for it"
+    assert "performances" in target["kinds"]
+
+
+@pytest.mark.asyncio
+async def test_preflight_cancel_writes_nothing_at_all_not_even_the_remediation(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """A cancel at the preflight has written nothing, remediation included.
+
+    The companion question stands before the remediation question and
+    before any write, so the old order -- remediation first, then a
+    preflight that could still be cancelled -- cannot leave a cleared
+    bank behind with "nothing was written" said over it.
+    """
+    from kwsed.import_bank import PreflightImportScreen, WholeBankImportScreen
+
+    app, _recorded = _preflight_app(tmp_path, monkeypatch)
+    file_banks = _two_bank_file()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.push_screen(
+            WholeBankImportScreen(
+                path="two.syx", banks=file_banks, gate=app._write_gate
+            ),
+            lambda picked: app._import_whole_bank_chosen(file_banks, picked, "two.syx"),
+        )
+        await _settle(pilot)
+        await pilot.press("b")
+        await pilot.press("b")  # target RAM 3
+        await pilot.press("ctrl+s")
+        await _wait_for_screen(app, pilot, PreflightImportScreen)
+        await pilot.press("3")  # cancel: no remediation question was ever asked
+        await _settle(pilot)
+        reopened = app.screen
+        assert isinstance(reopened, WholeBankImportScreen)
+        assert "nothing was written" in _static_text(reopened, "whole-bank-status")
+    assert app.device.bundle_write_count == 0
+    assert not any(isinstance(s, AffectedImportScreen) for s in app.screen_stack), (
+        "the remediation question was never reached"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_remediation_sets_agree_after_the_preflight_answer(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """Named, cleared and analysed are one set, once the answer is in.
+
+    With "both", the question names, a green field clears, and the
+    affected analysis counts exactly the target, the overflow and the
+    confirmed companions -- never the Card. With "only", the companions
+    are written by nobody, so they appear in none of the three.
+    """
+    from kws import banks as kws_banks
+
+    app, _recorded = _preflight_app(tmp_path, monkeypatch)
+    file_banks = _two_bank_file()
+    choice = WholeBankChoice(0, "RAM3", True, perfcopy.ImportMode.AS_IS, "s", True)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        for answer in ("both", "only"):
+            amended = replace(choice, preflight=answer)
+            labels = app._remediation_written_labels(file_banks[0], amended, file_banks)
+            cleared = app._remediation_cleared_banks(file_banks[0], amended, file_banks)
+            wholesale, written = app._remediation_flow_banks(
+                file_banks[0], amended, file_banks
+            )
+            if answer == "both":
+                assert labels == [banks.bank("RAM3").label, banks.bank("RAM2").label]
+                assert cleared == ("RAM2", "RAM3")
+                assert wholesale == {"RAM3"}
+                assert written == {
+                    kws_banks.bank("RAM3").number,
+                    kws_banks.bank("RAM2").number,
+                }
+            else:
+                assert labels == [banks.bank("RAM3").label]
+                assert cleared == ("RAM3",)
+                assert wholesale == {"RAM3"}
+                assert written == {kws_banks.bank("RAM3").number}
+            assert "Card" not in labels
+            assert "CARD" not in cleared
+            assert "CARD" not in wholesale
+            assert kws_banks.bank("CARD").number not in written
+
+
+@pytest.mark.asyncio
+async def test_x_raises_the_remediation_question_and_cancel_writes_nothing(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """A companion-only write is asked the question; cancelling writes nothing.
+
+    The `x` path used to skip the question entirely; it is a whole-bank
+    plan like any other, and a green-field answer here has a RAM bank to
+    clear -- the companion target itself -- so green field is offered.
+    """
+    from kwsed.target_bank import TargetBankScreen
+
+    app, _recorded = _preflight_app(tmp_path, monkeypatch)
+    file_banks = _two_bank_file()
+    app._sources["RAM2"] = _make_bank(scope="RAM2", active_slots=[4]).source
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.push_screen(
+            WholeBankImportScreen(
+                path="two.syx", banks=file_banks, gate=app._write_gate
+            ),
+            lambda picked: app._import_whole_bank_chosen(file_banks, picked, "two.syx"),
+        )
+        await _settle(pilot)
+        await pilot.press("x")
+        await _settle(pilot)
+        await pilot.press("enter")  # the file's RAM 2 bank
+        await _settle(pilot)
+        assert isinstance(app.screen, TargetBankScreen)
+        await pilot.press("enter")  # the suggested RAM 2 target
+        modal = await _wait_for_screen(app, pilot, AffectedImportScreen)
+        assert "RAM 2" in _static_text(modal, "affected-body")
+        choices = _static_text(modal, "affected-choices")
+        assert "green field" in choices, "a RAM bank would be cleared"
+        await pilot.press("escape")
+        await _settle(pilot)
+    assert app.device.bundle_write_count == 0
+
+
+@pytest.mark.asyncio
+async def test_a_card_target_offers_counts_and_leave_only(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """A Card write is asked the question, but green field is not offered.
+
+    The Card is never cleared, so a plan that writes no RAM bank offers
+    decide-with-counts and cancel only, and a pressed ``1`` is refused
+    rather than dismissed.
+    """
+    app, _recorded = _preflight_app(tmp_path, monkeypatch)
+    bank = _mixed_bank()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._import_whole_bank_chosen(
+            [bank], WholeBankChoice(0, "CARD", True), "one.syx"
+        )
+        modal = await _wait_for_screen(app, pilot, AffectedImportScreen)
+        choices = _static_text(modal, "affected-choices")
+        assert "green field" not in choices
+        hint = _static_text(modal, "affected-hint")
+        assert "2 / 3" in hint
+        await pilot.press("1")
+        await _settle(pilot)
+        assert "not available" in _static_text(modal, "affected-note")
+        assert app.device.bundle_write_count == 0
+        # The write still goes through on decide, leaving as the answer.
+        await _answer_remediation_with_leave(app, pilot)
+        await _wait_for_writes(app, pilot, 1)
+        await _settle(pilot)
+    assert app.device.bundle_write_count == 1
+    assert app.device.bundle_writes[0]["bank"] == banks.bank("CARD").label
+
+
+@pytest.mark.asyncio
+async def test_cards_only_offers_counts_and_leave_only(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """A cards-only pass names no RAM bank, so green field is not offered."""
+    from kwsed.import_bank import AffectedCountsScreen
+
+    app = _split_pass_app(tmp_path, monkeypatch)
+    statuses: list[str] = []
+    app.notify_status = lambda msg, *a, **k: statuses.append(str(msg))  # type: ignore[method-assign]
+    file_banks = _cards_only_banks()
+    card_no = banks.bank("CARD").number
+    # A performance on the unit names the Card's patch bank: the counts
+    # have something to show, so the decide answer reaches the modal.
+    app.device._written[("RAM2", banks.Kind.PERFORMANCE)] = _seed_bank_blob(
+        {3: _named_perf("Quay Light", card_no, 0)}
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        first = WholeBankImportScreen(
+            path="cards-q.syx", banks=file_banks, gate=app._write_gate
+        )
+        app.push_screen(
+            first,
+            lambda picked: app._import_whole_bank_chosen(
+                file_banks, picked, "cards-q.syx"
+            ),
+        )
+        await _settle(pilot)
+        await pilot.press("m")
+        await _settle(pilot)
+        await pilot.press("m")  # self-contained packed
+        await _settle(pilot)
+        await _press_cards_only(pilot)
+        modal = await _wait_for_screen(app, pilot, AffectedImportScreen)
+        assert "green field" not in _static_text(modal, "affected-choices")
+        await pilot.press("1")
+        await _settle(pilot)
+        assert "not available" in _static_text(modal, "affected-note")
+        assert app.device.bundle_write_count == 0
+        await pilot.press("2")  # decide with counts
+        counts = await _wait_for_screen(app, pilot, AffectedCountsScreen)
+        assert "Init the affected" in _static_text(counts, "affected-counts-choices")
+        await pilot.press("l")
+        await _wait_for_writes(app, pilot, 1)
+        await _settle(pilot)
+    assert app.device.bundle_write_count == 1
+    assert app.device.bundle_writes[0]["bank"] == banks.bank("CARD").label
+    assert not any(
+        bank_id.startswith("RAM") and kind == banks.Kind.PATCH
+        for bank_id, kind in app.device._written
+    ), "no RAM bank was written"
+
+
+def test_the_intent_refuses_the_card_and_rom_in_the_cleared_set() -> None:
+    """A plan that clears the Card or a ROM bank is not a plan at all.
+
+    The boundary is in the intent itself, not only in the UI that fills
+    the set: ``build_intent`` and ``WholeBankIntent`` both refuse.
+    """
+    from kwsed import import_intent
+
+    sources = {"RAM1": _make_bank(scope="RAM1", active_slots=[3]).source}
+    for bad in ("CARD", "ROM4", "ROM11"):
+        with pytest.raises(ValueError):
+            import_intent.build_intent(
+                source_id="one.syx|RAM1",
+                source_scope="RAM1",
+                sources=sources,
+                source=sources["RAM1"],
+                target=banks.bank("RAM3"),
+                mode=perfcopy.ImportMode.AS_IS,
+                remediation="green_field",
+                cleared_banks=(bad,),
+            )
+        with pytest.raises(ValueError):
+            import_intent.WholeBankIntent(
+                source_id="one.syx|RAM1",
+                source_digest="d" * 64,
+                mode="as_is",
+                writes=(),
+                remediation="green_field",
+                cleared_banks=(bad,),
+            )
+    # The RAM banks a green field may clear are accepted.
+    intent = import_intent.WholeBankIntent(
+        source_id="one.syx|RAM1",
+        source_digest="d" * 64,
+        mode="as_is",
+        writes=(),
+        remediation="green_field",
+        cleared_banks=("RAM2", "RAM3"),
+    )
+    assert intent.cleared_banks == ("RAM2", "RAM3")
+
+
+@pytest.mark.asyncio
+async def test_the_app_refuses_a_card_clear_plan_before_any_device_io(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """A plan the intent refuses never reaches the unit, and spends nothing."""
+    from kwsed.import_intent import PlanApproval
+
+    app = _make_app(tmp_path)
+    app._write_gate = EditGate(armed=True)
+    statuses: list[str] = []
+    app.notify_status = lambda msg, *a, **k: statuses.append(str(msg))  # type: ignore[method-assign]
+    io: list[str] = []
+    original_read = app.device.read_raw
+    original_write = app.device.write_bank_bundle
+
+    def counting_read(bank_number: int, function: int, **k: Any) -> bytes:
+        io.append(f"read {bank_number}:{function}")
+        return cast(bytes, original_read(bank_number, function, **k))
+
+    def counting_write(bank_number: int, **k: Any) -> dict[str, Any]:
+        io.append(f"write {bank_number}")
+        return cast(dict[str, Any], original_write(bank_number, **k))
+
+    app.device.read_raw = counting_read
+    app.device.write_bank_bundle = counting_write
+    bank = _mixed_bank()
+    approval = PlanApproval(fingerprint="0" * 64, nonce="unspent-nonce")
+    green = WholeBankChoice(0, "RAM3", True, remediation=Remediation.GREEN_FIELD)
+    green = replace(green, cleared_banks=("CARD",), approval=approval)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._import_whole_bank_write(bank, green, banks_list=[bank], path="one.syx")
+        await _settle(pilot)
+    assert app.device.bundle_write_count == 0
+    assert io == [], "a plan the intent refuses touches no device"
+    assert "cannot be planned" in " ".join(statuses), statuses
+    assert approval.nonce not in app._consumed_plan_nonces
+
+
+@pytest.mark.asyncio
+async def test_all_unread_counts_offer_no_init_and_refuse_it(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """When nothing could be read, the counts modal does not offer Init."""
+    from kws.initbank import INIT_PERFORMANCE
+    from kwsed.import_bank import AffectedCountsScreen
+
+    app, _recorded = _counts_app(tmp_path, monkeypatch)
+    monkeypatch.setattr(bankstore, "save", lambda *a, **k: None)
+    bank = _mixed_bank()
+    original_read = app.device.read_raw
+    ram1_sysex = banks.bank("RAM1").sysex
+    ram2_sysex = banks.bank("RAM2").sysex
+
+    def failing_read(bank_number: int, function: int, **k: Any) -> bytes:
+        # Every candidate the counts would read fails; the target's own
+        # pre-write read (not a candidate) still answers, so the write
+        # itself can go out.
+        if function == m.Function.ALL_PERFORMANCE_DUMP and bank_number in (
+            ram1_sysex,
+            ram2_sysex,
+        ):
+            raise RuntimeError("no answer")
+        return cast(bytes, original_read(bank_number, function, **k))
+
+    app.device.read_raw = failing_read
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        modal = await _run_to_counts(app, pilot, [bank])
+        choices = _static_text(modal, "affected-counts-choices")
+        assert "Init" not in choices
+        hint = _static_text(modal, "affected-counts-hint")
+        assert hint == "l  leave as is · b  back · esc  cancel"
+        await pilot.press("i")
+        await _settle(pilot)
+        note = _static_text(modal, "affected-counts-note")
+        assert "Init is not available" in note
+        assert isinstance(app.screen, AffectedCountsScreen), "the answer was refused"
+        await pilot.press("l")  # leave as is
+        await _wait_for_writes(app, pilot, 1)
+        await _settle(pilot)
+    assert app.device.bundle_write_count == 1
+    assert app.device.bundle_writes[0]["bank"] == banks.bank("RAM3").label
+    blob = app.device._written.get(("RAM2", banks.Kind.PERFORMANCE))
+    assert blob is None or all(
+        record != INIT_PERFORMANCE for record in _records_of(blob)
+    ), "nothing was Init-ed"
+
+
+def _records_of(blob: bytes) -> list[bytes]:
+    return [
+        blob[at : at + PERF_RECORD_SIZE] for at in range(0, len(blob), PERF_RECORD_SIZE)
+    ]

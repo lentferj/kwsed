@@ -84,6 +84,8 @@ from kws import deps
 from kws import relations
 from kws import perfcopy
 from kws import records as rec
+from kws import affected as _affected
+from kws import remediation as _remediation_mod
 from kws.multi import MULTISETS
 from kws import multisets as _multisets_mod
 from kws.fx import EFFECT_TYPES, FxBlock
@@ -102,8 +104,11 @@ from kwsed.import_bank import (
     OVERFLOW_CARDS_ONLY,
     OVERFLOW_PATCHES,
     OVERFLOW_SELF_CONTAINED,
+    AffectedCountsScreen,
+    AffectedImportScreen,
     ImportPassState,
     PreflightImportScreen,
+    Remediation,
     WholeBankChoice,
     WholeBankImportScreen,
     _entry_bank,
@@ -5507,6 +5512,36 @@ class KwsedApp(App[None]):
         if not getattr(choice, "write_to_unit", False):
             self._save_imported_bank(bank)
             return
+        # The companion question is resolved before the remediation
+        # question and before anything is written (review item 1): a
+        # cancel at the preflight must not leave a remediation write
+        # behind, and the remediation's clear set is only known once the
+        # preflight answer says which companions this import writes.
+        named = self._preflight_companion(bank, choice, banks_list, path)
+        if named and banks_list is not None:
+            # Nothing has been sent: the question decides what travels.
+            self._ask_preflight(bank, choice, banks_list, path, named)
+            return
+        self._resolve_remediation_then_write(bank, choice, banks_list, path)
+
+    def _resolve_remediation_then_write(
+        self,
+        bank: Any,
+        choice: Any,
+        banks_list: Optional[Sequence[Any]],
+        path: str,
+    ) -> None:
+        """Resolve the affected-performances answer, then run the plan.
+
+        The question is asked here, before any write; the answer it fixes
+        (green field, counts, or leave) is carried into the plan, and only
+        then are the plan's own writes attempted -- remediation first,
+        companions second, the target last. Cancelling at the question
+        writes nothing at all.
+        """
+        if self._remediation_gate_needed(bank, choice, banks_list):
+            self._ask_remediation(bank, choice, banks_list, path)
+            return
         self._import_whole_bank_write(bank, choice, banks_list=banks_list, path=path)
 
     def _whole_bank_bytes(
@@ -5717,6 +5752,9 @@ class KwsedApp(App[None]):
             self._companion_write_patches_only(choice)
         )
         companion_all_init = companion_only and not companion_patches_only
+        remediation_name, cleared_banks, init_banks = self._choice_remediation_fields(
+            choice
+        )
         try:
             target, _target_scope = self._resolve_whole_bank_target(choice)
             intent = import_intent.build_intent(
@@ -5746,6 +5784,14 @@ class KwsedApp(App[None]):
                 ),
                 companion_only=bool(getattr(choice, "companion_only", False)),
                 companion_all_init=companion_all_init,
+                # The remediation is part of the plan: the answer the
+                # person gave, the banks a green-field plan clears and
+                # the slots an init-affected plan sets are all in the
+                # fingerprint, so a token minted for one answer never
+                # authorizes another.
+                remediation=remediation_name,
+                cleared_banks=cleared_banks,
+                init_banks=init_banks,
             )
         except (IndexError, LookupError, ValueError, TypeError, AttributeError) as exc:
             self.notify_status(
@@ -5808,6 +5854,9 @@ class KwsedApp(App[None]):
             companion_all_init = bool(
                 getattr(choice, "companion_only", False)
             ) and not self._companion_write_patches_only(choice)
+        remediation_name, cleared_banks, init_banks = self._choice_remediation_fields(
+            choice
+        )
         try:
             target, _target_scope = self._resolve_whole_bank_target(choice)
             intent = import_intent.build_intent(
@@ -5833,6 +5882,12 @@ class KwsedApp(App[None]):
                 ),
                 companion_only=bool(getattr(choice, "companion_only", False)),
                 companion_all_init=companion_all_init,
+                # The same remediation fields the write boundary's
+                # rebuild carries, so a mint made here can never
+                # disagree with the check that follows it.
+                remediation=remediation_name,
+                cleared_banks=cleared_banks,
+                init_banks=init_banks,
             )
         except (IndexError, LookupError, ValueError, TypeError, AttributeError) as exc:
             self.notify_status(
@@ -5913,8 +5968,37 @@ class KwsedApp(App[None]):
         intent_and_sources = self._whole_bank_intent(bank, choice, banks_list, path)
         if intent_and_sources is None:
             return
-        _intent, sources = intent_and_sources
-        if self._deferred_companion_step(bank, choice, banks_list, path):
+        intent, sources = intent_and_sources
+        del intent
+        if self._remediation_has_writes(choice):
+            # The remediation runs first, as its own fenced writes (P5
+            # task 6): each bank backed up and verified separately, and
+            # the main write only follows once every bank landed.
+            self._start_remediation(bank, choice, banks_list, path, sources)
+            return
+        self._whole_bank_write_continue(bank, choice, banks_list, path, sources)
+
+    def _whole_bank_write_continue(
+        self,
+        bank: Any,
+        choice: Any,
+        banks_list: Optional[Sequence[Any]],
+        path: str,
+        sources: Mapping[str, deps.Source],
+        companions_written: bool = False,
+    ) -> None:
+        """Everything after the remediation question has been answered.
+
+        The companion writes and the write itself follow in the order the
+        plan names: remediation first (before this method runs),
+        companion patches and wave sequences second, the target bank
+        last. ``companions_written`` says the confirmed companions have
+        already gone out in this frame's plan, so the target write
+        proceeds.
+        """
+        if self._deferred_companion_step(
+            bank, choice, banks_list, path, sources, companions_written
+        ):
             return
         from kws import banks as _banks
 
@@ -6007,6 +6091,12 @@ class KwsedApp(App[None]):
             cards_only=cards_only,
             overflow_note=self._overflow_status_note(session_key, overflow_id),
         )
+        note = str(getattr(choice, "remediation_note", "") or "")
+        if note:
+            # The remediation answer is said where the write is: what was
+            # already done, or, for "leave", plainly what the affected
+            # performances are in for.
+            status = f"{status} — {note}"
         self.notify_status(status, warn=bool(conflict))
         self._device_worker(work, done, f"importing {label} into {into}")
 
@@ -6070,6 +6160,861 @@ class KwsedApp(App[None]):
         return (
             f"the overflow bank {overflow_label} already landed; "
             "this write sends the target only"
+        )
+
+    # --- affected-performances remediation (P5) ------------------------------
+    #
+    # The question is asked before anything is sent. Green field clears
+    # exactly the banks this import writes, without reading the unit;
+    # "decide with counts" reads the candidate banks' performance dumps,
+    # and only a surviving bank with affected parts is Init-ed, slot for
+    # slot. Every remediation write is its own fenced bundle, and the
+    # answer is part of the approved plan.
+
+    def _choice_remediation_fields(
+        self, choice: Any
+    ) -> Tuple[str, Tuple[str, ...], Tuple[Tuple[str, Tuple[int, ...]], ...]]:
+        """The choice's remediation as the intent builder's arguments."""
+        answer = getattr(choice, "remediation", Remediation.NONE)
+        if answer is Remediation.NONE:
+            name = ""
+        else:
+            name = str(getattr(answer, "value", answer))
+        cleared = tuple(
+            str(bank) for bank in getattr(choice, "cleared_banks", ()) or ()
+        )
+        init = tuple(
+            (str(bank), tuple(int(slot) for slot in slots))
+            for bank, slots in getattr(choice, "init_banks", ()) or ()
+        )
+        return name, cleared, init
+
+    def _remediation_gate_needed(
+        self, bank: Any, choice: Any, banks_list: Optional[Sequence[Any]]
+    ) -> bool:
+        """Whether the remediation question stands between this choice and a write.
+
+        Every whole-bank write to the unit is asked, including the paths
+        that used to skip it (review item 3): a companion-only write, a
+        Card target and a cards-only pass. Green field is offered only
+        where at least one eligible RAM bank would be cleared --
+        :meth:`_remediation_cleared_banks` is empty for a Card write, and
+        the screen then offers decide-with-counts and cancel only. The
+        Card is never cleared, so there is never a green-field clear for
+        it. A choice that already carries an answer is past the
+        question. Call sites that run without a screen stack -- older
+        call sites and unit tests that drive the write boundary directly
+        -- are not asked: they carry their own approval.
+        """
+        if banks_list is None:
+            return False
+        if not getattr(self, "is_running", False):
+            return False
+        if not bool(getattr(choice, "write_to_unit", False)):
+            return False
+        return getattr(choice, "remediation", Remediation.NONE) is Remediation.NONE
+
+    def _remediation_green_field_available(
+        self, bank: Any, choice: Any, banks_list: Sequence[Any]
+    ) -> bool:
+        """Whether green field can be offered: a RAM bank would be cleared.
+
+        The Card is never cleared, and a plan that writes no RAM bank --
+        a Card target, a cards-only pass -- has nothing a green-field
+        answer would clear, so it offers decide-with-counts and cancel
+        only.
+        """
+        return bool(self._remediation_cleared_banks(bank, choice, banks_list))
+
+    def _remediation_has_writes(self, choice: Any) -> bool:
+        """Whether this choice's remediation still has banks to write."""
+        answer = getattr(choice, "remediation", Remediation.NONE)
+        if answer is Remediation.GREEN_FIELD:
+            return bool(getattr(choice, "cleared_banks", ()) or ())
+        if answer is Remediation.INIT_AFFECTED:
+            return bool(getattr(choice, "init_banks", ()) or ())
+        return False
+
+    def _remediation_written_labels(
+        self, bank: Any, choice: Any, banks_list: Sequence[Any]
+    ) -> List[str]:
+        """The labels of the banks this import writes, for the question's body.
+
+        The target first, then the overflow bank, then -- once the
+        preflight answer has confirmed them -- the companion banks the
+        source's parts name and the file carries. This is the same set
+        the green-field clear and the affected-performances analysis
+        name (review item 2): a companion the "both" answer confirmed is
+        named here, cleared by green field, and analysed; a companion
+        the "only" answer declined is written by nobody, so it is named
+        nowhere. A companion-only write names its own target only.
+        """
+        from kws import banks as _banks
+
+        labels: List[str] = []
+        try:
+            target, _target_scope = self._resolve_whole_bank_target(choice)
+            labels.append(str(getattr(target, "label", target)))
+        except (LookupError, ValueError):
+            pass
+        kind = str(
+            getattr(choice, "overflow_kind", OVERFLOW_PATCHES) or OVERFLOW_PATCHES
+        )
+        overflow_id = str(getattr(choice, "overflow_bank", "") or "")
+        if overflow_id and kind in (OVERFLOW_PATCHES, OVERFLOW_SELF_CONTAINED):
+            try:
+                labels.append(str(_banks.bank(overflow_id).label))
+            except LookupError:
+                labels.append(overflow_id)
+        if str(getattr(choice, "preflight", "") or "") == "both":
+            for _count, _index, companion in self._companions_named_by_parts(
+                bank,
+                banks_list,
+                int(getattr(choice, "source_index", 0) or 0),
+                require_missing=False,
+            ):
+                name = str(getattr(companion, "label", companion))
+                if name not in labels:
+                    labels.append(name)
+        return labels
+
+    def _remediation_cleared_banks(
+        self, bank: Any, choice: Any, banks_list: Sequence[Any]
+    ) -> Tuple[str, ...]:
+        """The physical ids a green-field answer clears, target last.
+
+        The banks this import writes, minus the Card (never cleared): the
+        target, the overflow bank a patches-only or self-contained choice
+        writes, and the companions a "both" preflight answer already
+        committed to. A companion the person has not answered for is not
+        cleared: the preflight question governs it, so the named, cleared
+        and analysed sets stay the same (review item 2).
+        """
+        from kws import banks as _banks
+
+        ids: Set[str] = set()
+        try:
+            target, _target_scope = self._resolve_whole_bank_target(choice)
+        except (LookupError, ValueError):
+            return ()
+        if str(getattr(target, "id", "")) != "CARD":
+            ids.add(str(target.id))
+        kind = str(
+            getattr(choice, "overflow_kind", OVERFLOW_PATCHES) or OVERFLOW_PATCHES
+        )
+        overflow_id = str(getattr(choice, "overflow_bank", "") or "")
+        if overflow_id and kind in (OVERFLOW_PATCHES, OVERFLOW_SELF_CONTAINED):
+            try:
+                overflow = _banks.bank(overflow_id)
+            except LookupError:
+                overflow = None
+            if overflow is not None and str(overflow.id) != "CARD":
+                ids.add(str(overflow.id))
+        if str(getattr(choice, "preflight", "") or "") == "both":
+            for _count, _index, companion in self._companions_named_by_parts(
+                bank,
+                banks_list,
+                int(getattr(choice, "source_index", 0) or 0),
+                require_missing=False,
+            ):
+                if str(getattr(companion, "id", "")) != "CARD":
+                    ids.add(str(getattr(companion, "id", "")))
+        return tuple(sorted(ids))
+
+    def _remediation_flow_banks(
+        self, bank: Any, choice: Any, banks_list: Sequence[Any]
+    ) -> Tuple[Set[str], Set[int]]:
+        """The wholesale-replaced ids and the bank numbers this import writes.
+
+        The target and a self-contained split's overflow are replaced
+        wholesale (their performances do not survive). A patches-only
+        overflow bank and the companions the preflight answer confirmed
+        have only their patches replaced, so their numbers are written
+        banks while the banks themselves survive. A companion-only write
+        replaces its target's patches too, so its own performances
+        survive -- unless the all-Init branch runs and the bank travels
+        whole.
+
+        This is the analysed set (review item 2): the same companions the
+        question named and a green-field answer would clear are the ones
+        whose replacement makes a surviving performance affected.
+        """
+        from kws import banks as _banks
+
+        target, _target_scope = self._resolve_whole_bank_target(choice)
+        kind = str(
+            getattr(choice, "overflow_kind", OVERFLOW_PATCHES) or OVERFLOW_PATCHES
+        )
+        overflow_id = str(getattr(choice, "overflow_bank", "") or "")
+        wholesale: Set[str] = set()
+        written: Set[int] = set()
+        if bool(getattr(choice, "companion_only", False)):
+            # A companion write's target: patches replaced, performances
+            # kept -- except on the whole-bank branch, where the bank is
+            # all Init anyway and the performances travel too.
+            written.add(int(getattr(target, "number", -1)))
+            if not self._companion_write_patches_only(choice):
+                wholesale.add(str(getattr(target, "id", "")))
+        else:
+            wholesale.add(str(getattr(target, "id", "")))
+            written.add(int(getattr(target, "number", -1)))
+        overflow: Any = None
+        if overflow_id:
+            try:
+                overflow = _banks.bank(overflow_id)
+            except LookupError:
+                overflow = None
+        if overflow is not None and kind == OVERFLOW_PATCHES:
+            written.add(int(overflow.number))
+        elif overflow is not None and kind == OVERFLOW_SELF_CONTAINED:
+            wholesale.add(str(overflow.id))
+            written.add(int(overflow.number))
+        if str(getattr(choice, "preflight", "") or "") == "both":
+            for _count, _index, companion in self._companions_named_by_parts(
+                bank,
+                banks_list,
+                int(getattr(choice, "source_index", 0) or 0),
+                require_missing=False,
+            ):
+                if str(getattr(companion, "id", "")) in wholesale:
+                    continue
+                written.add(int(getattr(companion, "number", -1)))
+        return wholesale, written
+
+    def _remediation_analysis_banks(
+        self, bank: Any, choice: Any, banks_list: Sequence[Any]
+    ) -> Tuple[List[Any], Set[int]]:
+        """The candidate banks to read, and the bank numbers the import writes.
+
+        A candidate is a writable bank this import does not replace
+        wholesale: a companion receiving patches only survives, and so
+        does every other RAM bank. The Card is never cleared, but it is
+        read when one is present. The wholesale-replaced banks (the
+        target, a self-contained split's overflow) contribute no
+        performances and are not analysed.
+        """
+        from kws import banks as _banks
+
+        wholesale, written = self._remediation_flow_banks(bank, choice, banks_list)
+        candidates: List[Any] = []
+        for entry in _banks.writable_banks():
+            if str(entry.id) in wholesale:
+                continue
+            if entry.id == "CARD" and not (
+                getattr(self, "_active_physical", None) or self._active_card is not None
+            ):
+                # No card is in the slot: nothing there to read.
+                continue
+            candidates.append(entry)
+        return candidates, written
+
+    def _ask_remediation(
+        self,
+        bank: Any,
+        choice: Any,
+        banks_list: Optional[Sequence[Any]],
+        path: str,
+    ) -> None:
+        """Raise the stage-1 remediation question; nothing has been sent."""
+        if banks_list is None:
+            return
+        labels = self._remediation_written_labels(bank, choice, banks_list)
+        self.call_after_refresh(
+            self._push_remediation, bank, choice, banks_list, path, labels
+        )
+
+    def _push_remediation(
+        self,
+        bank: Any,
+        choice: Any,
+        banks_list: Sequence[Any],
+        path: str,
+        labels: Sequence[str],
+    ) -> None:
+        self.push_screen(
+            AffectedImportScreen(
+                banks=list(labels),
+                green_field=self._remediation_green_field_available(
+                    bank, choice, banks_list
+                ),
+            ),
+            lambda answer: self._remediation_answer(
+                answer, bank, choice, banks_list, path
+            ),
+        )
+
+    def _remediation_answer(
+        self,
+        answer: Any,
+        bank: Any,
+        choice: Any,
+        banks_list: Sequence[Any],
+        path: str,
+    ) -> None:
+        """Carry out the stage-1 answer; cancel writes nothing."""
+        if answer is Remediation.GREEN_FIELD:
+            cleared = self._remediation_cleared_banks(bank, choice, banks_list)
+            if not cleared:
+                self.notify_status(
+                    "green field has nothing to clear: the Card is never "
+                    "cleared, and this import writes no RAM bank",
+                    refused=True,
+                )
+                return
+            amended = replace(
+                choice,
+                remediation=Remediation.GREEN_FIELD,
+                cleared_banks=cleared,
+            )
+            approval = self._mint_whole_bank_approval(bank, amended, banks_list, path)
+            if approval is None:
+                return
+            self._import_whole_bank_write(
+                bank,
+                replace(amended, approval=approval),
+                banks_list=banks_list,
+                path=path,
+            )
+            return
+        if answer == "decide":
+            self._remediation_decide(bank, choice, banks_list, path)
+            return
+        # Cancel: no write at all. The screen comes back, exactly as the
+        # preflight's cancel does.
+        session_key = str(getattr(choice, "session_key", "") or "")
+        mode = getattr(choice, "mode", perfcopy.ImportMode.AS_IS)
+        self._reopen_whole_bank_import(
+            banks_list,
+            path,
+            session_key,
+            mode,
+            notice="nothing was written — the import was cancelled at the "
+            "affected-performances question",
+        )
+
+    def _remediation_decide(
+        self,
+        bank: Any,
+        choice: Any,
+        banks_list: Sequence[Any],
+        path: str,
+    ) -> None:
+        """Read the candidate banks' performance dumps, then show the counts.
+
+        Green field was declined: only now does the unit get read, one
+        performance dump per candidate bank. A bank whose read fails is
+        marked not read and the rest go on; the counts modal names it and
+        Init stays off for it.
+        """
+        candidates, written = self._remediation_analysis_banks(bank, choice, banks_list)
+        if not candidates:
+            # Nothing survives the import: there is no question to ask.
+            amended = replace(
+                choice,
+                remediation=Remediation.LEAVE,
+                remediation_note="no bank the import leaves standing holds "
+                "any performance to ask about",
+            )
+            approval = self._mint_whole_bank_approval(bank, amended, banks_list, path)
+            if approval is None:
+                return
+            self._import_whole_bank_write(
+                bank,
+                replace(amended, approval=approval),
+                banks_list=banks_list,
+                path=path,
+            )
+            return
+
+        def work() -> Any:
+            return self._remediation_read_work(candidates)
+
+        def done(result: Any, failure: BaseException | None) -> None:
+            self._remediation_counts_done(
+                result,
+                failure,
+                bank=bank,
+                choice=choice,
+                banks_list=banks_list,
+                path=path,
+                written=written,
+            )
+
+        self._device_worker(work, done, "reading the banks the import does not replace")
+
+    def _remediation_read_work(self, candidates: Sequence[Any]) -> Any:
+        """One performance dump per candidate bank, as ``(blob, error)``."""
+        expected = banks.PERFORMANCES_PER_BANK * rec.PERFORMANCE_SIZE
+        reads: Dict[str, Tuple[bytes, str]] = {}
+        for entry in candidates:
+            try:
+                raw = self.device.read_raw(entry.sysex, m.Function.ALL_PERFORMANCE_DUMP)
+                packet = m.parse(raw)
+                data = packet.data() if packet is not None else b""
+                if len(data) != expected:
+                    raise ValueError(
+                        f"{entry.label} answered {len(data)} bytes; a "
+                        f"performance bank is {expected}"
+                    )
+                reads[str(entry.id)] = (bytes(data), "")
+            except Exception as exc:  # the bank is marked not read, not fatal
+                reads[str(entry.id)] = (b"", str(exc))
+        return reads
+
+    def _remediation_counts_done(
+        self,
+        reads: Any,
+        failure: BaseException | None,
+        *,
+        bank: Any,
+        choice: Any,
+        banks_list: Sequence[Any],
+        path: str,
+        written: Set[int],
+    ) -> None:
+        """Turn the reads into counts, and either write or ask."""
+        if failure is not None:
+            self.notify_status(
+                f"import: the candidate banks could not be read: {failure}",
+                refused=True,
+            )
+            # Green field and leave stay usable: the question comes back.
+            self._ask_remediation(bank, choice, banks_list, path)
+            return
+        sources: Dict[str, deps.Source] = {}
+        unread: List[str] = []
+        for bank_id, (blob, error) in reads.items():
+            try:
+                entry = banks.bank(bank_id)
+            except LookupError:
+                entry = None
+            label = str(getattr(entry, "label", bank_id)) if entry else bank_id
+            if error:
+                unread.append(label)
+                continue
+            records = [
+                blob[i * rec.PERFORMANCE_SIZE : (i + 1) * rec.PERFORMANCE_SIZE]
+                for i in range(len(blob) // rec.PERFORMANCE_SIZE)
+            ]
+            sources[bank_id] = deps.Source(
+                scope_id=bank_id,
+                performances=records,
+                patches=[],
+                waveseq=None,
+                bank_number=int(entry.number) if entry else None,
+            )
+        affected = _affected.affected_performances(sources, written)
+        if not affected and not sources:
+            # Not one candidate could be read: there is no count to
+            # show, and nothing to Init. The modal still names every
+            # unread bank, so the answer is made with that known -- and
+            # it does not offer Init at all (review item 5): no affected
+            # slot is known, so the answer would have nothing to act on.
+            self.push_screen(
+                AffectedCountsScreen("", unread=unread, allow_init=False),
+                lambda answer: self._remediation_counts_answer(
+                    answer, bank, choice, banks_list, path, affected, ""
+                ),
+            )
+            return
+        if not affected:
+            note = "the banks the import leaves standing hold no affected "
+            note += "performances"
+            amended = replace(
+                choice, remediation=Remediation.LEAVE, remediation_note=note
+            )
+            approval = self._mint_whole_bank_approval(bank, amended, banks_list, path)
+            if approval is None:
+                return
+            self._import_whole_bank_write(
+                bank,
+                replace(amended, approval=approval),
+                banks_list=banks_list,
+                path=path,
+            )
+            return
+        summary = _affected.affected_summary(affected)
+        self.push_screen(
+            AffectedCountsScreen(summary, unread=unread),
+            lambda answer: self._remediation_counts_answer(
+                answer,
+                bank,
+                choice,
+                banks_list,
+                path,
+                affected,
+                summary,
+            ),
+        )
+
+    def _remediation_counts_answer(
+        self,
+        answer: Any,
+        bank: Any,
+        choice: Any,
+        banks_list: Sequence[Any],
+        path: str,
+        affected: Any,
+        summary: str,
+    ) -> None:
+        """Carry out the counts answer; back and cancel write nothing."""
+        if answer is Remediation.INIT_AFFECTED:
+            init_banks = tuple(
+                (
+                    entry.bank_id,
+                    tuple(sorted(perf.slot for perf in entry.performances)),
+                )
+                for entry in affected.values()
+            )
+            amended = replace(
+                choice, remediation=Remediation.INIT_AFFECTED, init_banks=init_banks
+            )
+            approval = self._mint_whole_bank_approval(bank, amended, banks_list, path)
+            if approval is None:
+                return
+            self._import_whole_bank_write(
+                bank,
+                replace(amended, approval=approval),
+                banks_list=banks_list,
+                path=path,
+            )
+            return
+        if answer is Remediation.LEAVE:
+            note = (
+                "leaving the affected performances as they are — their "
+                f"sound will change: {summary}"
+            )
+            amended = replace(
+                choice, remediation=Remediation.LEAVE, remediation_note=note
+            )
+            approval = self._mint_whole_bank_approval(bank, amended, banks_list, path)
+            if approval is None:
+                return
+            self._import_whole_bank_write(
+                bank,
+                replace(amended, approval=approval),
+                banks_list=banks_list,
+                path=path,
+            )
+            return
+        if answer == "back":
+            # Back to the first question; still nothing written.
+            self._ask_remediation(bank, choice, banks_list, path)
+            return
+        session_key = str(getattr(choice, "session_key", "") or "")
+        mode = getattr(choice, "mode", perfcopy.ImportMode.AS_IS)
+        self._reopen_whole_bank_import(
+            banks_list,
+            path,
+            session_key,
+            mode,
+            notice="nothing was written — the import was cancelled at the "
+            "affected-performances question",
+        )
+
+    def _remediation_write_order(
+        self, bank_ids: Sequence[str], target: Any
+    ) -> List[str]:
+        """The cleared banks in write order: the target last."""
+        target_id = str(getattr(target, "id", ""))
+        others = sorted(bank_id for bank_id in bank_ids if bank_id != target_id)
+        if target_id in bank_ids:
+            others.append(target_id)
+        return others
+
+    def _start_remediation(
+        self,
+        bank: Any,
+        choice: Any,
+        banks_list: Optional[Sequence[Any]],
+        path: str,
+        sources: Mapping[str, deps.Source],
+    ) -> None:
+        """Run the remediation's fenced writes, then continue the import.
+
+        Each bank is its own ``write_bank_bundle``: armed gate (checked
+        by the caller), one fresh unit read, one backup, read-back
+        verification. A bank that fails stops the run: what landed and
+        what did not is reported, and the import's own write does not
+        start from a half-remediated unit.
+        """
+        try:
+            target, _target_scope = self._resolve_whole_bank_target(choice)
+        except (LookupError, ValueError) as exc:
+            self.notify_status(f"import: {exc}", refused=True)
+            return
+        answer = getattr(choice, "remediation", Remediation.NONE)
+        if answer is Remediation.GREEN_FIELD:
+            label = "clearing " + ", ".join(
+                self._bank_label(bank_id)
+                for bank_id in getattr(choice, "cleared_banks", ())
+            )
+        else:
+            label = "setting the affected performances to Init"
+        self.notify_status(f"{label} before the write...")
+
+        def work() -> Any:
+            return self._remediation_write_work(choice, target)
+
+        def done(result: Any, failure: BaseException | None) -> None:
+            self._remediation_write_done(
+                result,
+                failure,
+                bank=bank,
+                choice=choice,
+                banks_list=banks_list,
+                path=path,
+                sources=sources,
+            )
+
+        self._device_worker(work, done, label)
+
+    def _bank_label(self, bank_id: str) -> str:
+        try:
+            return banks.bank(bank_id).label
+        except LookupError:
+            return bank_id
+
+    def _remediation_write_work(
+        self, choice: Any, target: Any
+    ) -> Tuple[MultiBankOutcome, Dict[str, Any]]:
+        """Build and write the remediation, one fenced bundle per bank.
+
+        The Init slots' bytes come from a fresh read of the bank at
+        write time: the plan approves which slots are set to Init, and
+        the untouched slots keep whatever the unit holds now, not what
+        it held when the counts were read. A bank whose read fails is
+        reported like a failed write: what landed stands, the rest does
+        not, and nothing retries silently.
+        """
+        from kws import backup as _backup
+        from kws import banks as _banks_mod
+
+        backup_dir = self._backup_dir or _backup.default_dir()
+        answer = getattr(choice, "remediation", Remediation.NONE)
+        built: Dict[str, Any] = {}
+        builders: List[Tuple[Any, Callable[[], Dict[str, Any]]]] = []
+        if answer is Remediation.GREEN_FIELD:
+            perf_blob, patch_blob, ws_blob = _remediation_mod.cleared_bank()
+
+            def build_clear(
+                perf_blob: bytes = perf_blob,
+                patch_blob: bytes = patch_blob,
+                ws_blob: bytes = ws_blob,
+            ) -> Dict[str, Any]:
+                return {
+                    "performances": perf_blob,
+                    "patches": patch_blob,
+                    "waveseq": ws_blob,
+                }
+
+            for bank_id in self._remediation_write_order(
+                [str(bank) for bank in getattr(choice, "cleared_banks", ())],
+                target,
+            ):
+                entry = _banks_mod.bank(bank_id)
+                built[bank_id] = SimpleNamespace(
+                    performances=perf_blob, patches=patch_blob, waveseq=ws_blob
+                )
+                builders.append((entry, build_clear))
+        else:
+            for bank_id, slots in getattr(choice, "init_banks", ()) or ():
+                entry = _banks_mod.bank(bank_id)
+                chosen = tuple(int(slot) for slot in slots)
+
+                def build_init(
+                    entry: Any = entry, chosen: Tuple[int, ...] = chosen
+                ) -> Dict[str, Any]:
+                    current = self._read_performance_bank(entry)
+                    blob = _remediation_mod.init_performances_in(current, chosen)
+                    built[str(entry.id)] = SimpleNamespace(
+                        performances=blob, patches=None, waveseq=None
+                    )
+                    return {"performances": blob}
+
+                builders.append((entry, build_init))
+        payloads: List[Tuple[Any, Dict[str, Any]]] = []
+        build_error: Optional[str] = None
+        for entry, build in builders:
+            try:
+                payloads.append((entry, build()))
+            except Exception as exc:
+                build_error = str(exc)
+                break
+        steps = [(entry, payload, None) for entry, payload in payloads]
+        outcome = self._write_bank_steps(steps, backup_dir)
+        if build_error is not None:
+            failed_index = len(payloads)
+            remaining = [
+                builders[index][0] for index in range(failed_index, len(builders))
+            ]
+            if outcome.ok:
+                outcome = MultiBankOutcome(
+                    completed=outcome.completed,
+                    failed_bank=builders[failed_index][0],
+                    error=build_error,
+                    not_written=remaining,
+                )
+            else:
+                # A write stopped before the bank the build failure hit:
+                # both tails are never-written.
+                outcome = MultiBankOutcome(
+                    completed=outcome.completed,
+                    failed_bank=outcome.failed_bank,
+                    error=outcome.error,
+                    not_written=[*outcome.not_written, *remaining],
+                )
+        return outcome, built
+
+    def _read_performance_bank(self, entry: Any) -> bytes:
+        """The unit's current performance bank for ``entry``, verbatim."""
+        expected = banks.PERFORMANCES_PER_BANK * rec.PERFORMANCE_SIZE
+        raw = self.device.read_raw(entry.sysex, m.Function.ALL_PERFORMANCE_DUMP)
+        packet = m.parse(raw)
+        data = packet.data() if packet is not None else b""
+        if len(data) != expected:
+            raise ValueError(
+                f"{getattr(entry, 'label', entry)} answered {len(data)} "
+                f"bytes; a performance bank is {expected}"
+            )
+        return bytes(data)
+
+    def _remediation_write_done(
+        self,
+        result: Any,
+        failure: BaseException | None,
+        *,
+        bank: Any,
+        choice: Any,
+        banks_list: Optional[Sequence[Any]],
+        path: str,
+        sources: Mapping[str, deps.Source],
+    ) -> None:
+        """Book the remediation's landed banks, then continue the import."""
+        if failure is not None:
+            self.notify_status(f"remediation: {failure}", refused=True)
+            return
+        outcome, built = result
+        for entry in outcome.completed:
+            bank_id = str(getattr(entry.bank, "id", ""))
+            self._remember_remediated_bank(bank_id, built.get(bank_id), entry.result)
+        if not outcome.ok:
+            # Nothing goes on to the import's own write: the person sees
+            # which banks landed and which did not, and nothing retries
+            # silently.
+            self.notify_status(self._remediation_partial_status(outcome), refused=True)
+            return
+        answer = getattr(choice, "remediation", Remediation.NONE)
+        if answer is Remediation.GREEN_FIELD:
+            cleared = ", ".join(
+                self._bank_label(str(bank_id))
+                for bank_id in getattr(choice, "cleared_banks", ())
+            )
+            note = f"cleared {cleared} first (performances, patches, wave sequences)"
+        else:
+            counts = []
+            for bank_id, slots in getattr(choice, "init_banks", ()) or ():
+                counts.append(f"{len(slots)} in {self._bank_label(str(bank_id))}")
+            note = "set the affected performances to Init first: " + ", ".join(counts)
+        amended = replace(
+            choice,
+            remediation=Remediation.NONE,
+            cleared_banks=(),
+            init_banks=(),
+            remediation_note=note,
+        )
+        approval = self._mint_whole_bank_approval(bank, amended, banks_list, path)
+        if approval is None:
+            return
+        self._import_whole_bank_write(
+            bank,
+            replace(amended, approval=approval),
+            banks_list=banks_list,
+            path=path,
+        )
+
+    def _remediation_partial_status(self, outcome: MultiBankOutcome) -> str:
+        """One honest line for a remediation that stopped part way."""
+        parts = [f"remediation: {outcome.error}"]
+        written = "; ".join(
+            f"{getattr(entry.bank, 'label', entry.bank)} (verified; "
+            f"{self._counted(self._backup_count(entry.result), 'backup', 'backups')})"
+            for entry in outcome.completed
+        )
+        if written:
+            parts.append(f"written: {written}")
+        if outcome.failed_bank is not None:
+            parts.append(
+                f"failed or unverified (may have changed): "
+                f"{getattr(outcome.failed_bank, 'label', outcome.failed_bank)}"
+            )
+        not_written = ", ".join(
+            self._bank_label(str(getattr(bank, "id", bank)))
+            for bank in outcome.not_written
+        )
+        if not_written:
+            parts.append(f"not written: {not_written}")
+        return " — ".join(parts)
+
+    def _remember_remediated_bank(
+        self, bank_id: str, built: Any, result: Any = None
+    ) -> None:
+        """Update the session source and the cache for a remediated bank.
+
+        The app wrote the bank, so it knows what it holds now: for a
+        cleared bank that is the Init state for all three kinds; for an
+        Init-ed one, the performances with their slots set and the
+        patches and wave sequences exactly as they were. A cleared bank
+        must not keep old names in the browser.
+        """
+        if not bank_id or built is None:
+            return
+        if result is not None and hasattr(self, "_record_write"):
+            self._record_write(result)
+        perf_blob = bytes(getattr(built, "performances", b"") or b"")
+        perfs = [
+            perf_blob[i * rec.PERFORMANCE_SIZE : (i + 1) * rec.PERFORMANCE_SIZE]
+            for i in range(len(perf_blob) // rec.PERFORMANCE_SIZE)
+        ]
+        patch_blob = getattr(built, "patches", None)
+        ws_blob = getattr(built, "waveseq", None)
+        existing = self._sources.get(bank_id) or self._sources_with_store().get(bank_id)
+        if patch_blob is None:
+            patch_blob = (
+                b"".join(getattr(existing, "patches", []) or [])
+                if existing is not None
+                else b""
+            )
+        if ws_blob is None:
+            ws_blob = getattr(existing, "waveseq", None) if existing else None
+        patches = [
+            bytes(patch_blob)[i * rec.PATCH_SIZE : (i + 1) * rec.PATCH_SIZE]
+            for i in range(len(bytes(patch_blob)) // rec.PATCH_SIZE)
+        ]
+        self._sources[bank_id] = deps.Source(
+            scope_id=bank_id,
+            performances=perfs,
+            patches=patches,
+            waveseq=None if ws_blob is None else bytes(ws_blob),
+        )
+        if self._bankstore_dir is not None:
+            try:
+                bankstore.save(
+                    bank_id,
+                    performances=perf_blob or None,
+                    patches=bytes(patch_blob) or None,
+                    waveseq=None if ws_blob is None else bytes(ws_blob) or None,
+                    directory=self._bankstore_dir,
+                )
+            except OSError:
+                pass
+        self._refresh_written_bank(
+            bank_id,
+            SimpleNamespace(
+                performances=perf_blob,
+                patches=bytes(patch_blob) if patch_blob else b"",
+                waveseq=bytes(ws_blob) if ws_blob else b"",
+            ),
         )
 
     def _whole_write_work(
@@ -6583,51 +7528,76 @@ class KwsedApp(App[None]):
         choice: Any,
         banks_list: Optional[Sequence[Any]],
         path: str,
+        sources: Mapping[str, deps.Source],
+        companions_written: bool = False,
     ) -> bool:
         """Run what stands between this choice and its write, if anything.
 
-        Either the preflight question -- asked before anything is sent,
-        with cancel writing nothing at all -- or the patches-only
-        companion write handles the choice here. ``False`` says the
-        ordinary whole-bank write may proceed.
+        The preflight answer is already resolved by the time a write
+        reaches here: ``"both"`` runs the confirmed companions' own
+        approved writes, one per bank, and only then continues to the
+        target write that the plan's already-validated token covers;
+        ``"only"`` falls straight through. A choice that arrives without
+        an answer (a direct write call site) still gets the question
+        asked here, before anything is sent. The patches-only companion
+        write handles a companion choice. ``False`` says the ordinary
+        whole-bank write may proceed.
         """
-        named = self._preflight_companion(bank, choice, banks_list, path)
-        if named and banks_list is not None:
-            # Nothing has been sent: the question decides what travels.
-            self._ask_preflight(bank, choice, banks_list, path, named)
-            return True
+        preflight = str(getattr(choice, "preflight", "") or "")
+        if preflight == "both":
+            named = self._preflight_named_companions(bank, choice, banks_list, path)
+            if named and banks_list is not None and not companions_written:
+                # The remediation is done; the companions the answer
+                # confirmed go out next, each its own approved write, and
+                # the target write this frame already validated follows
+                # them.
+                def after_companions() -> None:
+                    self._whole_bank_write_continue(
+                        bank,
+                        choice,
+                        banks_list,
+                        path,
+                        sources,
+                        companions_written=True,
+                    )
+
+                self._preflight_companion_chain(
+                    bank, choice, banks_list, path, named, 0, [], after_companions
+                )
+                return True
+        elif not preflight:
+            named = self._preflight_companion(bank, choice, banks_list, path)
+            if named and banks_list is not None:
+                # Nothing has been sent: the question decides what travels.
+                self._ask_preflight(bank, choice, banks_list, path, named)
+                return True
         if self._companion_write_patches_only(choice):
             self._write_companion_patches_only(bank, choice, banks_list, path)
             return True
         return False
 
-    def _preflight_companion(
+    def _preflight_named_companions(
         self,
         bank: Any,
         choice: Any,
         banks_list: Optional[Sequence[Any]],
         path: str,
     ) -> Optional[List[Tuple[int, int, Any]]]:
-        """The companions a plain write should ask about before it runs.
+        """The companions a plain write's parts name, most-referenced first.
 
-        The question is asked when the choice comes from the import
-        screen's own write keys (ctrl+s or n, which carry
-        ``continue_pass``), the write is a plain one -- no overflow of its
-        own, nothing answered yet, no split session continuing -- and the
-        audit of the source bank shows parts naming writable banks that
-        the same file carries. Every such bank is listed, most-referenced
-        first, as ``(part count, file index, bank)``; a bank the parts
-        name but the file does not carry cannot be written here, so it is
-        not a question. The target being a named bank itself is not a
-        question either: those parts already point where they will play.
+        The audit of the source bank shows parts naming writable banks
+        that the same file carries. Every such bank is listed as ``(part
+        count, file index, bank)``; a bank the parts name but the file
+        does not carry cannot be written here, so it is not listed. The
+        target being a named bank itself is not listed either: those
+        parts already point where they will play. This is the one list
+        the preflight question, the green-field clear set and the
+        affected-performances analysis all read, so the three cannot name
+        different banks.
         """
         if not banks_list or not path:
             return None
         if not getattr(self, "is_running", False):
-            return None
-        if not bool(getattr(choice, "continue_pass", False)):
-            return None
-        if str(getattr(choice, "preflight", "") or ""):
             return None
         if not self._import_left_dangling(choice):
             return None
@@ -6655,6 +7625,30 @@ class KwsedApp(App[None]):
         # own order, so the list is stable from one visit to the next.
         named.sort(key=lambda item: (-item[0], item[1]))
         return named
+
+    def _preflight_companion(
+        self,
+        bank: Any,
+        choice: Any,
+        banks_list: Optional[Sequence[Any]],
+        path: str,
+    ) -> Optional[List[Tuple[int, int, Any]]]:
+        """The companions a plain write should ask about before it runs.
+
+        The question is asked when the choice comes from the import
+        screen's own write keys (ctrl+s or n, which carry
+        ``continue_pass``) and nothing has been answered yet. The
+        companions themselves come from
+        :meth:`_preflight_named_companions`, the one list every
+        affected-performances question reads.
+        """
+        if not banks_list or not path:
+            return None
+        if not bool(getattr(choice, "continue_pass", False)):
+            return None
+        if str(getattr(choice, "preflight", "") or ""):
+            return None
+        return self._preflight_named_companions(bank, choice, banks_list, path)
 
     def _ask_preflight(
         self,
@@ -6774,27 +7768,30 @@ class KwsedApp(App[None]):
         path: str,
         named: Sequence[Tuple[int, int, Any]],
     ) -> None:
-        """Carry out the preflight's answer; cancel writes nothing."""
+        """Carry out the preflight's answer; cancel writes nothing.
+
+        The answer is resolved before anything is written: "both" and
+        "only" go on to the affected-performances question, which is
+        asked (and answered, or cancelled) before the remediation's own
+        writes and the companions the "both" answer confirmed. A cancel
+        here has written nothing at all, and neither has the remediation.
+        """
         if answer == "both":
-            self._preflight_write_both(bank, choice, banks_list, path, named)
+            if not self._write_gate.armed:
+                self.notify_status("write gate is locked", refused=True)
+                return
+            both = replace(choice, preflight="both")
+            self._resolve_remediation_then_write(bank, both, banks_list, path)
             return
         if answer == "only":
             if not self._write_gate.armed:
                 self.notify_status("write gate is locked", refused=True)
                 return
             # The answer is what fixes the final plan: the approval for it
-            # is minted here, and the write boundary checks it like any
-            # other.
+            # is minted at the write boundary, after the remediation
+            # question has been answered too.
             only = replace(choice, preflight="only")
-            approval = self._mint_whole_bank_approval(bank, only, banks_list, path)
-            if approval is None:
-                return
-            self._import_whole_bank_write(
-                bank,
-                replace(only, approval=approval),
-                banks_list=banks_list,
-                path=path,
-            )
+            self._resolve_remediation_then_write(bank, only, banks_list, path)
             return
         # Cancel: no write at all. The screen comes back with the two
         # ways out of the dilemma it opened with.
@@ -6812,45 +7809,6 @@ class KwsedApp(App[None]):
             ),
         )
 
-    def _preflight_write_both(
-        self,
-        bank: Any,
-        choice: Any,
-        banks_list: Sequence[Any],
-        path: str,
-        named: Sequence[Tuple[int, int, Any]],
-    ) -> None:
-        """The preflight's first answer: every named companion, then the bank.
-
-        Each companion's patches and wave sequences go out first, in the
-        listed order, because a performance that names them must find
-        them already on the unit; their performances are never sent, so
-        those RAM banks keep whatever performances they hold. The bank's
-        own write follows only after every companion has landed, marked
-        so neither the preflight nor the post-write popup runs again. A
-        companion that fails stops the run: what was written and what was
-        not is reported, and the source bank is not sent. The ordered
-        banks are said here, before the chain starts (P4): one approved
-        token per physical write, in this order.
-        """
-        if not self._write_gate.armed:
-            self.notify_status("write gate is locked", refused=True)
-            return
-        order = [
-            f"{companion.label} (patches and wave sequences only)"
-            for _count, _index, companion in named
-        ]
-        order.append(
-            f"{getattr(bank, 'label', '') or 'the source bank'} (the whole bank)"
-        )
-        self.notify_status(
-            "import: the writes, in order — "
-            + "; ".join(order)
-            + "; each bank is backed up and verified, and needs its own "
-            "approval before it is sent"
-        )
-        self._preflight_companion_chain(bank, choice, banks_list, path, named, 0, [])
-
     def _preflight_companion_chain(
         self,
         bank: Any,
@@ -6860,30 +7818,45 @@ class KwsedApp(App[None]):
         named: Sequence[Tuple[int, int, Any]],
         index: int,
         completed: List[str],
+        then: Callable[[], None],
     ) -> None:
-        """Write companion ``index``, then the rest, then the source bank.
+        """Write companion ``index``, then the rest, then call ``then``.
 
         Each companion is its own fenced write, and its own approved one
         (P4): a token is minted for exactly that companion's write
         immediately before it runs, and the write validates and consumes
         it before any device I/O. ``completed`` carries the
         labels of the companions that already landed, so a later failure
-        can name exactly what succeeded and what was never written.
+        can name exactly what succeeded and what was never written. When
+        every companion has landed, ``then`` runs the plan's next write
+        -- the target's -- which the caller validates under its own
+        token.
+
+        The companions always go out after the remediation: the
+        affected-performances answer was resolved before this chain
+        started, and a green-field answer's clear set already names the
+        companions, so their patches land on a cleared bank when that was
+        the answer.
         """
         if index >= len(named):
-            # Every companion answered for: the source bank's own write is
-            # the "both" plan, approved by the answer just given.
-            both = replace(choice, preflight="both")
-            approval = self._mint_whole_bank_approval(bank, both, banks_list, path)
-            if approval is None:
-                return
-            self._import_whole_bank_write(
-                bank,
-                replace(both, approval=approval),
-                banks_list=banks_list,
-                path=path,
-            )
+            then()
             return
+        if index == 0:
+            # The ordered banks are said before the chain starts (P4): one
+            # approved token per physical write, in this order.
+            order = [
+                f"{companion.label} (patches and wave sequences only)"
+                for _count, _index, companion in named
+            ]
+            order.append(
+                f"{getattr(bank, 'label', '') or 'the source bank'} (the whole bank)"
+            )
+            self.notify_status(
+                "import: the writes, in order — "
+                + "; ".join(order)
+                + "; each bank is backed up and verified, and needs its own "
+                "approval before it is sent"
+            )
         _count, companion_index, companion = named[index]
         try:
             companion_entry = banks_list[companion_index]
@@ -6926,7 +7899,7 @@ class KwsedApp(App[None]):
         def after_companion() -> None:
             completed.append(companion.label)
             self._preflight_companion_chain(
-                bank, choice, banks_list, path, named, index + 1, completed
+                bank, choice, banks_list, path, named, index + 1, completed, then
             )
 
         self._write_companion_patches(
@@ -6938,6 +7911,7 @@ class KwsedApp(App[None]):
             path=path,
             mode=mode,
             pending_note=note,
+            choice=companion_choice,
         )
 
     def _companion_write_patches_only(self, choice: Any) -> bool:
@@ -6949,9 +7923,34 @@ class KwsedApp(App[None]):
         cache's, never a fresh reading of the unit. The import screen
         decided the same branch from the snapshot it was opened with, so
         the token it minted names the branch that actually runs.
+
+        One answer overrides the loaded copies, because it empties the
+        bank at the write boundary and both the mint and this check must
+        see the same branch: a green-field answer that clears the target
+        leaves every performance Init, and an init-affected answer that
+        set all of the target's slots to Init leaves none standing
+        either. On either, the whole-bank branch runs.
         """
         if not bool(getattr(choice, "companion_only", False)):
             return False
+        remediation = getattr(choice, "remediation", Remediation.NONE)
+        try:
+            target, _target_scope = self._resolve_whole_bank_target(choice)
+        except (LookupError, ValueError):
+            return False
+        target_id = str(getattr(target, "id", ""))
+        if remediation is Remediation.GREEN_FIELD and target_id in (
+            str(bank) for bank in getattr(choice, "cleared_banks", ()) or ()
+        ):
+            return False
+        if remediation is Remediation.INIT_AFFECTED:
+            for bank_id, slots in getattr(choice, "init_banks", ()) or ():
+                if (
+                    str(bank_id) == target_id
+                    and len({int(slot) for slot in slots})
+                    >= banks.PERFORMANCES_PER_BANK
+                ):
+                    return False
         bank_id = str(getattr(choice, "target_bank", "") or "")
         current = self._sources_with_store().get(bank_id)
         loaded: Optional[Sequence[Any]] = None
@@ -6971,7 +7970,9 @@ class KwsedApp(App[None]):
 
         The choice carries the token the screen minted for exactly this
         companion write; the write validates and consumes it itself,
-        before anything touches the unit.
+        before anything touches the unit. The choice also carries the
+        remediation answer the plan was minted under, when there is one,
+        so the token's second validation names the same answer.
         """
         try:
             companion, _companion_scope = self._resolve_whole_bank_target(choice)
@@ -6992,6 +7993,7 @@ class KwsedApp(App[None]):
             banks_list=banks_list if banks_list is not None else [bank],
             path=path,
             mode=getattr(choice, "mode", perfcopy.ImportMode.AS_IS),
+            choice=choice,
         )
 
     def _frozen_companion_sources(
@@ -7026,6 +8028,7 @@ class KwsedApp(App[None]):
         *,
         sources: Optional[Mapping[str, deps.Source]] = None,
         source: Optional[deps.Source] = None,
+        choice: Any = None,
     ) -> Optional[import_intent.WholeBankIntent]:
         """The intent one companion write must be approved for.
 
@@ -7036,6 +8039,13 @@ class KwsedApp(App[None]):
         bank's records travel as they are. The same shared builder every
         other whole-bank intent comes from, so a mint made anywhere
         against it and this check cannot spell one plan two ways.
+
+        ``choice`` carries the remediation answer the plan was minted
+        under, when there is one: a companion write the affected-
+        performances question was resolved for carries that answer in
+        its plan, and the token minted for it must name the same answer
+        here. A companion in a preflight chain carries none (its own
+        choice has no answer), which is the same as omitting ``choice``.
 
         ``sources`` and ``source`` are the frozen snapshot the write
         boundary took (P7c); given, the intent is planned from it, so the
@@ -7048,6 +8058,11 @@ class KwsedApp(App[None]):
         planned_source: Any = (
             source if source is not None else getattr(entry, "source", None)
         )
+        remediation_name, cleared_banks, init_banks = (
+            self._choice_remediation_fields(choice)
+            if choice is not None
+            else ("", (), ())
+        )
         try:
             return import_intent.build_intent(
                 source_id=f"{path}|{getattr(entry, 'scope', '')}",
@@ -7057,6 +8072,9 @@ class KwsedApp(App[None]):
                 target=companion,
                 mode=mode,
                 companion_only=True,
+                remediation=remediation_name,
+                cleared_banks=cleared_banks,
+                init_banks=init_banks,
             )
         except (IndexError, LookupError, ValueError, TypeError, AttributeError) as exc:
             self.notify_status(
@@ -7102,6 +8120,7 @@ class KwsedApp(App[None]):
         path: str,
         mode: Any = perfcopy.ImportMode.AS_IS,
         pending_note: str = "",
+        choice: Any = None,
     ) -> None:
         """Write one companion bank's patches and wave sequences only.
 
@@ -7152,6 +8171,7 @@ class KwsedApp(App[None]):
             mode,
             sources=intent_sources,
             source=frozen_entry,
+            choice=choice,
         )
         if intent is None:
             return
@@ -7399,22 +8419,16 @@ class KwsedApp(App[None]):
                 bank = banks_list[companion_index]
             except (IndexError, TypeError):
                 return
-            # The popup's answer is the companion write's confirmation: the
-            # approval for it is minted here, from the same file banks the
-            # popup described.
+            # The popup's answer is the companion write's confirmation --
+            # but the affected-performances question is resolved for it
+            # before anything is written (review item 3), exactly as an
+            # ``x`` write is. The approval for the amended plan is minted
+            # after that answer, at the write boundary.
             companion_choice = WholeBankChoice(
                 companion_index, companion.id, True, companion_only=True
             )
-            approval = self._mint_whole_bank_approval(
+            self._resolve_remediation_then_write(
                 bank, companion_choice, banks_list, path
-            )
-            if approval is None:
-                return
-            self._import_whole_bank_write(
-                bank,
-                replace(companion_choice, approval=approval),
-                banks_list=banks_list,
-                path=path,
             )
             return
         if answer == "repoint":
