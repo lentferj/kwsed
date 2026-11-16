@@ -7277,10 +7277,18 @@ class KwsedApp(App[None]):
         sequences, so a later check sees the bank as written.
         """
         existing = self._sources.get(companion.id)
+        if existing is None:
+            # The bank may not have been loaded in this session. The unit's
+            # performances were not touched by this write, so the cached
+            # copy is the right record; an empty list would make every
+            # performance in that bank look unloaded to the dependency
+            # graph (and only the performances would be wrong).
+            existing = self._sources_with_store().get(companion.id)
+        performances = list(getattr(existing, "performances", []) or [])
         patches_blob = b"".join(getattr(source, "patches", []) or [])
         self._sources[companion.id] = deps.Source(
             scope_id=companion.id,
-            performances=list(getattr(existing, "performances", []) or []),
+            performances=performances,
             patches=[
                 patches_blob[i * rec.PATCH_SIZE : (i + 1) * rec.PATCH_SIZE]
                 for i in range(len(patches_blob) // rec.PATCH_SIZE)

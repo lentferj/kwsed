@@ -6214,3 +6214,24 @@ async def test_whole_write_with_a_valid_approval_and_a_locked_gate_refuses(
         await _settle(pilot)
     assert calls == []
     assert any("write gate is locked" in s for s in statuses), statuses
+
+
+def test_a_companion_write_keeps_the_banks_performances_in_the_session(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """The session's copy keeps the performances a companion write never sent.
+
+    The write sends patches and wave sequences only, so the bank's
+    performances are still the unit's. When the bank was not loaded this
+    session, the cached copy is the record to keep: an empty list would
+    make every performance in it look unloaded to the dependency graph.
+    """
+    app = _make_app(tmp_path, bankstore_dir=str(tmp_path / "store"))
+    monkeypatch.setattr(bankstore, "save", lambda *a, **k: None)
+    cached = _make_bank(scope="RAM2", active_slots=[0])
+    app._sources_with_store = lambda: {"RAM2": cached.source}  # type: ignore[method-assign]
+    assert "RAM2" not in app._sources
+    app._remember_companion_patches(banks.bank("RAM2"), _two_bank_file()[1].source)
+    kept = app._sources["RAM2"]
+    assert len(kept.performances) == 50
+    assert not perfcopy.is_empty_performance(kept.performances[0])
