@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, Optional, cast
 from unittest.mock import patch
@@ -712,7 +713,12 @@ async def test_whole_unit_choice_armed(tmp_path: Any) -> None:
     app.notify_status = lambda msg, *a, **k: statuses.append(str(msg))  # type: ignore[method-assign]
 
     with patch.object(bankstore, "save", lambda *a, **k: None):
-        app._import_whole_bank_write(bank, WholeBankChoice(0, "RAM3", True))
+        app._import_whole_bank_write(
+            bank,
+            _approved(WholeBankChoice(0, "RAM3", True), bank),
+            banks_list=[bank],
+            path="one.syx",
+        )
 
     assert len(writes) == 1
     w = writes[0]
@@ -766,6 +772,56 @@ def _mixed_bank() -> Any:
     return bank
 
 
+def _approved(
+    choice: Any,
+    bank: Any,
+    banks_list: Any = None,
+    path: str = "one.syx",
+    pass_slots: Any = (),
+) -> Any:
+    """Mint the plan approval a whole-bank write carries (P3).
+
+    The same shared builder the import screen mints with
+    (``kwsed.import_intent.build_intent``), planned from the file banks
+    the write names -- so a direct ``_import_whole_bank_write`` call site
+    presents the approval the write boundary requires.
+    """
+    from kwsed import import_intent
+
+    file_banks = list(banks_list) if banks_list is not None else [bank]
+    sources: dict[str, Any] = {}
+    for entry in file_banks:
+        scope = getattr(entry, "scope", None)
+        source = getattr(entry, "source", None)
+        if isinstance(scope, str) and source is not None:
+            sources[scope] = source
+    sources[str(bank.scope)] = bank.source
+    target_scope = str(getattr(choice, "target_bank", "") or "") or "CARD"
+    try:
+        target = banks.bank(target_scope)
+    except LookupError:
+        if not target_scope.startswith("CARD/"):
+            raise
+        target = banks.bank("CARD")
+    intent = import_intent.build_intent(
+        source_id=f"{path}|{bank.scope}",
+        source_scope=str(bank.scope),
+        sources=sources,
+        source=bank.source,
+        target=target,
+        mode=getattr(choice, "mode", perfcopy.ImportMode.AS_IS),
+        overflow_kind=str(
+            getattr(choice, "overflow_kind", OVERFLOW_PATCHES) or OVERFLOW_PATCHES
+        ),
+        overflow_bank=str(getattr(choice, "overflow_bank", "") or ""),
+        preflight_answer=str(getattr(choice, "preflight", "") or ""),
+        session_id=str(getattr(choice, "session_key", "") or ""),
+        pass_slots=tuple(pass_slots),
+        companion_only=bool(getattr(choice, "companion_only", False)),
+    )
+    return replace(choice, approval=import_intent.new_approval(intent))
+
+
 def _armed_app(tmp_path: Any, monkeypatch: Any) -> tuple[Any, list[dict[str, Any]]]:
     """An app with an armed gate and a RAM 3 target, backups sandboxed.
 
@@ -811,7 +867,11 @@ async def test_whole_write_as_is_matches_relocate_bank(tmp_path: Any) -> None:
     with patch.object(bankstore, "save", lambda *a, **k: None):
         app._import_whole_bank_write(
             bank,
-            WholeBankChoice(0, "RAM3", True, perfcopy.ImportMode.AS_IS),
+            _approved(
+                WholeBankChoice(0, "RAM3", True, perfcopy.ImportMode.AS_IS), bank
+            ),
+            banks_list=[bank],
+            path="one.syx",
         )
 
     assert len(writes) == 1
@@ -870,7 +930,12 @@ async def test_whole_write_one_to_one_cleans_skipped_slots(
 
     app._import_whole_bank_write(
         bank,
-        WholeBankChoice(0, "RAM3", True, perfcopy.ImportMode.SELF_CONTAINED_1TO1),
+        _approved(
+            WholeBankChoice(0, "RAM3", True, perfcopy.ImportMode.SELF_CONTAINED_1TO1),
+            bank,
+        ),
+        banks_list=[bank],
+        path="one.syx",
     )
 
     written = _written_perfs(app.device)
@@ -911,7 +976,12 @@ async def test_whole_write_packed_compacts_non_contained_source(
 
     app._import_whole_bank_write(
         bank,
-        WholeBankChoice(0, "RAM3", True, perfcopy.ImportMode.SELF_CONTAINED_PACKED),
+        _approved(
+            WholeBankChoice(0, "RAM3", True, perfcopy.ImportMode.SELF_CONTAINED_PACKED),
+            bank,
+        ),
+        banks_list=[bank],
+        path="one.syx",
     )
 
     written = _written_perfs(app.device)
@@ -943,7 +1013,12 @@ async def test_whole_write_backs_up_in_every_mode(
     ):
         app, recorded = _armed_app(tmp_path, monkeypatch)
         bank = _mixed_bank()
-        app._import_whole_bank_write(bank, WholeBankChoice(0, "RAM3", True, mode))
+        app._import_whole_bank_write(
+            bank,
+            _approved(WholeBankChoice(0, "RAM3", True, mode), bank),
+            banks_list=[bank],
+            path="one.syx",
+        )
         assert len(recorded) == 1
         backup_path = recorded[-1].get("backup")
         assert isinstance(backup_path, str) and backup_path
@@ -1279,7 +1354,12 @@ async def test_write_failures_leave_sources(tmp_path: Any) -> None:
 
     # whole
     with patch.object(bankstore, "save", lambda *a, **k: None):
-        app._import_whole_bank_write(bank, WholeBankChoice(0, "RAM3", True))
+        app._import_whole_bank_write(
+            bank,
+            _approved(WholeBankChoice(0, "RAM3", True), bank),
+            banks_list=[bank],
+            path="one.syx",
+        )
     assert any("boom" in s or "import:" in s for s in statuses)
     # sources unchanged (RAM3 still original)
     assert app._sources["RAM3"] is target_source
@@ -1904,7 +1984,7 @@ async def test_spillover_is_one_fenced_write_to_the_audited_bank(
             WholeBankImportScreen(
                 path="two.syx", banks=file_banks, gate=app._write_gate
             ),
-            lambda picked: app._import_whole_bank_chosen(file_banks, picked),
+            lambda picked: app._import_whole_bank_chosen(file_banks, picked, "two.syx"),
         )
         await _settle(pilot)
         await pilot.press("x")
@@ -2019,8 +2099,12 @@ async def test_whole_write_to_hcard_scope_uses_slot_and_files_archive(
 ) -> None:
     """A CARD/07 write hits the one physical slot, filed under the archive."""
     app, writes, saved, _statuses = _card_write_app(tmp_path, monkeypatch, "CARD/07")
+    bank = _make_bank(scope="RAM1")
     app._import_whole_bank_write(
-        _make_bank(scope="RAM1"), WholeBankChoice(0, "CARD/07", True)
+        bank,
+        _approved(WholeBankChoice(0, "CARD/07", True), bank),
+        banks_list=[bank],
+        path="one.syx",
     )
     assert len(writes) == 1
     assert writes[0][0] == banks.bank("CARD").number
@@ -2036,8 +2120,12 @@ async def test_whole_write_to_other_hcard_scope_refuses(
     """The slot guard refuses a CARD/07 write while CARD/08 is inserted."""
     app, writes, saved, statuses = _card_write_app(tmp_path, monkeypatch, "CARD/08")
     app._sources.pop("CARD/07")
+    bank = _make_bank(scope="RAM1")
     app._import_whole_bank_write(
-        _make_bank(scope="RAM1"), WholeBankChoice(0, "CARD/07", True)
+        bank,
+        _approved(WholeBankChoice(0, "CARD/07", True), bank),
+        banks_list=[bank],
+        path="one.syx",
     )
     assert writes == []
     assert saved == {}
@@ -2251,11 +2339,14 @@ async def test_self_contained_sessions_are_independent(
     app.device.write_bank_bundle = fake_write
 
     def write(key: str) -> None:
+        choice = WholeBankChoice(
+            0, "RAM3", True, perfcopy.ImportMode.SELF_CONTAINED_PACKED, key, True
+        )
         app._import_whole_bank_write(
             bank,
-            WholeBankChoice(
-                0, "RAM3", True, perfcopy.ImportMode.SELF_CONTAINED_PACKED, key, True
-            ),
+            _approved(choice, bank),
+            banks_list=[bank],
+            path="one.syx",
         )
 
     write("session-one")
@@ -2368,7 +2459,14 @@ async def test_overflow_writes_the_ram_bank_first_then_the_target(
     bank = _mixed_bank()
     app._import_whole_bank_write(
         bank,
-        WholeBankChoice(0, "CARD", True, perfcopy.ImportMode.AS_IS, "", True, "RAM3"),
+        _approved(
+            WholeBankChoice(
+                0, "CARD", True, perfcopy.ImportMode.AS_IS, "", True, "RAM3"
+            ),
+            bank,
+        ),
+        banks_list=[bank],
+        path="one.syx",
     )
 
     assert [number for number, _k in writes] == [
@@ -2436,7 +2534,10 @@ async def test_as_is_write_ends_in_a_popup_for_the_carried_companion(
     async with app.run_test() as pilot:
         await pilot.pause()
         app._import_whole_bank_write(
-            file_banks[0], choice, banks_list=file_banks, path="two.syx"
+            file_banks[0],
+            _approved(choice, file_banks[0], file_banks, "two.syx"),
+            banks_list=file_banks,
+            path="two.syx",
         )
         popup = None
         for _ in range(100):
@@ -2476,7 +2577,12 @@ async def test_the_popup_refusal_leaves_everything_alone(
         await pilot.pause()
         app._import_whole_bank_write(
             file_banks[0],
-            WholeBankChoice(0, "RAM3", True, perfcopy.ImportMode.AS_IS, "s", True),
+            _approved(
+                WholeBankChoice(0, "RAM3", True, perfcopy.ImportMode.AS_IS, "s", True),
+                file_banks[0],
+                file_banks,
+                "two.syx",
+            ),
             banks_list=file_banks,
             path="two.syx",
         )
@@ -2508,7 +2614,12 @@ async def test_the_popup_writes_the_companion_bank_on_x(
         await pilot.pause()
         app._import_whole_bank_write(
             file_banks[0],
-            WholeBankChoice(0, "RAM3", True, perfcopy.ImportMode.AS_IS, "s", True),
+            _approved(
+                WholeBankChoice(0, "RAM3", True, perfcopy.ImportMode.AS_IS, "s", True),
+                file_banks[0],
+                file_banks,
+                "two.syx",
+            ),
             banks_list=file_banks,
             path="two.syx",
         )
@@ -2562,7 +2673,10 @@ async def test_patches_only_overflow_write_reopens_nothing(
     async with app.run_test() as pilot:
         await pilot.pause()
         app._import_whole_bank_write(
-            file_banks[0], choice, banks_list=file_banks, path="two.syx"
+            file_banks[0],
+            _approved(choice, file_banks[0], file_banks, "two.syx"),
+            banks_list=file_banks,
+            path="two.syx",
         )
         await _settle(pilot, times=60)
     # The overflow bank went out first, then the target; no screen returned.
@@ -2583,7 +2697,12 @@ async def test_as_is_write_of_a_one_bank_file_reopens_nothing(
     )
     async with app.run_test() as pilot:
         await pilot.pause()
-        app._import_whole_bank_write(bank, choice, banks_list=[bank], path="one.syx")
+        app._import_whole_bank_write(
+            bank,
+            _approved(choice, bank, [bank], "one.syx"),
+            banks_list=[bank],
+            path="one.syx",
+        )
         await _settle(pilot, times=60)
     assert app.device.bundle_write_count == 1
     assert not any(isinstance(s, WholeBankImportScreen) for s in app.screen_stack)
@@ -2671,16 +2790,23 @@ async def test_self_contained_split_writes_each_bank_once_with_its_own_backup(
 
     app._import_whole_bank_write(
         bank,
-        WholeBankChoice(
-            0,
-            "RAM3",
-            True,
-            perfcopy.ImportMode.AS_IS,
-            "",
-            True,
-            "RAM2",
-            "self_contained",
+        _approved(
+            WholeBankChoice(
+                0,
+                "RAM3",
+                True,
+                perfcopy.ImportMode.AS_IS,
+                "",
+                True,
+                "RAM2",
+                "self_contained",
+            ),
+            bank,
+            file_banks,
+            "split.syx",
         ),
+        banks_list=file_banks,
+        path="split.syx",
     )
 
     # The statement before the write says what each bank will receive.
@@ -2803,23 +2929,31 @@ async def test_self_contained_split_refusal_at_the_app_writes_nothing(
     app.notify_status = lambda msg, *a, **k: statuses.append(str(msg))
     monkeypatch.setattr(bankstore, "save", lambda *a, **k: None)
 
+    multipass = _multipass_bank()
+    multipass_banks = [multipass]
+    choice = WholeBankChoice(
+        0,
+        "RAM3",
+        True,
+        perfcopy.ImportMode.AS_IS,
+        "",
+        True,
+        "RAM2",
+        "self_contained",
+    )
+    # The plan cannot be approved at all: the external share names patches
+    # of a bank the file does not carry, so the planners refuse it and no
+    # approval exists to present.
+    with pytest.raises(ValueError):
+        _approved(choice, multipass, multipass_banks, "big.syx")
     app._import_whole_bank_write(
-        _multipass_bank(),
-        WholeBankChoice(
-            0,
-            "RAM3",
-            True,
-            perfcopy.ImportMode.AS_IS,
-            "",
-            True,
-            "RAM2",
-            "self_contained",
-        ),
+        multipass, choice, banks_list=multipass_banks, path="big.syx"
     )
 
     assert app.device.bundle_write_count == 0
-    assert any("self-contained split does not fit" in s for s in statuses), statuses
-    assert any("need 2 banks" in s for s in statuses), statuses
+    # The plan cannot be approved, so the choice arrives without one and
+    # the write boundary refuses it before anything else runs.
+    assert any("no plan approval" in s for s in statuses), statuses
 
 
 def _pack_source() -> Any:
@@ -3124,7 +3258,10 @@ async def test_split_continuation_requires_the_write_gate(
     async with app.run_test() as pilot:
         await pilot.pause()
         app._import_whole_bank_write(
-            file_banks[0], choice, banks_list=file_banks, path="three.syx"
+            file_banks[0],
+            _approved(choice, file_banks[0], file_banks, "three.syx"),
+            banks_list=file_banks,
+            path="three.syx",
         )
         await _wait_for_writes(app, pilot, 2)
         await _settle(pilot)
@@ -3370,7 +3507,10 @@ async def test_cards_only_continuation_requires_the_write_gate(
     async with app.run_test() as pilot:
         await pilot.pause()
         app._import_whole_bank_write(
-            file_banks[0], choice, banks_list=file_banks, path="cards.syx"
+            file_banks[0],
+            _approved(choice, file_banks[0], file_banks, "cards.syx"),
+            banks_list=file_banks,
+            path="cards.syx",
         )
         await _wait_for_writes(app, pilot, 1)
         await _settle(pilot)
@@ -3646,7 +3786,10 @@ async def test_cards_only_choice_with_a_ram_target_is_refused(
     async with app.run_test() as pilot:
         await pilot.pause()
         app._import_whole_bank_write(
-            file_banks[0], choice, banks_list=file_banks, path="cards.syx"
+            file_banks[0],
+            _approved(choice, file_banks[0], file_banks, "cards.syx"),
+            banks_list=file_banks,
+            path="cards.syx",
         )
         await _settle(pilot)
         assert app.device.bundle_write_count == 0
@@ -3701,7 +3844,12 @@ async def test_the_offer_compares_against_the_unit_when_it_has_the_bank(
         await pilot.pause()
         app._import_whole_bank_write(
             file_banks[0],
-            WholeBankChoice(0, "RAM3", True, perfcopy.ImportMode.AS_IS, "s", True),
+            _approved(
+                WholeBankChoice(0, "RAM3", True, perfcopy.ImportMode.AS_IS, "s", True),
+                file_banks[0],
+                file_banks,
+                "two.syx",
+            ),
             banks_list=file_banks,
             path="two.syx",
         )
@@ -4456,7 +4604,12 @@ async def test_overflow_failure_on_the_target_keeps_the_overflow_bank(
     )
     async with app.run_test() as pilot:
         await pilot.pause()
-        app._import_whole_bank_write(bank, choice, banks_list=[bank], path="two.syx")
+        app._import_whole_bank_write(
+            bank,
+            _approved(choice, bank, [bank], "two.syx"),
+            banks_list=[bank],
+            path="two.syx",
+        )
         await _await_partial(app, pilot)
         await _settle(pilot)
 
@@ -4487,7 +4640,13 @@ async def test_overflow_failure_on_the_target_keeps_the_overflow_bank(
 
         # The retry: the target only, and the status says so up front.
         fails["armed"] = False
-        app._import_whole_bank_write(bank, choice, banks_list=[bank], path="two.syx")
+        app._import_whole_bank_write(
+            bank,
+            # A retry is a new approved request: the first token was spent.
+            _approved(choice, bank, [bank], "two.syx"),
+            banks_list=[bank],
+            path="two.syx",
+        )
         await _wait_for_writes(app, pilot, 2)
         await _settle(pilot)
 
@@ -4538,7 +4697,10 @@ async def test_split_failure_keeps_the_landed_groups_and_n_writes_the_rest(
     async with app.run_test() as pilot:
         await pilot.pause()
         app._import_whole_bank_write(
-            bank, choice, banks_list=file_banks, path="three.syx"
+            bank,
+            _approved(choice, bank, file_banks, "three.syx"),
+            banks_list=file_banks,
+            path="three.syx",
         )
         await _await_partial(app, pilot)
         await _settle(pilot)
@@ -4609,7 +4771,12 @@ async def test_overflow_failure_before_the_first_write_records_nothing(
         "RAM3",
         OVERFLOW_PATCHES,
     )
-    app._import_whole_bank_write(bank, choice, banks_list=[bank], path="two.syx")
+    app._import_whole_bank_write(
+        bank,
+        _approved(choice, bank, [bank], "two.syx"),
+        banks_list=[bank],
+        path="two.syx",
+    )
 
     assert calls == [ram3_no]
     assert app.device.bundle_write_count == 0
@@ -4657,7 +4824,12 @@ async def test_overflow_read_back_mismatch_on_the_target_is_a_failure(
     )
     async with app.run_test() as pilot:
         await pilot.pause()
-        app._import_whole_bank_write(bank, choice, banks_list=[bank], path="two.syx")
+        app._import_whole_bank_write(
+            bank,
+            _approved(choice, bank, [bank], "two.syx"),
+            banks_list=[bank],
+            path="two.syx",
+        )
         await _await_partial(app, pilot)
         await _settle(pilot)
 
@@ -4706,7 +4878,12 @@ async def test_overflow_success_keeps_today_s_message_and_one_record_per_bank(
     )
     async with app.run_test() as pilot:
         await pilot.pause()
-        app._import_whole_bank_write(bank, choice, banks_list=[bank], path="two.syx")
+        app._import_whole_bank_write(
+            bank,
+            _approved(choice, bank, [bank], "two.syx"),
+            banks_list=[bank],
+            path="two.syx",
+        )
         await _wait_for_writes(app, pilot, 2)
         await _settle(pilot)
 
@@ -4766,7 +4943,12 @@ async def test_unchanged_bundle_says_already_matches_and_records_once(
     app.device.write_bank_bundle = unchanged_write
     bank = _mixed_bank()
     with patch.object(bankstore, "save", lambda *a, **k: None):
-        app._import_whole_bank_write(bank, WholeBankChoice(0, "RAM3", True))
+        app._import_whole_bank_write(
+            bank,
+            _approved(WholeBankChoice(0, "RAM3", True), bank),
+            banks_list=[bank],
+            path="one.syx",
+        )
 
     assert calls == [1]  # the fence still read the unit and backed it up
     assert app.device.bundle_write_count == 0
@@ -4794,7 +4976,12 @@ async def test_changed_bundle_keeps_today_s_imported_message(
     app.device.write_bank_bundle = changed_write
     bank = _mixed_bank()
     with patch.object(bankstore, "save", lambda *a, **k: None):
-        app._import_whole_bank_write(bank, WholeBankChoice(0, "RAM3", True))
+        app._import_whole_bank_write(
+            bank,
+            _approved(WholeBankChoice(0, "RAM3", True), bank),
+            banks_list=[bank],
+            path="one.syx",
+        )
 
     closing = statuses[-1]
     assert closing.startswith("imported Bank RAM1 into RAM 3: ")
@@ -4826,7 +5013,12 @@ async def test_plain_write_read_back_mismatch_is_a_failure(
     before = app._sources["RAM3"]
     bank = _mixed_bank()
     with patch.object(bankstore, "save", lambda *a, **k: None):
-        app._import_whole_bank_write(bank, WholeBankChoice(0, "RAM3", True))
+        app._import_whole_bank_write(
+            bank,
+            _approved(WholeBankChoice(0, "RAM3", True), bank),
+            banks_list=[bank],
+            path="one.syx",
+        )
 
     closing = statuses[-1]
     assert closing.startswith("import: read-back mismatch: performance 4 differs")
@@ -4956,3 +5148,238 @@ async def test_armed_gate_with_an_unchanged_plan_writes(
         assert app._write_gate.armed
         assert screen._armed_fingerprint == screen._plan_fingerprint()
     assert len(recorded) == 1
+
+
+# ---------------------------------------------------------------------------
+# The write boundary: every unit write carries a one-shot plan approval
+# that matches the plan it will execute (P3).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_whole_write_without_an_approval_touches_nothing(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """A unit write without a plan approval is refused before anything runs."""
+    from kws import backup as _backup
+
+    app, recorded = _armed_app(tmp_path, monkeypatch)
+    backup_dir = str(tmp_path / "backups")
+    os.makedirs(backup_dir, exist_ok=True)
+    monkeypatch.setattr(_backup, "default_dir", lambda root=None: backup_dir)
+    saves: list[Any] = []
+    monkeypatch.setattr(bankstore, "save", lambda *a, **k: saves.append(k))
+    calls: list[Any] = []
+
+    def fake_write(*a: Any, **k: Any) -> dict[str, Any]:
+        calls.append(1)
+        return {"verified": True}
+
+    app.device.write_bank_bundle = fake_write
+    statuses: list[str] = []
+    app.notify_status = lambda msg, *a, **k: statuses.append(str(msg))
+    bank = _mixed_bank()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._import_whole_bank_write(
+            bank, WholeBankChoice(0, "RAM3", True), banks_list=[bank], path="one.syx"
+        )
+        await _settle(pilot)
+    assert calls == []
+    assert saves == []
+    assert recorded == []
+    assert any("no plan approval" in s for s in statuses), statuses
+
+
+@pytest.mark.asyncio
+async def test_whole_write_without_the_file_banks_touches_nothing(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """Without the file's banks the approval cannot be checked: refuse."""
+    from kws import backup as _backup
+
+    app, recorded = _armed_app(tmp_path, monkeypatch)
+    backup_dir = str(tmp_path / "backups")
+    os.makedirs(backup_dir, exist_ok=True)
+    monkeypatch.setattr(_backup, "default_dir", lambda root=None: backup_dir)
+    monkeypatch.setattr(bankstore, "save", lambda *a, **k: None)
+    calls: list[Any] = []
+
+    def fake_write(*a: Any, **k: Any) -> dict[str, Any]:
+        calls.append(1)
+        return {"verified": True}
+
+    app.device.write_bank_bundle = fake_write
+    statuses: list[str] = []
+    app.notify_status = lambda msg, *a, **k: statuses.append(str(msg))
+    bank = _mixed_bank()
+    approved = _approved(WholeBankChoice(0, "RAM3", True), bank)
+    assert approved.approval is not None
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._import_whole_bank_write(bank, approved, banks_list=None, path="one.syx")
+        await _settle(pilot)
+    assert calls == []
+    assert recorded == []
+    # A refused write spends nothing: the nonce is still unconsumed.
+    assert approved.approval.nonce not in app._consumed_plan_nonces
+    assert any("cannot be checked" in s for s in statuses), statuses
+
+
+@pytest.mark.asyncio
+async def test_whole_write_with_a_foreign_approval_is_refused(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """An approval minted for a different plan does not authorize this write."""
+    from kws import backup as _backup
+
+    app, recorded = _armed_app(tmp_path, monkeypatch)
+    backup_dir = str(tmp_path / "backups")
+    os.makedirs(backup_dir, exist_ok=True)
+    monkeypatch.setattr(_backup, "default_dir", lambda root=None: backup_dir)
+    monkeypatch.setattr(bankstore, "save", lambda *a, **k: None)
+    calls: list[Any] = []
+
+    def fake_write(*a: Any, **k: Any) -> dict[str, Any]:
+        calls.append(1)
+        return {"verified": True}
+
+    app.device.write_bank_bundle = fake_write
+    statuses: list[str] = []
+    app.notify_status = lambda msg, *a, **k: statuses.append(str(msg))
+    bank = _mixed_bank()
+    # The token was minted for a packed-mode plan into RAM 2; the write
+    # asks for an as-is plan into RAM 3.
+    foreign = _approved(
+        WholeBankChoice(0, "RAM2", True, perfcopy.ImportMode.SELF_CONTAINED_PACKED),
+        bank,
+    )
+    assert foreign.approval is not None
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._import_whole_bank_write(
+            bank,
+            WholeBankChoice(0, "RAM3", True, approval=foreign.approval),
+            banks_list=[bank],
+            path="one.syx",
+        )
+        await _settle(pilot)
+    assert calls == []
+    assert recorded == []
+    assert foreign.approval.nonce not in app._consumed_plan_nonces
+    assert any("does not match" in s for s in statuses), statuses
+
+
+@pytest.mark.asyncio
+async def test_whole_write_approval_nonce_is_one_shot(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """The first write spends the approval; a replay is refused."""
+    from kws import backup as _backup
+
+    app, recorded = _armed_app(tmp_path, monkeypatch)
+    backup_dir = str(tmp_path / "backups")
+    os.makedirs(backup_dir, exist_ok=True)
+    monkeypatch.setattr(_backup, "default_dir", lambda root=None: backup_dir)
+    monkeypatch.setattr(bankstore, "save", lambda *a, **k: None)
+    calls: list[Any] = []
+
+    def fake_write(*a: Any, **k: Any) -> dict[str, Any]:
+        calls.append(1)
+        return {"verified": True}
+
+    app.device.write_bank_bundle = fake_write
+    statuses: list[str] = []
+    app.notify_status = lambda msg, *a, **k: statuses.append(str(msg))
+    bank = _mixed_bank()
+    first = _approved(WholeBankChoice(0, "RAM3", True), bank)
+    assert first.approval is not None
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._import_whole_bank_write(bank, first, banks_list=[bank], path="one.syx")
+        await _wait_for_writes(app, pilot, 1)
+        await _settle(pilot)
+        assert calls == [1]
+        assert len(recorded) == 1
+        assert first.approval.nonce in app._consumed_plan_nonces
+
+        replay = WholeBankChoice(0, "RAM3", True, approval=first.approval)
+        app._import_whole_bank_write(bank, replay, banks_list=[bank], path="one.syx")
+        await _settle(pilot)
+        assert calls == [1]
+        assert len(recorded) == 1
+        assert any("already used" in s for s in statuses), statuses
+
+
+@pytest.mark.asyncio
+async def test_whole_write_with_a_valid_approval_matches_relocate_bank(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """A fresh exact approval writes, byte-identical to relocate_bank."""
+    from kws import backup as _backup
+
+    app, recorded = _armed_app(tmp_path, monkeypatch)
+    backup_dir = str(tmp_path / "backups")
+    os.makedirs(backup_dir, exist_ok=True)
+    monkeypatch.setattr(_backup, "default_dir", lambda root=None: backup_dir)
+    monkeypatch.setattr(bankstore, "save", lambda *a, **k: None)
+    writes: list[dict[str, Any]] = []
+
+    def fake_write(*a: Any, **k: Any) -> dict[str, Any]:
+        writes.append(dict(k))
+        return {"verified": True}
+
+    app.device.write_bank_bundle = fake_write
+    bank = _mixed_bank()
+    approved = _approved(
+        WholeBankChoice(0, "RAM3", True, perfcopy.ImportMode.AS_IS), bank
+    )
+    assert approved.approval is not None
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._import_whole_bank_write(bank, approved, banks_list=[bank], path="one.syx")
+        await _wait_for_writes(app, pilot, 1)
+        await _settle(pilot)
+    assert len(writes) == 1
+    expected = perfcopy.relocate_bank(bank.source, banks.bank("RAM3"))
+    assert writes[0]["performances"] == expected.performances
+    assert writes[0]["patches"] == expected.patches
+    assert writes[0]["waveseq"] == expected.waveseq
+    assert len(recorded) == 1
+    assert approved.approval.nonce in app._consumed_plan_nonces
+
+
+@pytest.mark.asyncio
+async def test_whole_write_with_a_valid_approval_and_a_locked_gate_refuses(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """The gate and the approval are both required: either alone refuses."""
+    from kws import backup as _backup
+
+    app = _make_app(tmp_path, bankstore_dir=str(tmp_path / "store"))
+    app._backup_dir = str(tmp_path / "backups")
+    os.makedirs(app._backup_dir, exist_ok=True)
+    monkeypatch.setattr(_backup, "default_dir", lambda root=None: app._backup_dir)
+    monkeypatch.setattr(bankstore, "save", lambda *a, **k: None)
+    app._write_gate = EditGate(armed=False)
+    calls: list[Any] = []
+
+    def fake_write(*a: Any, **k: Any) -> dict[str, Any]:
+        calls.append(1)
+        return {"verified": True}
+
+    app.device.write_bank_bundle = fake_write
+    statuses: list[str] = []
+    app.notify_status = lambda msg, *a, **k: statuses.append(str(msg))  # type: ignore[method-assign]
+    bank = _mixed_bank()
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app._import_whole_bank_write(
+            bank,
+            _approved(WholeBankChoice(0, "RAM3", True), bank),
+            banks_list=[bank],
+            path="one.syx",
+        )
+        await _settle(pilot)
+    assert calls == []
+    assert any("write gate is locked" in s for s in statuses), statuses

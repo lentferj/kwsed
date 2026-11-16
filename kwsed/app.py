@@ -109,6 +109,7 @@ from kwsed.import_bank import (
     _entry_bank,
     _is_empty_performance,
 )
+from kwsed import import_intent
 from kwsed.import_single import SingleImportScreen
 from kwsed.import_source import (
     SourceEntry,
@@ -3051,6 +3052,11 @@ class KwsedApp(App[None]):
         #: session ("path|source scope"): which source slots earlier passes
         #: wrote into which target. A later `n` pass offers what is left.
         self._import_passes: Dict[str, Dict[str, Any]] = {}
+        #: One-shot plan-approval nonces already spent (plan P3). A whole
+        #: -bank write consumes its approval's nonce on the main thread
+        #: before the device worker starts; a second use of the same
+        #: approval is refused before anything touches the unit again.
+        self._consumed_plan_nonces: Set[str] = set()
         self._active_physical = (
             _physical.active(physical_path) if physical_path else None
         )
@@ -5576,6 +5582,180 @@ class KwsedApp(App[None]):
                 target_source = self._read_source_offline(target.id)
         return target_source
 
+    def _whole_bank_intent_sources(
+        self, banks_list: Sequence[Any]
+    ) -> Dict[str, deps.Source]:
+        """The file's own sources, keyed by scope: the map the plan showed.
+
+        The approval describes a plan built from the file's banks and
+        nothing else -- the import screen's own source map -- so the app
+        rebuilds it from exactly those sources, and the write is planned
+        from them too. A cache entry that was never on screen must not
+        change what was approved, and must not change what is written.
+        """
+        sources: Dict[str, deps.Source] = {}
+        for entry in banks_list:
+            scope = getattr(entry, "scope", None)
+            source = getattr(entry, "source", None)
+            if isinstance(scope, str) and source is not None:
+                sources[scope] = source
+        return sources
+
+    def _intent_pass_slots(
+        self,
+        choice: Any,
+        sources: Mapping[str, deps.Source],
+        source_scope: str,
+    ) -> Tuple[int, ...]:
+        """The source slots this visit's write carries, as the screen minted.
+
+        The same derivation every screen dismissal does: a split
+        session's ``n`` pass carries the split's remainder; a
+        self-contained plain write carries the contained slots no earlier
+        pass has written; an as-is write or a first pass carries no pass
+        slots at all -- the whole plan is the write.
+        """
+        mode = getattr(choice, "mode", perfcopy.ImportMode.AS_IS)
+        session_key = str(getattr(choice, "session_key", "") or "")
+        remainder = self._split_pass_remainder(session_key) if session_key else []
+        if (
+            remainder
+            and self._split_pass_kind(session_key) in ("split", OVERFLOW_CARDS_ONLY)
+            and str(getattr(choice, "overflow_kind", "") or "")
+            == OVERFLOW_SELF_CONTAINED
+        ):
+            return tuple(remainder)
+        written = self._import_pass_written(session_key)
+        if mode is perfcopy.ImportMode.AS_IS or not written:
+            return ()
+        from kws import containment
+
+        audit = containment.audit_containment(sources, source_scope)
+        return tuple(containment.remaining_performances(audit, set(written)))
+
+    def _whole_bank_intent(
+        self,
+        bank: Any,
+        choice: Any,
+        banks_list: Optional[Sequence[Any]],
+        path: str,
+    ) -> Optional[Tuple[import_intent.WholeBankIntent, Dict[str, deps.Source]]]:
+        """Check the choice's plan approval before anything can touch the unit.
+
+        The import screen minted a one-shot approval for the exact plan it
+        showed; this is where the app holds it against the same plan,
+        rebuilt from the same file banks with the same planners. A missing
+        token, a missing file, a plan the planners refuse, a fingerprint
+        that does not match, or a token already spent refuses here --
+        before any device read, backup or write, and before the preflight
+        question or the overflow planning runs. The nonce is consumed at
+        the same point, on the main thread: a companion-only write starts
+        its own worker inside the deferred step, so validation is the one
+        place every whole-bank write passes through.
+        """
+        approval = getattr(choice, "approval", None)
+        if approval is None:
+            self.notify_status(
+                "import: no plan approval for this write; approve it on "
+                "the import screen first",
+                refused=True,
+            )
+            return None
+        if banks_list is None:
+            self.notify_status(
+                "import: the plan's file banks are gone; the approval "
+                "cannot be checked",
+                refused=True,
+            )
+            return None
+        sources = self._whole_bank_intent_sources(banks_list)
+        try:
+            target, _target_scope = self._resolve_whole_bank_target(choice)
+            intent = import_intent.build_intent(
+                source_id=f"{path}|{bank.scope}",
+                source_scope=str(bank.scope),
+                sources=sources,
+                source=bank.source,
+                target=target,
+                mode=getattr(choice, "mode", perfcopy.ImportMode.AS_IS),
+                overflow_kind=str(
+                    getattr(choice, "overflow_kind", OVERFLOW_PATCHES)
+                    or OVERFLOW_PATCHES
+                ),
+                overflow_bank=str(getattr(choice, "overflow_bank", "") or ""),
+                preflight_answer=str(getattr(choice, "preflight", "") or ""),
+                session_id=str(getattr(choice, "session_key", "") or ""),
+                pass_slots=self._intent_pass_slots(choice, sources, str(bank.scope)),
+                companion_only=bool(getattr(choice, "companion_only", False)),
+            )
+        except (IndexError, LookupError, ValueError, TypeError, AttributeError) as exc:
+            self.notify_status(
+                f"import: this write cannot be planned: {exc}", refused=True
+            )
+            return None
+        if not import_intent.approval_matches(approval, intent):
+            self.notify_status(
+                "import: the plan approval does not match this write",
+                refused=True,
+            )
+            return None
+        if approval.nonce in self._consumed_plan_nonces:
+            self.notify_status(
+                "import: this plan approval was already used", refused=True
+            )
+            return None
+        self._consumed_plan_nonces.add(approval.nonce)
+        return intent, sources
+
+    def _mint_whole_bank_approval(
+        self,
+        bank: Any,
+        choice: Any,
+        banks_list: Optional[Sequence[Any]],
+        path: str,
+    ) -> Optional[import_intent.PlanApproval]:
+        """Mint the approval an answer given after the screen just confirmed.
+
+        The screen mints for the choice it dismisses with. The preflight
+        question and the dangling-reference popup are answered
+        afterwards, and the answer is what fixes the final plan, so the
+        app mints its one-shot approval for the amended choice here --
+        from the same file banks, through the same shared builder. A plan
+        the planners refuse mints nothing and says why.
+        """
+        if banks_list is None:
+            self.notify_status(
+                "import: the plan's file banks are gone; the approval cannot be minted",
+                refused=True,
+            )
+            return None
+        sources = self._whole_bank_intent_sources(banks_list)
+        try:
+            target, _target_scope = self._resolve_whole_bank_target(choice)
+            intent = import_intent.build_intent(
+                source_id=f"{path}|{bank.scope}",
+                source_scope=str(bank.scope),
+                sources=sources,
+                source=bank.source,
+                target=target,
+                mode=getattr(choice, "mode", perfcopy.ImportMode.AS_IS),
+                overflow_kind=str(
+                    getattr(choice, "overflow_kind", OVERFLOW_PATCHES)
+                    or OVERFLOW_PATCHES
+                ),
+                overflow_bank=str(getattr(choice, "overflow_bank", "") or ""),
+                preflight_answer=str(getattr(choice, "preflight", "") or ""),
+                session_id=str(getattr(choice, "session_key", "") or ""),
+                pass_slots=self._intent_pass_slots(choice, sources, str(bank.scope)),
+                companion_only=bool(getattr(choice, "companion_only", False)),
+            )
+        except (IndexError, LookupError, ValueError, TypeError, AttributeError) as exc:
+            self.notify_status(
+                f"import: this write cannot be planned: {exc}", refused=True
+            )
+            return None
+        return import_intent.new_approval(intent)
+
     def _import_whole_bank_write(
         self,
         bank: Any,
@@ -5587,6 +5767,10 @@ class KwsedApp(App[None]):
         if not self._write_gate.armed:
             self.notify_status("write gate is locked", refused=True)
             return
+        intent_and_sources = self._whole_bank_intent(bank, choice, banks_list, path)
+        if intent_and_sources is None:
+            return
+        _intent, sources = intent_and_sources
         if self._deferred_companion_step(bank, choice, banks_list, path):
             return
         from kws import banks as _banks
@@ -5602,7 +5786,8 @@ class KwsedApp(App[None]):
             except ValueError as exc:
                 self.notify_status(str(exc), refused=True)
                 return
-        sources = self._sources_with_store()
+        # The write is planned from the same file sources the approval
+        # was checked against: what was approved is what will be sent.
         label = getattr(bank, "label", "")
         mode = getattr(choice, "mode", perfcopy.ImportMode.AS_IS)
         # Only a pass flow (ctrl+s / n) carries a session key. Companion
@@ -6390,9 +6575,16 @@ class KwsedApp(App[None]):
             if not self._write_gate.armed:
                 self.notify_status("write gate is locked", refused=True)
                 return
+            # The answer is what fixes the final plan: the approval for it
+            # is minted here, and the write boundary checks it like any
+            # other.
+            only = replace(choice, preflight="only")
+            approval = self._mint_whole_bank_approval(bank, only, banks_list, path)
+            if approval is None:
+                return
             self._import_whole_bank_write(
                 bank,
-                replace(choice, preflight="only"),
+                replace(only, approval=approval),
                 banks_list=banks_list,
                 path=path,
             )
@@ -6454,9 +6646,15 @@ class KwsedApp(App[None]):
         can name exactly what succeeded and what was never written.
         """
         if index >= len(named):
+            # Every companion answered for: the source bank's own write is
+            # the "both" plan, approved by the answer just given.
+            both = replace(choice, preflight="both")
+            approval = self._mint_whole_bank_approval(bank, both, banks_list, path)
+            if approval is None:
+                return
             self._import_whole_bank_write(
                 bank,
-                replace(choice, preflight="both"),
+                replace(both, approval=approval),
                 banks_list=banks_list,
                 path=path,
             )
@@ -6776,11 +6974,20 @@ class KwsedApp(App[None]):
                 bank = banks_list[companion_index]
             except (IndexError, TypeError):
                 return
+            # The popup's answer is the companion write's confirmation: the
+            # approval for it is minted here, from the same file banks the
+            # popup described.
+            companion_choice = WholeBankChoice(
+                companion_index, companion.id, True, companion_only=True
+            )
+            approval = self._mint_whole_bank_approval(
+                bank, companion_choice, banks_list, path
+            )
+            if approval is None:
+                return
             self._import_whole_bank_write(
                 bank,
-                WholeBankChoice(
-                    companion_index, companion.id, True, companion_only=True
-                ),
+                replace(companion_choice, approval=approval),
                 banks_list=banks_list,
                 path=path,
             )
