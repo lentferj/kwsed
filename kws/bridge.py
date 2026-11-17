@@ -1850,6 +1850,20 @@ class WavestationBridge:
                 )
                 break
             if bytes(after) != sent[kind]:
+                # A single read can be corrupted in transit (a lost or
+                # duplicated frame, a stale byte). Re-read once: a genuinely
+                # bad write differs on both reads.
+                try:
+                    after = self.read_raw(
+                        entry.sysex, _BUNDLE_FUNCTIONS[kind], timeout=timeout
+                    )
+                except Exception as exc:
+                    mismatch = (
+                        f"the write was sent but {entry.label} {kind} could not be "
+                        f"read back to check it ({exc}). Whether it took is unknown."
+                    )
+                    break
+            if bytes(after) != sent[kind]:
                 mismatch = _first_difference(sent[kind], bytes(after))
                 break
         result["verified"] = mismatch is None

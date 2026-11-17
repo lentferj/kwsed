@@ -954,6 +954,110 @@ class TestWritingABundle:
             unit.bridge.write_bank_bundle(11, backup_dir=str(tmp_path))
         assert unit.midi_out.sent == []
 
+    def test_a_clean_write_needs_no_extra_read(self, tmp_path):
+        """A matching read-back is accepted at once, with one read per kind."""
+        unit = Unit()
+        provided = self._provided()
+
+        result = unit.bridge.write_bank_bundle(
+            11,
+            performances=provided["performances"],
+            patches=provided["patches"],
+            waveseq=provided["waveseq"],
+            backup_dir=str(tmp_path),
+        )
+
+        assert result["verified"] is True
+        # One backup read and one verification read per kind, no re-reads.
+        assert len(unit.sent_by_function(m.Function.PERFORMANCE_BANK_REQUEST)) == 2
+        assert len(unit.sent_by_function(m.Function.PATCH_BANK_REQUEST)) == 2
+        assert len(unit.sent_by_function(m.Function.WAVESEQ_BANK_REQUEST)) == 2
+
+    def test_a_transient_read_back_glitch_is_confirmed_by_one_reread(self, tmp_path):
+        """A first differing read-back is re-read once; if it then matches, verified."""
+        unit = Unit()
+        original = unit._sent
+        verify_reads = 0
+
+        def glitchy(data: List[int]) -> None:
+            nonlocal verify_reads
+            raw = bytes(data)
+            original(data)
+            # Corrupt the first verification read of the performance dump, then
+            # let the re-read answer with the stored (correct) content.
+            if (
+                len(raw) > 5
+                and raw[4] == m.Function.PERFORMANCE_BANK_REQUEST
+                and m.Function.ALL_PERFORMANCE_DUMP
+                in {d[4] for d in unit.dump_frames_sent() if len(d) > 4}
+            ):
+                verify_reads += 1
+                if verify_reads == 1:
+                    # Replace the reply just queued for this request with a bad one.
+                    stored = bytearray(
+                        unit.dumps[(CARD_SYSEX, m.Function.ALL_PERFORMANCE_DUMP)]
+                    )
+                    stored[0] ^= 0xFF
+                    bad = m.frame_bulk(
+                        m.Function.ALL_PERFORMANCE_DUMP,
+                        CARD_SYSEX,
+                        bytes(stored),
+                        channel=0,
+                    )
+                    assert unit.midi_in.queue
+                    unit.midi_in.queue[-1] = (list(bad), 0.0)
+
+        unit.midi_out.send_message = glitchy  # type: ignore[method-assign]
+        provided = self._provided()
+
+        result = unit.bridge.write_bank_bundle(
+            11,
+            performances=provided["performances"],
+            patches=provided["patches"],
+            waveseq=provided["waveseq"],
+            backup_dir=str(tmp_path),
+        )
+
+        assert result["verified"] is True
+        assert result["mismatch"] is None
+        # Backup read + glitched verification read + one confirming re-read.
+        assert len(unit.sent_by_function(m.Function.PERFORMANCE_BANK_REQUEST)) == 3
+        assert len(unit.sent_by_function(m.Function.PATCH_BANK_REQUEST)) == 2
+        assert len(unit.sent_by_function(m.Function.WAVESEQ_BANK_REQUEST)) == 2
+
+    def test_a_persistent_mismatch_is_reported_after_one_reread(self, tmp_path):
+        """If both reads differ, the mismatch is reported with exactly one re-read."""
+        unit = Unit()
+        original = unit._sent
+
+        def lying(data: List[int]) -> None:
+            original(data)
+            raw = bytes(data)
+            # After the performance dump has been sent, every verification read
+            # returns corrupted content (a genuinely bad/unverifiable state).
+            if len(raw) > 5 and raw[4] == m.Function.ALL_PERFORMANCE_DUMP:
+                stored = bytearray(unit.dumps[(CARD_SYSEX, raw[4])])
+                stored[0] ^= 0xFF
+                unit.dumps[(CARD_SYSEX, raw[4])] = bytes(stored)
+
+        unit.midi_out.send_message = lying  # type: ignore[method-assign]
+        provided = self._provided()
+
+        result = unit.bridge.write_bank_bundle(
+            11,
+            performances=provided["performances"],
+            patches=provided["patches"],
+            waveseq=provided["waveseq"],
+            backup_dir=str(tmp_path),
+        )
+
+        assert result["verified"] is False
+        assert "differs" in str(result["mismatch"])
+        # Backup read + first differing read + one confirming re-read, no more.
+        assert len(unit.sent_by_function(m.Function.PERFORMANCE_BANK_REQUEST)) == 3
+        assert len(unit.sent_by_function(m.Function.PATCH_BANK_REQUEST)) == 2
+        assert len(unit.sent_by_function(m.Function.WAVESEQ_BANK_REQUEST)) == 2
+
 
 class TestTheDemoDeviceStoresWrites:
     """A fake that forgot a write could not exercise a read-back or an undo."""
