@@ -1075,3 +1075,13 @@ Each fix and where it landed:
    `tests/test_initbank.py` asserts the two records' SHA-256 digests
    (performance `769d9575…`, patch `79a5cec5…`, the T0 extraction's
    values), so a silent edit of the embedded bytes is refused.
+
+---
+
+## 24. Init Bank: hardware verification
+
+Verified on the unit: `N` opens the menu; space ticks kinds; `w` arms the shared gate; `enter` shows the confirmation naming the banks and kinds; the per-kind fenced write changes only the selected kind, leaving the others byte-identical. A single-bank test ticked only Patches in one RAM bank: that bank's performances and wave sequences stayed unchanged while all 35 patch slots became `Init`; the other banks were untouched. The gate and confirmation were both exercised. Afterwards the bank was restored from its backup envelope, so the unit ended where it started. Counts only: 1 bank, 1 kind, 35 patch slots.
+
+### Init Bank: Multi Mode Setup (4th line)
+
+- Added a global **Multi Mode Setup** toggle to the Init menu (4th line). The Init Multi dump is embedded and pinned (derived from the on-unit 2–31 template, sets 0–15 bank 0/perf `m+c-1` level 127, sets 16–31 bank 1/perf 0/level `m+c-1`), written as one backed-up, verified `write_multi`.

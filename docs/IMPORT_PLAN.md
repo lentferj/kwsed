@@ -425,8 +425,6 @@ needs a one-shot approval bound to the exact plan the person saw.
   Repeating it is not a replay: the retry finalizes a new plan and mints a new
   token. Nothing is silently re-run on a consumed approval.
 
----
-
 ## 7. Affected performances and the pre-write question
 
 A whole-bank write replaces every patch slot in each bank it writes. A
@@ -550,3 +548,44 @@ returns `bytes`.
 - [x] **Same-scope and multi-source single import** — imported banks can be held under unique session aliases with the real `Source.bank_number`; several files, including several RAM1 banks, can be assembled into one target bank with assignments preserved across `s`.
 - [x] **Long writes off the UI thread** — whole-bank writes run through `_device_worker` with a progress bar; see §6.10.
 - [ ] **Optional CLI `--slot` / explicit replace mode** — append and clean are supported; explicit slot replace is in the TUI copy screen, not yet in `kwscli copy-perf`.
+
+## 8. Init Bank
+
+`N` in the browser opens `InitBankScreen` (`kwsed/init_bank.py`): a menu of
+RAM 1, RAM 2 and RAM 3 (each with Performances, Patches and Wave sequences)
+plus a global **Multi Mode Setup** line. Space toggles an item; `w` arms the
+shared write gate; `enter` shows the confirmation; `esc`/`q` cancels and
+nothing is written.
+
+- **Menu.** Bank rows are grouped three per bank, with the bank label on the
+  first kind of each bank; the Multi Mode Setup is a separate global toggle.
+  The card note states that the Card is not listed.
+- **Per-kind semantics.** Only ticked kinds appear in that bank's
+  `write_bank_bundle` payload. A bank with only Patches ticked keeps its
+  performances and wave sequences byte-identical: they are not sent, backed up
+  or renamed, and the session source preserves them. Each ticked kind is
+  written as a full Init bank: 50 performance records of 181 bytes, 35 patch
+  records of 426 bytes, or 8784 zeroed bytes for wave sequences
+  (`kws/initbank.py`).
+- **Multi Mode Setup.** The global 32-Multiset setup can be initialised from
+  the embedded Init template (derived from the on-unit 2–31 pattern: sets
+  0–15 bank 0, perf `m+c-1`, level 127; sets 16–31 bank 1, perf 0, level
+  `m+c-1`). It is written as one backed-up, verified Multi dump, independent
+  of per-bank kinds.
+- **Gate.** The shared `EditGate` must be armed; a locked gate refuses with a
+  status line and no write is attempted.
+- **Confirmation.** `ConfirmScreen` (danger) names the banks and selected kinds
+  via `selection_summary`; cancelling leaves nothing written.
+- **Fenced writes.** Selected banks are written as one `write_bank_bundle`
+  per bank in RAM 1 → 2 → 3 order; the Multi Mode Setup, if selected, is
+  written as a separate backed-up, verified Multi dump. Each write reads the destination first, backs it
+  up, sends only the ticked kinds, and verifies the read-back. Partial failure
+  stops the run: completed banks are booked, the failed bank and its error are
+  reported, and later banks are listed as not written and are not retried.
+- **Name adoption.** `_init_bank_completed` calls `_adopt_written_names` for
+  the written kinds only, so written performance and patch slots adopt the
+  Init name while untouched kinds keep their previous live names. Wave
+  sequences carry no names.
+- **Card excluded.** There is no Card row. The documented SysEx function set
+  has no format or erase verb for a card, so a Card cannot be initialised over
+  MIDI; format it on the unit with FORMAT CARD, then import.

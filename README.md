@@ -253,6 +253,7 @@ kwsed --port "U6MIDI Pro:U6MIDI Pro MIDI 1 44:0" --device-channel 5
 | `y` | open the unified copy session for this performance, prefilled and ready for the target/slot map |
 | `B` | copy the whole bank under the cursor into another writable bank — all three kinds, backed up and verified |
 | `I` | import/copy: whole bank from a file or unit bank, or select performances from files, RAM, ROM or Card into one target bank |
+| `N` | Init bank: open a multi-choice menu for RAM 1–3 (performances, patches, wave sequences per bank) plus a global Multi Mode Setup (space toggles); only ticked items are written, each is separately backed up and verified, and the gate must be armed; the Card is excluded — format it on the unit (FORMAT CARD), then import |
 | `z` / `w` | undo the last write / toggle the write gate |
 | `C` / `L` / `X` | capture the inserted card / label it / sweep HCard banks — read-only on the unit |
 | `i` / `?` / `q` | device identity / help / quit (with staged audition changes still on the unit, quitting asks first: restore them, leave them, or cancel) |
