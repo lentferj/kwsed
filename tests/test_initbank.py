@@ -31,13 +31,13 @@ def _records(bank: bytes, size: int) -> tuple[bytes, ...]:
 
 
 def test_the_records_digests_are_pinned() -> None:
-    """The two embedded records are exactly the bytes T0 transcribed.
+    """The embedded records are exactly the bytes transcribed/derived.
 
-    The literals were read once from the unit and are not to drift: a
-    future edit that changes either record changes its digest, and this
-    test refuses it. The prefixes are the digests reported by the T0
-    extraction (2026-11-16) -- performance ``769d9575…``, patch
-    ``79a5cec5…``.
+    The literals are not to drift: a future edit that changes any record
+    changes its digest, and this test refuses it. The prefixes are the
+    digests reported by the T0 extraction (2026-11-16) -- performance
+    ``769d9575…``, patch ``79a5cec5…`` -- and the confirmed derived Init
+    Multi Mode Setup.
     """
     assert hashlib.sha256(initbank.INIT_PERFORMANCE).hexdigest()[:8] == "769d9575", (
         "the Init performance record changed"
@@ -45,6 +45,10 @@ def test_the_records_digests_are_pinned() -> None:
     assert hashlib.sha256(initbank.INIT_PATCH).hexdigest()[:8] == "79a5cec5", (
         "the Init patch record changed"
     )
+    assert (
+        hashlib.sha256(initbank.INIT_MULTISET).hexdigest()
+        == "de13ca516ee597d6c1e12777b3d5338165a14dc2abb97b3033a6ad7b94ff3b43"  # pragma: allowlist secret  # noqa: E501
+    ), "the Init Multi Mode Setup changed"
 
 
 def test_record_and_bank_sizes() -> None:
@@ -101,6 +105,7 @@ def test_the_bank_is_built_in_not_read_from_a_path() -> None:
         initbank.init_performances,
         initbank.init_patches,
         initbank.init_waveseq,
+        initbank.init_multisets,
         initbank.cleared_bank,
     )
     for builder in builders:
@@ -108,14 +113,44 @@ def test_the_bank_is_built_in_not_read_from_a_path() -> None:
     assert isinstance(initbank.init_performances(), bytes)
     assert isinstance(initbank.init_patches(), bytes)
     assert isinstance(initbank.init_waveseq(), bytes)
+    assert isinstance(initbank.init_multisets(), bytes)
     assert isinstance(initbank.cleared_bank(), tuple)
+
+
+def test_init_multisets_size_and_template() -> None:
+    from kws import multi
+
+    data = initbank.init_multisets()
+    assert data == initbank.INIT_MULTISET
+    assert len(data) == 3264
+    sets = multi.parse(data)
+    assert len(sets) == 32
+    # sets 0-15: group A, bank 0, perf m+c-1, level 127
+    for m in (0, 1, 2, 15):
+        s = sets[m]
+        assert s.control_channel == 0
+        assert s.parts[0].bank == 0 and s.parts[0].performance == m
+        assert s.parts[0].level == 127
+        assert s.parts[15].bank == 0 and s.parts[15].performance == m + 15
+    # sets 16-31: group B, bank 1, perf 0, level m+c-1
+    for m in (16, 31):
+        s = sets[m]
+        assert s.control_channel == 127
+        assert s.parts[0].bank == 1 and s.parts[0].performance == 0
+        assert s.parts[0].level == m
+        assert s.parts[15].level == m + 15
+    # byte-identical to current on-unit sets 2-31 for that range
+    # (self-consistency: encoding matches)
+    assert multi.encode(sets) == data
 
 
 def test_public_names_are_exported() -> None:
     for name in (
+        "INIT_MULTISET",
         "INIT_PATCH",
         "INIT_PERFORMANCE",
         "cleared_bank",
+        "init_multisets",
         "init_patches",
         "init_performances",
         "init_waveseq",
