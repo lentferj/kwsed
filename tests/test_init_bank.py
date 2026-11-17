@@ -54,7 +54,7 @@ def _make_source(kind: str, token: bytes) -> deps.Source:
 
 
 class TestInitBankScreen:
-    async def test_renders_three_banks_and_kinds_card_absent(self) -> None:
+    async def test_renders_three_banks_kinds_and_multi(self) -> None:
         app = KwsedApp(DemoDevice())
         async with app.run_test() as pilot:
             await pilot.pause()
@@ -63,13 +63,14 @@ class TestInitBankScreen:
             screen = app.screen
             assert isinstance(screen, InitBankScreen)
             options = screen.query_one("#init-list", OptionList)
-            assert options.option_count == 9
-            texts = [str(options.get_option_at_index(i).prompt) for i in range(9)]
+            assert options.option_count == 10
+            texts = [str(options.get_option_at_index(i).prompt) for i in range(10)]
             joined = "\n".join(texts)
             for label in ("RAM 1", "RAM 2", "RAM 3"):
                 assert label in joined
             for kind in ("Performances", "Patches", "Wave sequences"):
                 assert joined.count(kind) == 3
+            assert "Multi Mode Setup" in texts[9]
             assert "Card" not in _static_text(screen, "#init-title")
             note = _static_text(screen, "#init-card-note")
             assert "Card is not listed" in note
@@ -163,6 +164,35 @@ class TestInitBankScreen:
             assert "RAM 2: wave sequences" in prompt
             assert "ARMED" in prompt or "Gate" in prompt
 
+    async def test_multi_only_selection_and_confirmation(self) -> None:
+        app = KwsedApp(DemoDevice())
+        async with app.run_test() as pilot:
+            await pilot.pause()
+            app._write_gate.armed = True
+            app.push_screen(InitBankScreen(gate=app._write_gate))
+            await _settle(pilot)
+            for _ in range(9):
+                await pilot.press("down")
+            await pilot.press("space")  # Multi Mode Setup
+            await _settle(pilot)
+            screen = cast(Any, app.screen)
+            assert screen._selection() == {}
+            assert screen._multi_checked is True
+            assert (
+                selection_summary(screen._selection(), multi=True) == "Multi Mode Setup"
+            )
+            await pilot.press("enter")
+            await _settle(pilot)
+            assert isinstance(app.screen, ConfirmScreen)
+            prompt = "\n".join(
+                str(getattr(w, "content", getattr(w, "renderable", "")))
+                for w in app.screen.query(Static)
+            )
+            assert "Multi Mode Setup" in prompt
+            await pilot.press("escape")
+            await _settle(pilot)
+            assert app.device.multi_write_count == 0
+
 
 class TestInitBankWrites:
     async def test_single_bank_patches_only(self) -> None:
@@ -249,3 +279,45 @@ class TestInitBankWrites:
             expected = initbank.init_performances()
             assert b"".join(app._sources["RAM1"].performances) == expected
             assert app.catalog.display_name("RAM1", 0, banks.Kind.PERFORMANCE) == "Init"
+
+    async def test_multi_only_write(self) -> None:
+        device = DemoDevice()
+        app = KwsedApp(device)
+        async with app.run_test() as pilot:
+            await _settle(pilot)
+            app._write_gate.armed = True
+            await pilot.press("N")
+            await _settle(pilot)
+            for _ in range(9):
+                await pilot.press("down")
+            await pilot.press("space")  # Multi Mode Setup
+            await pilot.press("enter")
+            await _settle(pilot)
+            if isinstance(app.screen, ConfirmScreen):
+                await pilot.press("enter")
+            await _settle(pilot, 12)
+            assert device.multi_write_count == 1
+            assert device.multi_written == initbank.init_multisets()
+
+    async def test_banks_and_multi_together(self) -> None:
+        device = DemoDevice()
+        app = KwsedApp(device)
+        async with app.run_test() as pilot:
+            await _settle(pilot)
+            app._write_gate.armed = True
+            await pilot.press("N")
+            await _settle(pilot)
+            await pilot.press("space")  # RAM1 performances
+            for _ in range(9):
+                await pilot.press("down")
+            await pilot.press("space")  # Multi Mode Setup
+            await pilot.press("enter")
+            await _settle(pilot)
+            if isinstance(app.screen, ConfirmScreen):
+                await pilot.press("enter")
+            await _settle(pilot, 12)
+            assert device.bundle_write_count == 1
+            assert device.bundle_writes[0]["bank"] == banks.bank("RAM1").label
+            assert device.multi_write_count == 1
+            expected = initbank.init_performances()
+            assert b"".join(app._sources["RAM1"].performances) == expected

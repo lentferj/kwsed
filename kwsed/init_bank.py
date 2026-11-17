@@ -20,6 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Tuple
 
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
@@ -47,12 +48,13 @@ CARD_NOTE = "The Card is not listed: format it on the unit (FORMAT CARD), then i
 
 @dataclass(frozen=True)
 class InitBankChoice:
-    """The selected kinds per bank, as ``{bank_id: {"performances", ...}}``."""
+    """Selected bank kinds and/or the global Multi Mode Setup."""
 
     banks: Dict[str, Set[str]]
+    multi: bool = False
 
 
-def selection_summary(selection: Dict[str, Set[str]]) -> str:
+def selection_summary(selection: Dict[str, Set[str]], multi: bool = False) -> str:
     """Human confirmation line, e.g. ``RAM 1: performances, patches``."""
     labels = {key: label.lower() for key, label in KINDS}
     parts: List[str] = []
@@ -63,6 +65,8 @@ def selection_summary(selection: Dict[str, Set[str]]) -> str:
         entry = banks.bank(bank_id)
         chosen = [labels[k] for k, _ in KINDS if k in kinds]
         parts.append(f"{entry.label}: {', '.join(chosen)}")
+    if multi:
+        parts.append("Multi Mode Setup")
     return " · ".join(parts)
 
 
@@ -95,6 +99,7 @@ class InitBankScreen(ModalScreen[Optional[InitBankChoice]]):
         self._checked: Dict[Tuple[str, str], bool] = {
             (bank_id, kind): False for bank_id in RAM_BANKS for kind, _ in KINDS
         }
+        self._multi_checked: bool = False
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -124,7 +129,14 @@ class InitBankScreen(ModalScreen[Optional[InitBankChoice]]):
             return banks.bank(bank_id).label + "   "
         return "        "
 
+    def _multi_option_text(self) -> str:
+        mark = "x" if self._multi_checked else " "
+        return f"[{mark}] Multi Mode Setup"
+
     def _option_text(self, option_index: int) -> str:
+        bank_count = len(RAM_BANKS) * len(KINDS)
+        if option_index >= bank_count:
+            return self._multi_option_text()
         bank_id = RAM_BANKS[option_index // len(KINDS)]
         kind_index = option_index % len(KINDS)
         kind, kind_label = KINDS[kind_index]
@@ -135,8 +147,9 @@ class InitBankScreen(ModalScreen[Optional[InitBankChoice]]):
         options = self.query_one("#init-list", OptionList)
         highlighted = options.highlighted
         options.clear_options()
-        for idx in range(len(RAM_BANKS) * len(KINDS)):
-            options.add_option(Option(self._option_text(idx), id=str(idx)))
+        total = len(RAM_BANKS) * len(KINDS) + 1
+        for idx in range(total):
+            options.add_option(Option(Text(self._option_text(idx)), id=str(idx)))
         if highlighted is not None and options.option_count:
             options.highlighted = min(highlighted, options.option_count - 1)
         elif options.option_count:
@@ -151,13 +164,19 @@ class InitBankScreen(ModalScreen[Optional[InitBankChoice]]):
         idx = options.highlighted
         if idx is None:
             return None
+        bank_count = len(RAM_BANKS) * len(KINDS)
+        if idx >= bank_count:
+            return ("__multi__", "multi")
         return (RAM_BANKS[idx // len(KINDS)], KINDS[idx % len(KINDS)][0])
 
     def action_toggle_mark(self) -> None:
         current = self._current()
         if current is None:
             return
-        self._checked[current] = not self._checked[current]
+        if current == ("__multi__", "multi"):
+            self._multi_checked = not self._multi_checked
+        else:
+            self._checked[current] = not self._checked[current]
         self._rebuild()
 
     def action_toggle_gate(self) -> None:
@@ -186,7 +205,8 @@ class InitBankScreen(ModalScreen[Optional[InitBankChoice]]):
 
     def action_apply(self) -> None:
         selection = self._selection()
-        if not selection:
+        multi = self._multi_checked
+        if not selection and not multi:
             self._status("nothing selected — nothing written")
             return
         if not self._gate.armed:
@@ -194,24 +214,23 @@ class InitBankScreen(ModalScreen[Optional[InitBankChoice]]):
             return
         from vinsynlib.ui.confirm import ConfirmScreen
 
-        summary = selection_summary(selection)
+        summary = selection_summary(selection, multi=multi)
         prompt = (
             f"Initialise: {summary}\n"
             f"Gate: {'ARMED' if self._gate.armed else 'LOCKED'} — press w to arm\n\n"
             "Write the selected Init contents?"
         )
+        choice = InitBankChoice(banks=selection, multi=multi)
         self.app.push_screen(
             ConfirmScreen(prompt, confirm="Write", cancel="Cancel", danger=True),
-            lambda confirmed: self._confirmed(selection, confirmed),
+            lambda confirmed: self._confirmed(choice, confirmed),
         )
 
-    def _confirmed(
-        self, selection: Dict[str, Set[str]], confirmed: Optional[bool]
-    ) -> None:
+    def _confirmed(self, choice: InitBankChoice, confirmed: Optional[bool]) -> None:
         if not confirmed:
             self._status("")
             return
-        self.dismiss(InitBankChoice(banks=selection))
+        self.dismiss(choice)
 
     def action_cancel(self) -> None:
         self.dismiss(None)

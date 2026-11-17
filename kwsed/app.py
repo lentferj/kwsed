@@ -5301,12 +5301,13 @@ class KwsedApp(App[None]):
         if choice is None:
             return
         selection = getattr(choice, "banks", None) or {}
+        do_multi = bool(getattr(choice, "multi", False))
         ordered = [
             (banks.bank(bank_id), set(selection[bank_id]))
             for bank_id in ("RAM1", "RAM2", "RAM3")
             if selection.get(bank_id)
         ]
-        if not ordered:
+        if not ordered and not do_multi:
             self.notify_status("init: nothing selected — nothing written")
             return
         if not self._write_gate.armed:
@@ -5316,13 +5317,16 @@ class KwsedApp(App[None]):
 
         backup_dir = _backup.default_dir()
         existing = {entry.id: self._sources.get(entry.id) for entry, _kinds in ordered}
-        labels = ", ".join(
+        parts: List[str] = [
             f"{entry.label} ({', '.join(sorted(kinds))})" for entry, kinds in ordered
-        )
+        ]
+        if do_multi:
+            parts.append("Multi Mode Setup")
+        labels = ", ".join(parts)
         self._device_worker(
-            lambda: self._write_init_banks(ordered, backup_dir),
-            lambda result, failure: self._init_banks_done(
-                result, failure, ordered, existing
+            lambda: self._write_init_all(ordered, do_multi, backup_dir),
+            lambda result, failure: self._init_all_done(
+                result, failure, ordered, existing, do_multi
             ),
             f"initialising {labels}",
         )
@@ -5412,55 +5416,149 @@ class KwsedApp(App[None]):
                     directory=self._bankstore_dir,
                 )
 
-    def _init_banks_done(
+    def _write_init_all(
+        self,
+        ordered: Sequence[Tuple[Any, Set[str]]],
+        do_multi: bool,
+        backup_dir: str,
+    ) -> Dict[str, Any]:
+        banks_outcome: Optional[MultiBankOutcome] = None
+        if ordered:
+            banks_outcome = self._write_init_banks(ordered, backup_dir)
+            if not banks_outcome.ok:
+                return {
+                    "banks_outcome": banks_outcome,
+                    "multi_result": None,
+                    "multi_error": "not written (a bank write failed)",
+                    "multi_done": False,
+                }
+        multi_result: Any = None
+        multi_error = ""
+        multi_done = False
+        if do_multi:
+            from kws import initbank
+
+            try:
+                multi_result = self.device.write_multi(
+                    initbank.init_multisets(), backup_dir=backup_dir
+                )
+                mismatch = None
+                if isinstance(multi_result, dict):
+                    mismatch = multi_result.get("mismatch")
+                    if multi_result.get("verified") is False and mismatch is None:
+                        mismatch = "read-back mismatch"
+                if mismatch:
+                    multi_error = str(mismatch)
+                else:
+                    multi_done = True
+            except Exception as exc:
+                multi_error = str(exc)
+        return {
+            "banks_outcome": banks_outcome,
+            "multi_result": multi_result,
+            "multi_error": multi_error,
+            "multi_done": multi_done,
+        }
+
+    def _init_all_done(
         self,
         outcome: Any,
         failure: BaseException | None,
         ordered: Sequence[Tuple[Any, Set[str]]],
         existing: Dict[str, Optional[deps.Source]],
+        do_multi: bool,
     ) -> None:
         if threading.current_thread() is not threading.main_thread() and getattr(
             self, "is_running", False
         ):
             self.call_from_thread(
-                self._init_banks_done, outcome, failure, ordered, existing
+                self._init_all_done, outcome, failure, ordered, existing, do_multi
             )
             return
         if failure is not None:
             self.notify_status(f"init: {failure}", refused=True)
             return
-        if not isinstance(outcome, MultiBankOutcome):
+        if not isinstance(outcome, dict):
             self.notify_status(f"init: {outcome!r}", refused=True)
             return
+        banks_outcome = outcome.get("banks_outcome")
         kinds_by_bank = {entry.id: kinds for entry, kinds in ordered}
-        for entry in outcome.completed:
-            kinds = kinds_by_bank.get(entry.bank.id, set())
-            self._init_bank_completed(entry, kinds, existing.get(entry.bank.id))
-        self._init_banks_report(outcome, kinds_by_bank)
+        if isinstance(banks_outcome, MultiBankOutcome):
+            for entry in banks_outcome.completed:
+                kinds = kinds_by_bank.get(entry.bank.id, set())
+                self._init_bank_completed(entry, kinds, existing.get(entry.bank.id))
+        multi_done = bool(outcome.get("multi_done"))
+        if multi_done:
+            self._init_multi_completed(outcome.get("multi_result"))
+        self._init_all_report(
+            banks_outcome,
+            kinds_by_bank,
+            do_multi,
+            multi_done,
+            str(outcome.get("multi_error") or ""),
+        )
 
-    def _init_banks_report(
-        self, outcome: MultiBankOutcome, kinds_by_bank: Dict[str, Set[str]]
+    def _init_multi_completed(self, result: Any) -> None:
+        from kws import initbank, multi as multi_mod
+
+        if hasattr(self, "_record_write") and result is not None:
+            with contextlib.suppress(Exception):
+                self._record_write(result)
+        with contextlib.suppress(Exception):
+            sets = list(multi_mod.parse(initbank.init_multisets()))
+            self._multi_sets = sets
+            self._multisets = sets
+        if hasattr(self, "_refresh_multi_checks"):
+            with contextlib.suppress(Exception):
+                self._refresh_multi_checks()
+        if hasattr(self, "_refresh_multi_rows"):
+            with contextlib.suppress(Exception):
+                self._refresh_multi_rows()
+
+    def _init_all_report(  # noqa: C901
+        self,
+        banks_outcome: Optional[MultiBankOutcome],
+        kinds_by_bank: Dict[str, Set[str]],
+        do_multi: bool,
+        multi_done: bool,
+        multi_error: str,
     ) -> None:
-        completed_ids = [entry.bank.id for entry in outcome.completed]
-        if outcome.ok:
-            labels = ", ".join(
-                f"{banks.bank(bid).label} "
-                f"({', '.join(sorted(kinds_by_bank.get(bid, set())))})"
-                for bid in completed_ids
-            )
-            self.notify_status(f"initialised {labels}")
+        done_parts: List[str] = []
+        failed_parts: List[str] = []
+        pending_parts: List[str] = []
+        if isinstance(banks_outcome, MultiBankOutcome):
+            for bid in (entry.bank.id for entry in banks_outcome.completed):
+                kinds = ", ".join(sorted(kinds_by_bank.get(bid, set())))
+                done_parts.append(f"{banks.bank(bid).label} ({kinds})")
+            if not banks_outcome.ok:
+                failed_bank = getattr(banks_outcome.failed_bank, "label", "?")
+                failed_parts.append(f"{failed_bank} ({banks_outcome.error})")
+                pending_parts.extend(
+                    getattr(b, "label", str(b)) for b in banks_outcome.not_written
+                )
+        if do_multi:
+            if multi_done:
+                done_parts.append("Multi Mode Setup")
+            elif multi_error and not (
+                isinstance(banks_outcome, MultiBankOutcome) and not banks_outcome.ok
+            ):
+                failed_parts.append(f"Multi Mode Setup ({multi_error})")
+            elif multi_error:
+                pending_parts.append(f"Multi Mode Setup ({multi_error})")
+
+        if not failed_parts and not pending_parts and done_parts:
+            self.notify_status(f"initialised {', '.join(done_parts)}")
             return
-        failed = getattr(outcome.failed_bank, "label", "?")
+        if not failed_parts and not pending_parts and not done_parts:
+            self.notify_status("init: nothing written", refused=True)
+            return
         parts = []
-        if completed_ids:
-            done = ", ".join(banks.bank(bid).label for bid in completed_ids)
-            parts.append(f"done: {done}")
-        parts.append(f"failed: {failed} ({outcome.error})")
-        if outcome.not_written:
-            pending = ", ".join(
-                getattr(b, "label", str(b)) for b in outcome.not_written
-            )
-            parts.append(f"not written: {pending}")
+        if done_parts:
+            parts.append(f"done: {', '.join(done_parts)}")
+        if failed_parts:
+            parts.append(f"failed: {', '.join(failed_parts)}")
+        if pending_parts:
+            parts.append(f"not written: {', '.join(pending_parts)}")
         self.notify_status("init partial — " + "; ".join(parts), refused=True)
 
     def _import_kind_chosen(self, kind: Optional[int]) -> None:
