@@ -7053,6 +7053,20 @@ class KwsedApp(App[None]):
         sources: Mapping[str, deps.Source],
     ) -> None:
         """Book the remediation's landed banks, then continue the import."""
+        if threading.current_thread() is not threading.main_thread() and getattr(
+            self, "is_running", False
+        ):
+            self.call_from_thread(
+                self._remediation_write_done,
+                result,
+                failure,
+                bank=bank,
+                choice=choice,
+                banks_list=banks_list,
+                path=path,
+                sources=sources,
+            )
+            return
         if failure is not None:
             self.notify_status(f"remediation: {failure}", refused=True)
             return
@@ -8488,6 +8502,20 @@ class KwsedApp(App[None]):
         on_done: Optional[Callable[[], None]],
     ) -> None:
         """Report one companion write: only a verified one counts as landed."""
+        if threading.current_thread() is not threading.main_thread() and getattr(
+            self, "is_running", False
+        ):
+            self.call_from_thread(
+                self._companion_write_done,
+                result,
+                failure,
+                companion=companion,
+                source=source,
+                count=count,
+                pending_note=pending_note,
+                on_done=on_done,
+            )
+            return
         verdict = "" if failure is not None else self._bundle_result_error(result)
         if failure is not None or verdict:
             # A companion that was not verified must not be booked as
