@@ -275,6 +275,7 @@ KEY_HINTS = (
     "x FX",
     "B copy bank",
     "I import",
+    "N init bank",
     "z undo",
     "w write gate",
     "i device",
@@ -330,10 +331,10 @@ class WarningTable(DataTable[Any]):
 
 # The family caps the legend and lets an app pick the cap. The default of
 # two lines is right for the canonical list, but kwsed's is longer: at a
-# hundred columns it needs four, and a two-line cap would hide `z` undo,
-# `w` write gate and `B` copy bank behind the pointer. Four shows the
+# hundred columns it needs five, and a smaller cap would hide `z` undo,
+# `w` write gate and `B` copy bank behind the pointer. Five shows the
 # whole list at that width and still caps it on a narrow terminal.
-KeyHints.MAX_LINES = 4
+KeyHints.MAX_LINES = 5
 
 #: The confirmation before an effect-type change. The number and the
 #: parameter bytes belong together, and the unit reinterprets the old
@@ -2992,6 +2993,7 @@ class KwsedApp(App[None]):
         Binding("x", "edit_fx", "FX"),
         Binding("B", "copy_bank", "Copy bank"),
         Binding("I", "import", "Import"),
+        Binding("N", "init_bank", "Init bank"),
         Binding("z", "undo", "Undo"),
         Binding("w", "toggle_write_gate", "Write gate"),
     ]
@@ -5289,6 +5291,177 @@ class KwsedApp(App[None]):
             ),
             self._import_kind_chosen,
         )
+
+    def action_init_bank(self) -> None:
+        from kwsed.init_bank import InitBankScreen
+
+        self.push_screen(InitBankScreen(gate=self._write_gate), self._init_bank_chosen)
+
+    def _init_bank_chosen(self, choice: Any) -> None:
+        if choice is None:
+            return
+        selection = getattr(choice, "banks", None) or {}
+        ordered = [
+            (banks.bank(bank_id), set(selection[bank_id]))
+            for bank_id in ("RAM1", "RAM2", "RAM3")
+            if selection.get(bank_id)
+        ]
+        if not ordered:
+            self.notify_status("init: nothing selected — nothing written")
+            return
+        if not self._write_gate.armed:
+            self.notify_status(self._write_gate.refuse("init"), refused=True)
+            return
+        from kws import backup as _backup
+
+        backup_dir = _backup.default_dir()
+        existing = {entry.id: self._sources.get(entry.id) for entry, _kinds in ordered}
+        labels = ", ".join(
+            f"{entry.label} ({', '.join(sorted(kinds))})" for entry, kinds in ordered
+        )
+        self._device_worker(
+            lambda: self._write_init_banks(ordered, backup_dir),
+            lambda result, failure: self._init_banks_done(
+                result, failure, ordered, existing
+            ),
+            f"initialising {labels}",
+        )
+
+    @staticmethod
+    def _init_payload(kinds: Set[str]) -> Dict[str, bytes]:
+        from kws import initbank
+
+        payload: Dict[str, bytes] = {}
+        if "performances" in kinds:
+            payload["performances"] = initbank.init_performances()
+        if "patches" in kinds:
+            payload["patches"] = initbank.init_patches()
+        if "waveseq" in kinds:
+            payload["waveseq"] = initbank.init_waveseq()
+        return payload
+
+    def _write_init_banks(
+        self, ordered: Sequence[Tuple[Any, Set[str]]], backup_dir: str
+    ) -> MultiBankOutcome:
+        steps = [
+            (entry, self._init_payload(kinds), BankWriteOutcome(bank=entry))
+            for entry, kinds in ordered
+        ]
+        return self._write_bank_steps(steps, backup_dir)
+
+    @staticmethod
+    def _init_bank_source(
+        scope_id: str, kinds: Set[str], existing: Optional[deps.Source]
+    ) -> deps.Source:
+        from kws import initbank
+
+        if existing is not None:
+            performances = list(existing.performances)
+            patches = list(existing.patches)
+            waveseq = existing.waveseq
+        else:
+            performances = []
+            patches = []
+            waveseq = b""
+        if "performances" in kinds:
+            blob = initbank.init_performances()
+            performances = [
+                blob[i * rec.PERFORMANCE_SIZE : (i + 1) * rec.PERFORMANCE_SIZE]
+                for i in range(banks.PERFORMANCES_PER_BANK)
+            ]
+        if "patches" in kinds:
+            blob = initbank.init_patches()
+            patches = [
+                blob[i * rec.PATCH_SIZE : (i + 1) * rec.PATCH_SIZE]
+                for i in range(banks.PATCHES_PER_BANK)
+            ]
+        if "waveseq" in kinds:
+            waveseq = initbank.init_waveseq()
+        return deps.Source(
+            scope_id=scope_id,
+            performances=performances,
+            patches=patches,
+            waveseq=waveseq,
+        )
+
+    def _init_bank_completed(
+        self,
+        entry: BankWriteOutcome,
+        kinds: Set[str],
+        existing_source: Optional[deps.Source],
+    ) -> None:
+        from kws import initbank
+
+        if hasattr(self, "_record_write") and entry.result is not None:
+            with contextlib.suppress(Exception):
+                self._record_write(entry.result)
+        perf_blob = initbank.init_performances() if "performances" in kinds else None
+        patch_blob = initbank.init_patches() if "patches" in kinds else None
+        self._adopt_written_names(
+            entry.bank.id, perf_blob=perf_blob, patch_blob=patch_blob
+        )
+        source = self._init_bank_source(entry.bank.id, kinds, existing_source)
+        self._sources[entry.bank.id] = source
+        if self._bankstore_dir is not None:
+            with contextlib.suppress(OSError):
+                bankstore.save(
+                    entry.bank.id,
+                    performances=b"".join(source.performances),
+                    patches=b"".join(source.patches),
+                    waveseq=source.waveseq,
+                    directory=self._bankstore_dir,
+                )
+
+    def _init_banks_done(
+        self,
+        outcome: Any,
+        failure: BaseException | None,
+        ordered: Sequence[Tuple[Any, Set[str]]],
+        existing: Dict[str, Optional[deps.Source]],
+    ) -> None:
+        if threading.current_thread() is not threading.main_thread() and getattr(
+            self, "is_running", False
+        ):
+            self.call_from_thread(
+                self._init_banks_done, outcome, failure, ordered, existing
+            )
+            return
+        if failure is not None:
+            self.notify_status(f"init: {failure}", refused=True)
+            return
+        if not isinstance(outcome, MultiBankOutcome):
+            self.notify_status(f"init: {outcome!r}", refused=True)
+            return
+        kinds_by_bank = {entry.id: kinds for entry, kinds in ordered}
+        for entry in outcome.completed:
+            kinds = kinds_by_bank.get(entry.bank.id, set())
+            self._init_bank_completed(entry, kinds, existing.get(entry.bank.id))
+        self._init_banks_report(outcome, kinds_by_bank)
+
+    def _init_banks_report(
+        self, outcome: MultiBankOutcome, kinds_by_bank: Dict[str, Set[str]]
+    ) -> None:
+        completed_ids = [entry.bank.id for entry in outcome.completed]
+        if outcome.ok:
+            labels = ", ".join(
+                f"{banks.bank(bid).label} "
+                f"({', '.join(sorted(kinds_by_bank.get(bid, set())))})"
+                for bid in completed_ids
+            )
+            self.notify_status(f"initialised {labels}")
+            return
+        failed = getattr(outcome.failed_bank, "label", "?")
+        parts = []
+        if completed_ids:
+            done = ", ".join(banks.bank(bid).label for bid in completed_ids)
+            parts.append(f"done: {done}")
+        parts.append(f"failed: {failed} ({outcome.error})")
+        if outcome.not_written:
+            pending = ", ".join(
+                getattr(b, "label", str(b)) for b in outcome.not_written
+            )
+            parts.append(f"not written: {pending}")
+        self.notify_status("init partial — " + "; ".join(parts), refused=True)
 
     def _import_kind_chosen(self, kind: Optional[int]) -> None:
         if kind is None:
@@ -14019,7 +14192,7 @@ once for its 50 performances, once for its 35 patches (`p` hides the patch
 rows). Right: that bank-and-kind's slots. The third pane on the right
 repeats the `d` report for the current selection; `D` hides it.
 
-Shortcuts: I import/copy (file, RAM, ROM or Card) · y copy performance ·
+Shortcuts: I import/copy (file, RAM, ROM or Card) · N init bank · y copy performance ·
 x FX · B copy bank · d dependencies · D dependency pane · z undo · w write gate ·
 ? this help.
 

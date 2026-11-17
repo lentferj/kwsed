@@ -83,6 +83,7 @@ def test_the_legend_matches_the_family() -> None:
             "x FX",
             "B copy bank",
             "I import",
+            "N init bank",
             "z undo",
             "w write gate",
         ),
@@ -90,19 +91,19 @@ def test_the_legend_matches_the_family() -> None:
 
 
 def test_the_legend_caps_where_kwsed_needs_it() -> None:
-    """The family caps the legend; kwsed chooses four lines, deliberately.
+    """The family caps the legend; kwsed chooses five lines, deliberately.
 
     The default of two is right for the canonical list, but kwsed's is
-    longer: at a hundred columns it needs four, and a two-line cap would
+    longer: at a hundred columns it needs five, and a smaller cap would
     hide the destructive keys behind the pointer.
     """
     from vinsynlib.keys import LEGEND_SEPARATOR, wrap_blocks
     from vinsynlib.ui.hints import KeyHints
 
-    assert KeyHints.MAX_LINES == 4
+    assert KeyHints.MAX_LINES == 5
     lines = wrap_blocks(KEY_HINTS, 100 - 2, LEGEND_SEPARATOR).split("\n")
-    assert len(lines) <= 4
-    shown = "\n".join(lines[:4])
+    assert len(lines) <= 5
+    shown = "\n".join(lines[:5])
     for needle in ("z undo", "w write gate", "B copy bank"):
         assert needle in shown, needle
 
