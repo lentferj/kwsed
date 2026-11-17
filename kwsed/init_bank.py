@@ -85,6 +85,7 @@ class InitBankScreen(ModalScreen[Optional[InitBankChoice]]):
         Binding("escape", "cancel", "Cancel"),
         Binding("q", "cancel", "Cancel"),
         Binding("space", "toggle_mark", "Toggle", show=False),
+        Binding("w", "toggle_gate", "Gate"),
         Binding("enter", "apply", "Apply", priority=True),
     ]
 
@@ -158,6 +159,20 @@ class InitBankScreen(ModalScreen[Optional[InitBankChoice]]):
             return
         self._checked[current] = not self._checked[current]
         self._rebuild()
+
+    def action_toggle_gate(self) -> None:
+        if self._gate is None:
+            self._status("not held here")
+            return
+        self._gate.toggle()
+        self._update_gate()
+        self._status(self._gate.describe())
+
+    def _update_gate(self) -> None:
+        try:
+            self.query_one("#init-gate", Static).update(self._gate_line())
+        except Exception:
+            return
 
     def _selection(self) -> Dict[str, Set[str]]:
         selected: Dict[str, Set[str]] = {bank_id: set() for bank_id in RAM_BANKS}
