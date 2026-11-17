@@ -7729,3 +7729,461 @@ def _records_of(blob: bytes) -> list[bytes]:
     return [
         blob[at : at + PERF_RECORD_SIZE] for at in range(0, len(blob), PERF_RECORD_SIZE)
     ]
+
+
+@pytest.mark.asyncio
+async def test_green_field_remediation_noop_first_bank_still_continues(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """A remediation bank that is already Init (kinds: []) must not stop the chain.
+
+    Green field clears RAM 2 (companion, first in app order) and RAM 1
+    (target, last). If RAM 2 already matches Init the bridge sends nothing
+    for it; the sequence must still clear RAM 1, write the confirmed
+    companion, write the target, and record both remediation banks.
+    """
+    from kws import backup as _backup
+    from kwsed.import_bank import AffectedImportScreen, PreflightImportScreen
+
+    app = KwsedApp(DemoDevice(), bankstore_dir=str(tmp_path / "store"))
+    app._config_path = str(tmp_path / "absent-kwsed.toml")
+    app._write_gate = EditGate(armed=True)
+    app._sources["RAM1"] = _make_bank(scope="RAM1", active_slots=[]).source
+    app._sources["RAM2"] = _make_bank(scope="RAM2", active_slots=[]).source
+    statuses: list[str] = []
+    app.notify_status = lambda msg, *a, **k: statuses.append(str(msg))  # type: ignore[method-assign]
+    backup_dir = str(tmp_path / "backups")
+    os.makedirs(backup_dir, exist_ok=True)
+    monkeypatch.setattr(_backup, "default_dir", lambda root=None: backup_dir)
+    recorded: list[Any] = []
+    app._record_write = recorded.append  # type: ignore[method-assign]
+    monkeypatch.setattr(bankstore, "save", lambda *a, **k: None)
+
+    # Main bank targets RAM 1 and has parts naming RAM 2; RAM 2 is carried in file.
+    from tests.test_bankbuild import make_patch, make_performance
+
+    perfs = [_empty_perf() for _ in range(50)]
+    perfs[2] = make_performance("Harbor Gate", ((1, 2),))
+    perfs[6] = make_performance("Lantern Field", ((1, 5),))
+    main = deps.Source(
+        scope_id="RAM1",
+        performances=perfs,
+        patches=[make_patch("Quarry Seam")] + [bytes(PATCH_RECORD_SIZE)] * 34,
+        waveseq=None,
+    )
+    ram2 = _make_bank(scope="RAM2", active_slots=[])
+    ram2.source.patches[2] = make_patch("Tide Chart")
+    ram2.source.patches[5] = make_patch("Gull Wing")
+    file_banks = [
+        importers.ImportedBank(
+            label="Main bank", scope="RAM1", format="sysex", source=main
+        ),
+        ram2,
+    ]
+
+    original = app.device.write_bank_bundle
+    write_ids: list[int] = []
+    ram1 = banks.bank("RAM1").number
+    ram2n = banks.bank("RAM2").number
+    remediation_calls = 0
+
+    def instrumented(bank_number: int, **k: Any) -> dict[str, Any]:
+        nonlocal remediation_calls
+        write_ids.append(bank_number)
+        result = cast(dict[str, Any], original(bank_number, **k))
+        # Green-field remediation clears both RAM1 and RAM2 (all three kinds).
+        # Order is companion RAM2 first, target RAM1 last. First remediation
+        # write (RAM2) already matches Init: nothing sent.
+        if (
+            k.get("performances") is not None
+            and k.get("patches") is not None
+            and k.get("waveseq") is not None
+            and bank_number == ram2n
+            and remediation_calls == 0
+        ):
+            remediation_calls += 1
+            return {
+                **result,
+                "kinds": [],
+                "unchanged": ["performances", "patches", "waveseq"],
+            }
+        if (
+            k.get("performances") is not None
+            and k.get("patches") is not None
+            and k.get("waveseq") is not None
+            and bank_number in (ram1, ram2n)
+        ):
+            remediation_calls += 1
+        return result
+
+    app.device.write_bank_bundle = instrumented
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.push_screen(
+            WholeBankImportScreen(
+                path="two.syx", banks=file_banks, gate=app._write_gate
+            ),
+            lambda picked: app._import_whole_bank_chosen(file_banks, picked, "two.syx"),
+        )
+        await _settle(pilot)
+        # target is RAM 1 by default
+        await pilot.press("ctrl+s")
+        await _wait_for_screen(app, pilot, PreflightImportScreen)
+        await pilot.press("1")  # write every named bank and this bank
+        await _wait_for_screen(app, pilot, AffectedImportScreen)
+        await pilot.press("1")  # green field
+        # remediation (2 banks) + companion patches + target = 4 bundle writes
+        for _ in range(1500):
+            await pilot.pause()
+            if app.device.bundle_write_count >= 4:
+                break
+        await _settle(pilot)
+
+    # RAM2 remediation (no-op), RAM1 remediation, RAM2 companion, RAM1 target.
+    assert write_ids == [ram2n, ram1, ram2n, ram1], (write_ids, statuses[-12:])
+    assert app.device.bundle_write_count == 4
+    assert any("imported" in s or "wrote" in s for s in statuses), statuses
+    # Both remediation banks recorded as written in the session.
+    # Session key for this flow: the whole-bank pass/session key used.
+    written_sets = [
+        set(state.get("remediation_written") or ())
+        for state in app._import_passes.values()
+    ]
+    assert any({"RAM1", "RAM2"} <= ws for ws in written_sets), app._import_passes
+
+
+@pytest.mark.asyncio
+async def test_green_field_remediation_second_bank_failure_still_stops(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """A failed/unverified second remediation bank must stop with partial status."""
+    from kws import backup as _backup
+    from kwsed.import_bank import AffectedImportScreen, PreflightImportScreen
+
+    app = KwsedApp(DemoDevice(), bankstore_dir=str(tmp_path / "store"))
+    app._config_path = str(tmp_path / "absent-kwsed.toml")
+    app._write_gate = EditGate(armed=True)
+    app._sources["RAM1"] = _make_bank(scope="RAM1", active_slots=[]).source
+    app._sources["RAM2"] = _make_bank(scope="RAM2", active_slots=[]).source
+    statuses: list[str] = []
+    app.notify_status = lambda msg, *a, **k: statuses.append(str(msg))  # type: ignore[method-assign]
+    backup_dir = str(tmp_path / "backups")
+    os.makedirs(backup_dir, exist_ok=True)
+    monkeypatch.setattr(_backup, "default_dir", lambda root=None: backup_dir)
+    recorded: list[Any] = []
+    app._record_write = recorded.append  # type: ignore[method-assign]
+    monkeypatch.setattr(bankstore, "save", lambda *a, **k: None)
+
+    from tests.test_bankbuild import make_patch, make_performance
+
+    perfs = [_empty_perf() for _ in range(50)]
+    perfs[2] = make_performance("Harbor Gate", ((1, 2),))
+    main = deps.Source(
+        scope_id="RAM1",
+        performances=perfs,
+        patches=[make_patch("Quarry Seam")] + [bytes(PATCH_RECORD_SIZE)] * 34,
+        waveseq=None,
+    )
+    ram2 = _make_bank(scope="RAM2", active_slots=[])
+    ram2.source.patches[2] = make_patch("Tide Chart")
+    file_banks = [
+        importers.ImportedBank(
+            label="Main bank", scope="RAM1", format="sysex", source=main
+        ),
+        ram2,
+    ]
+
+    original = app.device.write_bank_bundle
+    write_ids: list[int] = []
+    ram1 = banks.bank("RAM1").number
+    ram2n = banks.bank("RAM2").number
+    remediation_seen = 0
+
+    def instrumented(bank_number: int, **k: Any) -> dict[str, Any]:
+        nonlocal remediation_seen
+        write_ids.append(bank_number)
+        result = cast(dict[str, Any], original(bank_number, **k))
+        is_remediation = (
+            k.get("performances") is not None
+            and k.get("patches") is not None
+            and k.get("waveseq") is not None
+        )
+        if is_remediation and bank_number in (ram1, ram2n):
+            remediation_seen += 1
+            # First remediation bank (RAM2) is a no-op but verified.
+            if remediation_seen == 1 and bank_number == ram2n:
+                return {
+                    **result,
+                    "kinds": [],
+                    "unchanged": ["performances", "patches", "waveseq"],
+                }
+            # Second remediation bank (RAM1) fails read-back verification.
+            if remediation_seen == 2 and bank_number == ram1:
+                return {
+                    **result,
+                    "verified": False,
+                    "mismatch": "performance 0 differs",
+                }
+        return result
+
+    app.device.write_bank_bundle = instrumented
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.push_screen(
+            WholeBankImportScreen(
+                path="two.syx", banks=file_banks, gate=app._write_gate
+            ),
+            lambda picked: app._import_whole_bank_chosen(file_banks, picked, "two.syx"),
+        )
+        await _settle(pilot)
+        await pilot.press("ctrl+s")
+        await _wait_for_screen(app, pilot, PreflightImportScreen)
+        await pilot.press("1")  # both
+        await _wait_for_screen(app, pilot, AffectedImportScreen)
+        await pilot.press("1")  # green field
+        await _await_partial(app, pilot)
+        await _settle(pilot)
+
+    # First remediation (RAM2, no-op) landed, second (RAM1) failed: stop.
+    assert write_ids == [ram2n, ram1], (write_ids, statuses[-12:])
+    # No companion or target write followed the failed remediation.
+    assert ram2n not in write_ids[2:] and ram1 not in write_ids[2:], write_ids
+    assert app.device.bundle_write_count == 2
+    closing = statuses[-1]
+    assert "remediation" in closing
+    assert "written: RAM 2" in closing
+    assert "failed or unverified (may have changed): RAM 1" in closing
+    assert not any("imported" in s or "wrote patches into" in s for s in statuses), (
+        statuses
+    )
+    written_sets = [
+        set(state.get("remediation_written") or ())
+        for state in app._import_passes.values()
+    ]
+    assert any(ws == {"RAM2"} for ws in written_sets), app._import_passes
+
+
+@pytest.mark.asyncio
+async def test_green_field_through_modals_carries_companion_cleared_banks(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """Drive w/ctrl+s + preflight(both) + green field and observe the write choice.
+
+    The remediation answer must amend the choice before remediation runs so the
+    clear set names target + confirmed companion (RAM, never CARD). After
+    remediation completes the flow continues with remediation cleared from the
+    choice by design; the first write/remediation call is the one that must carry
+    the fields.
+    """
+    from kws import backup as _backup
+    from kwsed.import_bank import (
+        AffectedImportScreen,
+        PreflightImportScreen,
+        WholeBankImportScreen,
+    )
+
+    app = KwsedApp(DemoDevice(), bankstore_dir=str(tmp_path / "store"))
+    app._config_path = str(tmp_path / "absent-kwsed.toml")
+    app._write_gate = EditGate()
+    app._sources["RAM1"] = _make_bank(scope="RAM1", active_slots=[]).source
+    app._sources["RAM2"] = _make_bank(scope="RAM2", active_slots=[]).source
+    statuses: list[str] = []
+    app.notify_status = lambda msg, *a, **k: statuses.append(str(msg))  # type: ignore[method-assign]
+    backup_dir = str(tmp_path / "modal-backups")
+    os.makedirs(backup_dir, exist_ok=True)
+    monkeypatch.setattr(_backup, "default_dir", lambda root=None: backup_dir)
+    monkeypatch.setattr(bankstore, "save", lambda *a, **k: None)
+    recorded: list[Any] = []
+    app._record_write = recorded.append  # type: ignore[method-assign]
+
+    file_banks = _two_bank_file()
+    chosen: list[Any] = []
+    write_choices: list[Any] = []
+    remediation_choices: list[Any] = []
+    original_chosen = app._import_whole_bank_chosen
+    original_write = app._import_whole_bank_write
+    original_start = app._start_remediation
+
+    def capture_chosen(banks_list: Any, choice: Any, path: str = "") -> None:
+        chosen.append(choice)
+        original_chosen(banks_list, choice, path)
+
+    def capture_write(bank: Any, choice: Any, **kw: Any) -> None:
+        write_choices.append(choice)
+        original_write(bank, choice, **kw)
+
+    def capture_start(bank: Any, choice: Any, *args: Any, **kw: Any) -> None:
+        remediation_choices.append(choice)
+        original_start(bank, choice, *args, **kw)
+
+    app._import_whole_bank_chosen = capture_chosen  # type: ignore[method-assign]
+    app._import_whole_bank_write = capture_write  # type: ignore[method-assign]
+    app._start_remediation = capture_start  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.push_screen(
+            WholeBankImportScreen(
+                path="two.syx", banks=file_banks, gate=app._write_gate
+            ),
+            lambda picked: app._import_whole_bank_chosen(file_banks, picked, "two.syx"),
+        )
+        await _settle(pilot)
+        await pilot.press("w")  # arm the gate
+        await pilot.press("ctrl+s")
+        await _wait_for_screen(app, pilot, PreflightImportScreen)
+        await pilot.press("1")  # both
+        await _wait_for_screen(app, pilot, AffectedImportScreen)
+        await pilot.press("1")  # green field
+        await _settle(pilot, times=120)
+
+    assert chosen, "WholeBankImportScreen never dismissed a choice"
+    observed = (
+        remediation_choices[0]
+        if remediation_choices
+        else (write_choices[0] if write_choices else None)
+    )
+    detail = (
+        "chosen_remediation="
+        f"{[getattr(c, 'remediation', None) for c in chosen]!r} "
+        "write_remediations="
+        f"{[getattr(c, 'remediation', None) for c in write_choices]!r} "
+        "write_cleared="
+        f"{[getattr(c, 'cleared_banks', None) for c in write_choices]!r} "
+        "write_init="
+        f"{[getattr(c, 'init_banks', None) for c in write_choices]!r} "
+        "remediation_cleared="
+        f"{[getattr(c, 'cleared_banks', None) for c in remediation_choices]!r} "
+        f"statuses={statuses[-12:]!r}"
+    )
+    assert observed is not None, f"remediation/write never ran; {detail}"
+    print(
+        "OBSERVED green-field modal path:",
+        {
+            "remediation": getattr(observed, "remediation", None),
+            "cleared_banks": tuple(getattr(observed, "cleared_banks", ())),
+            "init_banks": tuple(getattr(observed, "init_banks", ())),
+            "preflight": getattr(observed, "preflight", None),
+        },
+    )
+    assert getattr(observed, "remediation", None) == Remediation.GREEN_FIELD, detail
+    assert set(getattr(observed, "cleared_banks", ())) == {"RAM1", "RAM2"}, detail
+    assert "CARD" not in set(getattr(observed, "cleared_banks", ())), detail
+    assert getattr(observed, "init_banks", ()) == (), detail
+
+
+@pytest.mark.asyncio
+async def test_decide_counts_through_modals_reaches_write_path(
+    tmp_path: Any, monkeypatch: Any
+) -> None:
+    """Drive w/ctrl+s + preflight(both) + decide-with-counts and observe choice.
+
+    The counts answer amends the choice before remediation/write proceeds. When no
+    affected performances are found the answer becomes LEAVE (and the flow may go
+    straight on); when affected slots exist and ``i`` is chosen it becomes
+    INIT_AFFECTED with init banks. The first remediation/write call must carry the
+    resolved answer.
+    """
+    from kws import backup as _backup
+    from kwsed.import_bank import (
+        AffectedCountsScreen,
+        AffectedImportScreen,
+        PreflightImportScreen,
+        WholeBankImportScreen,
+    )
+
+    app = KwsedApp(DemoDevice(), bankstore_dir=str(tmp_path / "store"))
+    app._config_path = str(tmp_path / "absent-kwsed.toml")
+    app._write_gate = EditGate()
+    app._sources["RAM1"] = _make_bank(scope="RAM1", active_slots=[]).source
+    app._sources["RAM2"] = _make_bank(scope="RAM2", active_slots=[]).source
+    statuses: list[str] = []
+    app.notify_status = lambda msg, *a, **k: statuses.append(str(msg))  # type: ignore[method-assign]
+    backup_dir = str(tmp_path / "modal-counts-backups")
+    os.makedirs(backup_dir, exist_ok=True)
+    monkeypatch.setattr(_backup, "default_dir", lambda root=None: backup_dir)
+    monkeypatch.setattr(bankstore, "save", lambda *a, **k: None)
+    recorded: list[Any] = []
+    app._record_write = recorded.append  # type: ignore[method-assign]
+
+    file_banks = _two_bank_file()
+    write_choices: list[Any] = []
+    remediation_choices: list[Any] = []
+    original_write = app._import_whole_bank_write
+    original_start = app._start_remediation
+
+    def capture_write(bank: Any, choice: Any, **kw: Any) -> None:
+        write_choices.append(choice)
+        original_write(bank, choice, **kw)
+
+    def capture_start(bank: Any, choice: Any, *args: Any, **kw: Any) -> None:
+        remediation_choices.append(choice)
+        original_start(bank, choice, *args, **kw)
+
+    app._import_whole_bank_write = capture_write  # type: ignore[method-assign]
+    app._start_remediation = capture_start  # type: ignore[method-assign]
+
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        app.push_screen(
+            WholeBankImportScreen(
+                path="two.syx", banks=file_banks, gate=app._write_gate
+            ),
+            lambda picked: app._import_whole_bank_chosen(file_banks, picked, "two.syx"),
+        )
+        await _settle(pilot)
+        await pilot.press("w")
+        await pilot.press("ctrl+s")
+        await _wait_for_screen(app, pilot, PreflightImportScreen)
+        await pilot.press("1")  # both
+        await _wait_for_screen(app, pilot, AffectedImportScreen)
+        await pilot.press("2")  # decide with counts
+        for _ in range(600):
+            await pilot.pause()
+            if isinstance(app.screen, AffectedCountsScreen):
+                await pilot.press("i")  # init affected, if offered
+                break
+            if write_choices or remediation_choices:
+                break
+        for _ in range(160):
+            await pilot.pause()
+            if write_choices or remediation_choices:
+                break
+
+    observed = (
+        remediation_choices[0]
+        if remediation_choices
+        else (write_choices[0] if write_choices else None)
+    )
+    detail = (
+        "remediation="
+        f"{[getattr(c, 'remediation', None) for c in remediation_choices]!r} "
+        "remediation_init="
+        f"{[getattr(c, 'init_banks', None) for c in remediation_choices]!r} "
+        "write_remediations="
+        f"{[getattr(c, 'remediation', None) for c in write_choices]!r} "
+        "write_init="
+        f"{[getattr(c, 'init_banks', None) for c in write_choices]!r} "
+        f"statuses={statuses[-12:]!r}"
+    )
+    assert observed is not None, f"write path never received a choice; {detail}"
+    print(
+        "OBSERVED decide-counts modal path:",
+        {
+            "remediation": getattr(observed, "remediation", None),
+            "cleared_banks": tuple(getattr(observed, "cleared_banks", ())),
+            "init_banks": tuple(getattr(observed, "init_banks", ())),
+            "preflight": getattr(observed, "preflight", None),
+        },
+    )
+    assert getattr(observed, "remediation", None) in (
+        Remediation.INIT_AFFECTED,
+        Remediation.LEAVE,
+    ), detail
+    if getattr(observed, "remediation", None) == Remediation.INIT_AFFECTED:
+        init_banks = tuple(getattr(observed, "init_banks", ()) or ())
+        assert init_banks, detail
+    else:
+        assert tuple(getattr(observed, "cleared_banks", ()) or ()) == (), detail
