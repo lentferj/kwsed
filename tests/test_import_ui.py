@@ -8187,3 +8187,205 @@ async def test_decide_counts_through_modals_reaches_write_path(
         assert init_banks, detail
     else:
         assert tuple(getattr(observed, "cleared_banks", ()) or ()) == (), detail
+
+
+def _named_perf_record(name: str) -> bytes:
+    from kws import messages as _m
+    from kws import records as _rec
+
+    return bytes(_m.encode_name(name)) + bytes(_rec.PERFORMANCE_SIZE - 16)
+
+
+def _named_patch_record(name: str) -> bytes:
+    from kws import messages as _m
+    from kws import records as _rec
+
+    return bytes(_m.encode_name(name)) + bytes(_rec.PATCH_SIZE - 16)
+
+
+def _make_live_app(tmp_path: Any) -> Any:
+    from kws import livenames as _livenames
+
+    live_path = str(tmp_path / "live.json")
+    app = KwsedApp(DemoDevice(), live_path=live_path)
+    app._backup_dir = str(tmp_path / "backups")
+    return app
+
+
+def test_green_field_verified_write_adopts_init_live_names(tmp_path: Any) -> None:
+    from kws import livenames as _livenames
+    from kws import remediation as _remediation_mod
+
+    app = _make_live_app(tmp_path)
+    app.notify_status = lambda *a, **k: None
+    bank = banks.bank("RAM1")
+    for i in range(banks.PERFORMANCES_PER_BANK):
+        app.catalog.set_live_name(bank.id, i, f"OldP{i}", banks.Kind.PERFORMANCE)
+    for i in range(banks.PATCHES_PER_BANK):
+        app.catalog.set_live_name(bank.id, i, f"OldT{i}", banks.Kind.PATCH)
+
+    perf_blob, patch_blob, ws_blob = _remediation_mod.cleared_bank()
+    built = SimpleNamespace(performances=perf_blob, patches=patch_blob, waveseq=ws_blob)
+    app._remember_remediated_bank(
+        bank.id, built, {"verified": True, "bank": bank.label}
+    )
+
+    for i in range(banks.PERFORMANCES_PER_BANK):
+        assert app.catalog.display_name(bank.id, i, banks.Kind.PERFORMANCE) == "Init"
+    for i in range(banks.PATCHES_PER_BANK):
+        assert app.catalog.display_name(bank.id, i, banks.Kind.PATCH) == "Init"
+    flat = _livenames.load(app._live_path)
+    assert flat[_livenames.key(bank.id, 0, banks.Kind.PERFORMANCE)] == "Init"
+    assert flat[_livenames.key(bank.id, 0, banks.Kind.PATCH)] == "Init"
+
+
+def test_init_affected_verified_write_adopts_only_affected_slots(tmp_path: Any) -> None:
+    app = _make_live_app(tmp_path)
+    app.notify_status = lambda *a, **k: None
+    bank = banks.bank("RAM1")
+    for i in range(banks.PERFORMANCES_PER_BANK):
+        app.catalog.set_live_name(bank.id, i, f"Keep{i:02d}", banks.Kind.PERFORMANCE)
+    for i in range(banks.PATCHES_PER_BANK):
+        app.catalog.set_live_name(bank.id, i, f"Patch{i:02d}", banks.Kind.PATCH)
+
+    affected = {1, 7}
+    perfs = []
+    for i in range(banks.PERFORMANCES_PER_BANK):
+        name = "Init" if i in affected else f"Keep{i:02d}"
+        perfs.append(_named_perf_record(name))
+    perf_blob = b"".join(perfs)
+    built = SimpleNamespace(performances=perf_blob, patches=None, waveseq=None)
+    app._remember_remediated_bank(
+        bank.id, built, {"verified": True, "bank": bank.label}
+    )
+
+    for i in range(banks.PERFORMANCES_PER_BANK):
+        expected = "Init" if i in affected else f"Keep{i:02d}"
+        assert app.catalog.display_name(bank.id, i, banks.Kind.PERFORMANCE) == expected
+    for i in range(banks.PATCHES_PER_BANK):
+        assert app.catalog.display_name(bank.id, i, banks.Kind.PATCH) == f"Patch{i:02d}"
+
+
+def test_companion_patches_verified_write_adopts_patch_names_only(
+    tmp_path: Any,
+) -> None:
+    from kws import records as _rec
+
+    app = _make_live_app(tmp_path)
+    app.notify_status = lambda *a, **k: None
+    bank = banks.bank("RAM2")
+    for i in range(banks.PERFORMANCES_PER_BANK):
+        app.catalog.set_live_name(bank.id, i, f"Perf{i:02d}", banks.Kind.PERFORMANCE)
+    for i in range(banks.PATCHES_PER_BANK):
+        app.catalog.set_live_name(bank.id, i, f"OldPt{i:02d}", banks.Kind.PATCH)
+
+    source = deps.Source(
+        scope_id="RAM2",
+        performances=[bytes(_rec.PERFORMANCE_SIZE)] * banks.PERFORMANCES_PER_BANK,
+        patches=[
+            _named_patch_record(f"NewPt{i:02d}") for i in range(banks.PATCHES_PER_BANK)
+        ],
+        waveseq=None,
+    )
+    app._companion_write_done(
+        {"verified": True, "kinds": ["patches"]},
+        None,
+        companion=bank,
+        source=source,
+        count=banks.PATCHES_PER_BANK,
+        pending_note="",
+        on_done=None,
+    )
+
+    for i in range(banks.PERFORMANCES_PER_BANK):
+        assert (
+            app.catalog.display_name(bank.id, i, banks.Kind.PERFORMANCE)
+            == f"Perf{i:02d}"
+        )
+    for i in range(banks.PATCHES_PER_BANK):
+        assert app.catalog.display_name(bank.id, i, banks.Kind.PATCH) == f"NewPt{i:02d}"
+
+
+def test_failed_or_unverified_write_leaves_live_names_untouched(tmp_path: Any) -> None:
+    from kws import records as _rec
+    from kws import remediation as _remediation_mod
+    from kwsed.app import BankWriteOutcome, MultiBankOutcome
+
+    # Remediation: worker failure
+    app = _make_live_app(tmp_path)
+    app.notify_status = lambda *a, **k: None
+    bank = banks.bank("RAM1")
+    app.catalog.set_live_name(bank.id, 0, "KeepPerf", banks.Kind.PERFORMANCE)
+    app.catalog.set_live_name(bank.id, 0, "KeepPatch", banks.Kind.PATCH)
+    choice = SimpleNamespace(remediation=Remediation.GREEN_FIELD, session_key="")
+    app._remediation_write_done(
+        None,
+        RuntimeError("boom"),
+        bank=None,
+        choice=choice,
+        banks_list=None,
+        path="",
+        sources={},
+    )
+    assert app.catalog.display_name(bank.id, 0, banks.Kind.PERFORMANCE) == "KeepPerf"
+    assert app.catalog.display_name(bank.id, 0, banks.Kind.PATCH) == "KeepPatch"
+
+    # Remediation: unverified/failed bank, nothing completed
+    perf_blob, patch_blob, ws_blob = _remediation_mod.cleared_bank()
+    built = {
+        "RAM1": SimpleNamespace(
+            performances=perf_blob, patches=patch_blob, waveseq=ws_blob
+        )
+    }
+    outcome = MultiBankOutcome(
+        completed=[],
+        failed_bank=bank,
+        error="no",
+        not_written=[],
+    )
+    app._remediation_write_done(
+        (outcome, built),
+        None,
+        bank=None,
+        choice=choice,
+        banks_list=None,
+        path="",
+        sources={},
+    )
+    assert app.catalog.display_name(bank.id, 0, banks.Kind.PERFORMANCE) == "KeepPerf"
+    assert app.catalog.display_name(bank.id, 0, banks.Kind.PATCH) == "KeepPatch"
+
+    # Companion: failed/unverified
+    app2 = _make_live_app(tmp_path)
+    app2.notify_status = lambda *a, **k: None
+    bank2 = banks.bank("RAM2")
+    for i in range(banks.PERFORMANCES_PER_BANK):
+        app2.catalog.set_live_name(bank2.id, i, f"Perf{i:02d}", banks.Kind.PERFORMANCE)
+    for i in range(banks.PATCHES_PER_BANK):
+        app2.catalog.set_live_name(bank2.id, i, f"OldPt{i:02d}", banks.Kind.PATCH)
+    source = deps.Source(
+        scope_id="RAM2",
+        performances=[bytes(_rec.PERFORMANCE_SIZE)] * banks.PERFORMANCES_PER_BANK,
+        patches=[
+            _named_patch_record(f"NewPt{i:02d}") for i in range(banks.PATCHES_PER_BANK)
+        ],
+        waveseq=None,
+    )
+    app2._companion_write_done(
+        {"verified": False, "mismatch": "bad"},
+        None,
+        companion=bank2,
+        source=source,
+        count=35,
+        pending_note="",
+        on_done=None,
+    )
+    for i in range(banks.PERFORMANCES_PER_BANK):
+        assert (
+            app2.catalog.display_name(bank2.id, i, banks.Kind.PERFORMANCE)
+            == f"Perf{i:02d}"
+        )
+    for i in range(banks.PATCHES_PER_BANK):
+        assert (
+            app2.catalog.display_name(bank2.id, i, banks.Kind.PATCH) == f"OldPt{i:02d}"
+        )

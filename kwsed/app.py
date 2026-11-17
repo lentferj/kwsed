@@ -4080,12 +4080,16 @@ class KwsedApp(App[None]):
         captured = self._archive.get(number)
         if captured is None:
             return
+        performances = dict(captured.performances)
+        performances.update(perf_names)
+        patches = dict(captured.patches)
+        patches.update(patch_names)
         updated = _cards.CapturedBank(
             number=captured.number,
             name=captured.name,
             captured_at=captured.captured_at,
-            performances=perf_names,
-            patches=patch_names,
+            performances=performances,
+            patches=patches,
             label=captured.label,
             digest=captured.digest,
             verified=False,
@@ -4096,6 +4100,44 @@ class KwsedApp(App[None]):
                 _cards.save(updated, self._cards_path)
             except OSError:
                 pass
+
+    def _adopt_written_names(
+        self,
+        scope_id: str,
+        *,
+        perf_blob: Optional[bytes] = None,
+        patch_blob: Optional[bytes] = None,
+    ) -> None:
+        """Adopt live names for exactly the kinds whose bytes were written.
+
+        Only the supplied blobs' names are recorded; kinds left as ``None``
+        keep their previous live names. This is bookkeeping after a verified
+        write and must not touch anything else.
+        """
+        try:
+            entry = banks.bank(scope_id)
+        except LookupError:
+            if not scope_id.startswith("CARD/"):
+                return
+            entry = banks.bank("CARD")
+        perf_names = (
+            self._names_in_blob(perf_blob, rec.PERFORMANCE_SIZE)
+            if perf_blob is not None
+            else {}
+        )
+        patch_names = (
+            self._names_in_blob(patch_blob, rec.PATCH_SIZE)
+            if patch_blob is not None
+            else {}
+        )
+        self._save_written_names(entry, perf_names, patch_names)
+        self._save_written_card(scope_id, perf_names, patch_names)
+        if not getattr(self, "_screen_stack", None):
+            return
+        if self._current_pair[0] == entry.number:
+            self._refill_keeping_place()
+        else:
+            self._refresh_deps_pane()
 
     def _refresh_written_bank(self, scope_id: str, built: Any) -> None:
         """Refresh the browser for the bank a write just changed.
@@ -8591,6 +8633,9 @@ class KwsedApp(App[None]):
                 )
             except OSError:
                 pass
+        # A verified companion write changes the bank's patch names on the
+        # unit; the performances were left as they were.
+        self._adopt_written_names(companion.id, patch_blob=patches_blob)
 
     def _offer_companions_after_write(
         self,
@@ -8943,6 +8988,9 @@ class KwsedApp(App[None]):
                 )
             except OSError:
                 pass
+        # A verified overflow write changes the bank's patch names on the
+        # unit; the performances were left as they were.
+        self._adopt_written_names(overflow.id, patch_blob=built.overflow_patches)
 
     def _self_contained_split(
         self,
