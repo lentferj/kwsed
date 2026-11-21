@@ -12455,6 +12455,13 @@ class KwsedApp(App[None]):
             # message is stale and must not overwrite the current pane.
             if event.cursor_row != event.data_table.cursor_row:
                 return
+            try:
+                self.query_one("#slot-table", DataTable)
+            except Exception:
+                # The sibling is not mounted yet, or a modal screen is up
+                # and this highlight queued before it. Either way there is
+                # nothing to fill into; a live highlight will follow.
+                return
             row = event.cursor_row
             if 0 <= row < len(self._row_multis):
                 physical = (
