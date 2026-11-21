@@ -68,7 +68,10 @@ async def test_multi_edit_arm_then_fire_calls_write():
     async with app.run_test() as pilot:
         await pilot.pause()
         app.push_screen(screen)
-        await pilot.pause()
+        for _ in range(100):
+            await pilot.pause()
+            if screen.is_mounted and len(screen.query("#slot-table")) > 0:
+                break
         screen.action_arm()
         await pilot.pause()
         screen.action_fire()

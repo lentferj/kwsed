@@ -230,7 +230,9 @@ class TestConfigDirOnFirstRun:
         monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
         from kws import config as cfgmod
 
-        monkeypatch.setattr(cfgmod, "config_dir", lambda tool: target)
+        monkeypatch.setattr(
+            cfgmod, "config_dir", lambda tool: str(tmp_path / "cfg" / tool)
+        )
         from kwsed import app as appmod
 
         monkeypatch.setattr(appmod.KwsedApp, "run", lambda self: None)

@@ -187,6 +187,13 @@ class TestSingleKindUndo:
                 if len(app._undo_log) == 0:
                     break
             assert len(app._undo_log) == 0, "one `z` must consume the record"
+            # The app drives the unit from workers; this direct read must
+            # wait until none is still in flight, so it cannot race a
+            # worker's own read over the fake's single reply queue.
+            for _ in range(200):
+                await pilot.pause()
+                if not app._busy and not app._exchange.locked():
+                    break
             after = m.parse(unit.bridge.read_raw(CARD_SYSEX, m.Function.ALL_PATCH_DUMP))
             assert after is not None
             assert after.data()[: len(PATCH_BANK)] == bytes(old)
