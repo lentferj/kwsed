@@ -527,12 +527,10 @@ async def test_the_import_screen_shows_the_bar_while_it_covers_the_app(tmp_path)
         app._sources["RAM3"] = _target_source(keep=False)
         screen = await _open_import_screen(app, pilot)
 
+        # The report paints synchronously on this thread, so assert at once:
+        # any pause lets a stale hide-timer from an earlier transfer win.
         app._progress_report("receiving RAM 3 patches", 0.25)
         bar = screen.query_one("#progress", Static)
-        for _ in range(100):
-            await pilot.pause()
-            if bar.display is True and "25%" in str(bar.content):
-                break
         assert bar.display is True
         assert "25%" in str(bar.content)
 

@@ -2346,6 +2346,7 @@ async def test_two_pass_import_splits_disjoint_targets(
         for _ in range(2):  # RAM 1 -> RAM 3
             await pilot.press("down")
         await pilot.press("enter")
+        await _wait_for_screen(app, pilot, AffectedImportScreen)
         await pilot.press("2")  # the next pass is asked the same question
         await _wait_for_writes(app, pilot, 2)
         await _settle(pilot)
