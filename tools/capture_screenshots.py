@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import dataclasses
 import html
 import re
 import sys
@@ -47,12 +48,16 @@ sys.path.insert(0, str(REPO_ROOT))
 from kws import banks  # noqa: E402
 from kws import catalog as cat  # noqa: E402
 from kws import scan as _scan  # noqa: E402
+from kws.fx import FxBlock  # noqa: E402
 from kws.multi import Multiset, Part  # noqa: E402
 from kwsed.app import (  # noqa: E402
+    FxScreen,
     KwsedApp,
+    MultiEditScreen,
     SendScreen,
 )
-from kwsed.demo import DemoDevice  # noqa: E402
+from kwsed.demo import DemoDevice, demo_name  # noqa: E402
+from kwsed.target_bank import ImportMenuScreen  # noqa: E402
 from vinsynlib.ui.modals import RatingFilter, RatingFilterScreen  # noqa: E402
 from vinsynlib.ui.report import ReportScreen  # noqa: E402
 
@@ -60,6 +65,9 @@ DEFAULT_OUT = REPO_ROOT / "docs" / "screenshots"
 SCREEN_W = 820
 SCREEN_NAMES = [
     "browser",
+    "multi",
+    "fx",
+    "import",
     "send",
     "scan-offer",
     "scan",
@@ -126,15 +134,27 @@ def screen_text(svg: str) -> str:
 
 
 def invented_catalog() -> cat.Catalog:
-    """A small catalog of invented names."""
-    return cat.Catalog(
-        [
-            cat.Entry("RAM1", 0, "Book Name", banks.Kind.PERFORMANCE),
-            cat.Entry("RAM1", 1, "Rusted Pad", banks.Kind.PERFORMANCE),
-            cat.Entry("RAM1", 2, "Amber Keys", banks.Kind.PERFORMANCE),
-        ],
-        source="demo (invented names)",
+    """A small catalog of invented names, enough to fill the demo bank."""
+    entries = [
+        cat.Entry(
+            "RAM1",
+            number,
+            demo_name("RAM1", "performance", number),
+            banks.Kind.PERFORMANCE,
+        )
+        for number in range(50)
+    ]
+    entries.extend(
+        cat.Entry(
+            "RAM1",
+            number,
+            demo_name("RAM1", "patch", number),
+            banks.Kind.PATCH,
+        )
+        for number in range(35)
     )
+    entries[0] = cat.Entry("RAM1", 0, "Book Name", banks.Kind.PERFORMANCE)
+    return cat.Catalog(entries, source="demo (invented names)")
 
 
 def make_app(catalog: cat.Catalog) -> KwsedApp:
@@ -222,6 +242,35 @@ def _make_multisets() -> list[Multiset]:
     return sets
 
 
+async def shot_multi(app: KwsedApp, pilot: Any) -> None:
+    """The Multiset editor and its 16 channels."""
+    app.push_screen(MultiEditScreen(multisets=_make_multisets(), selected=0))
+    await wait_for_screen(app, pilot, MultiEditScreen)
+
+
+async def shot_fx(app: KwsedApp, pilot: Any) -> None:
+    """The performance FX editor."""
+    block = FxBlock.empty()
+    block = dataclasses.replace(
+        block,
+        series=True,
+        fx1=block.fx1.with_type(2),  # Medium Hall
+        fx2=block.fx2.with_type(15),  # Stereo Delay
+    )
+    app.push_screen(
+        FxScreen(block, 0, subject="RAM 1 performance 00", gate_armed=False)
+    )
+    await wait_for_screen(app, pilot, FxScreen)
+
+
+async def shot_import(app: KwsedApp, pilot: Any) -> None:
+    """The import menu."""
+    app.push_screen(
+        ImportMenuScreen("Import", ["Whole bank", "Single / multiple performances"])
+    )
+    await wait_for_screen(app, pilot, ImportMenuScreen)
+
+
 async def shot_send(app: KwsedApp, pilot: Any) -> None:
     """The send/write screen."""
     app.push_screen(
@@ -266,6 +315,9 @@ async def shot_reports(app: KwsedApp, pilot: Any) -> None:
 
 MARKERS: dict[str, list[str]] = {
     "browser": ["Book Name"],
+    "multi": ["Edit Multiset"],
+    "fx": ["FX 1"],
+    "import": ["Whole bank"],
     "send": ["Write a bank"],
     "scan-offer": ["no name catalog"],
     "scan": ["Scanning"],
@@ -275,6 +327,9 @@ MARKERS: dict[str, list[str]] = {
 
 SHOT_FUNCTIONS: dict[str, Callable[[KwsedApp, Any], Awaitable[None]]] = {
     "browser": shot_browser,
+    "multi": shot_multi,
+    "fx": shot_fx,
+    "import": shot_import,
     "send": shot_send,
     "scan-offer": shot_scan_offer,
     "scan": shot_scan,

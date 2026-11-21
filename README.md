@@ -12,8 +12,10 @@ A terminal browser for the **Korg Wavestation SR**.
 > from a fitted program card — were exercised on hardware on 2026-09-12.
 > `select` now sends Bank Select (CC0 = 0, CC32 0–5) and a Program Change
 > per Player's Guide §4.8 and Reference Appendix 3 §1.3, but kwsed cannot
-> read whether the SR's Bank Select MIDI-receive parameter is ON; nothing
-> inside a record past its name is decoded.
+> read whether the SR's Bank Select MIDI-receive parameter is ON. Names,
+> parts, patch and wave-sequence references and the 21-byte FX block are
+> decoded; the remaining settings bytes are copied verbatim and not
+> interpreted, and the FX layout's hardware confirmation is still open.
 > **Read [DISCLAIMER.md](DISCLAIMER.md) first.**
 
 Two panes: bank-and-kind on the left, that bank's slots on the right.
@@ -80,6 +82,11 @@ unit or emulator **before** connecting irreplaceable equipment.
   performances together from RAM to Card, Card to RAM or RAM to RAM. It
   rewrites the performances' references to the source bank so the copy is
   self-contained, backs up the destination first and verifies every kind.
+- **Edits effects.** `x` opens the FX editor for the selected performance;
+  the same key inside the Multi editor edits the Multiset's own 21-byte FX
+  block. Both processors' type, parameters, series/parallel routing, mix
+  and modulation are shown from the shared tables, and the write goes
+  through the same fence as every other write.
 - **Remembers what a Multiset pointed at.** A snapshot per Multiset warns on
   load when the Card bank or a RAM performance it was built against has
   changed; `r` in the Multi editor records existing setups without sending
@@ -114,6 +121,7 @@ Feature map:
 | Cards, physical cards, HCard | [Cards](#cards-card_mode), [docs/CARDS.md](docs/CARDS.md), [docs/HCARD.md](docs/HCARD.md) |
 | Multisets and multi-card staging | [Multisets and multi-card staging](#multisets-and-multi-card-staging) |
 | Atomic performance copy and dependencies | [Dependencies and atomic copying](#dependencies-and-atomic-copying) |
+| Effects (FX) | [Effects (FX)](#effects-fx), [docs/FX_PLAN.md](docs/FX_PLAN.md) |
 | Bank builder | [Building a favourites bank](#building-a-favourites-bank), [docs/BANK_BUILDER.md](docs/BANK_BUILDER.md) |
 | Imports, disk images, `.LIB`, `.sqs` | [Importing banks and performances](#importing-banks-and-performances), [docs/IMPORT_PLAN.md](docs/IMPORT_PLAN.md) |
 | Bank cache | [Local bank cache](#local-bank-cache) |
@@ -206,6 +214,22 @@ refuse patch slots; a patch is heard through a performance that uses it. See
 
 ---
 
+## Screenshots
+
+All shots are the demo device, with invented names. Regenerate them with
+`python3 tools/capture_screenshots.py`; `cairosvg` is optional and only
+needed for the PNGs.
+
+| | |
+|---|---|
+| ![The browser](docs/screenshots/browser.png) <br> **Browser.** Banks on the left, the selected bank-and-kind's slots on the right. | ![The Multiset editor](docs/screenshots/multi.png) <br> **Multi editor.** One Multiset's 16 channels, levels and used flags. |
+| ![The FX editor](docs/screenshots/fx.png) <br> **FX editor.** Two processors, routing, mix and the type's parameter rows. | ![The import menu](docs/screenshots/import.png) <br> **Import.** Whole bank, or single/multiple performances. |
+| ![The write screen](docs/screenshots/send.png) <br> **Write fence.** The destination and what will be replaced, before the gate fires. | ![The scan offer](docs/screenshots/scan-offer.png) <br> **Scan offer.** Shown once when no name catalog exists. |
+| ![The scan screen](docs/screenshots/scan.png) <br> **Scan progress.** Every real bank, cancellable. | ![The rating filter](docs/screenshots/rating-filter.png) <br> **Rating filter.** 0–5 stars, at least or at most. |
+| ![The help screen](docs/screenshots/reports.png) <br> **Help.** Every binding in one place. | |
+
+---
+
 ## Install
 
 ```sh
@@ -250,6 +274,7 @@ kwsed --port "U6MIDI Pro:U6MIDI Pro MIDI 1 44:0" --device-channel 5
 | `m` / `e` | read the 32 Multisets / edit the selected one — **silent** |
 | `d` / `D` | show the selection's dependencies / show-hide the dependency pane — silent, remembered |
 | `p` | show/hide the patch rows in the bank list — remembered (they can be inspected, not selected) |
+| `x` | edit the selected performance's effects — silent until the write (patches have no FX of their own) |
 | `y` | open the unified copy session for this performance, prefilled and ready for the target/slot map |
 | `B` | copy the whole bank under the cursor into another writable bank — all three kinds, backed up and verified |
 | `I` | import/copy: whole bank from a file or unit bank, or select performances from files, RAM, ROM or Card into one target bank |
@@ -272,8 +297,9 @@ prefilled slot map, use `s` to add more sources, `w` to arm and `ctrl+s` to
 write; `?` opens help and `esc`/`q` goes back. In the **Multi editor**
 (`m`, then `e`), `b` chooses a bank (including `CARD/07` and `CARD/c1`), `s`
 stages card performances into RAM, `space` toggles a channel's used flag,
-`+`/`-` nudges its level, `n` renames it, and `a`/`w` arm and write the staged
-bundle.
+`+`/`-` nudges its level, `n` renames it, `x` edits the Multiset's FX, `r`
+records a snapshot of what the channels point at, and `a`/`w` arm and write
+the staged bundle.
 
 ### Writes, backups and undo
 
@@ -303,7 +329,8 @@ and `n` a free-text note; both require an existing favourite and say so
 otherwise. `V` filters by 0–5 stars. These live in the favourites database
 (`--favorites PATH`, default `~/.local/share/kwsed/favorites.db`), not in the
 bank cache. HCard banks and physical cards keep their favourites separately,
-so the same slot number on two cards cannot collide.
+so the same slot number on two cards cannot collide. In the rating filter,
+`esc` keeps the current filter and `x` then `enter` clears it.
 
 ### Dependencies and atomic copying
 
@@ -398,45 +425,6 @@ files.
 | `~/.local/share/kwsed/banks/` | imported bank records |
 | `~/.local/share/kwsed/backups/` | write-fence backup envelopes |
 
-### Pre-audit staging area
-
-Two hand-edited keys in `~/.config/kwsed/config.toml` reserve a staging area
-the import screen's audition uses:
-
-```toml
-preaudit_target_perf = "RAM3:49"
-preaudit_target_patches = "RAM3:27-34"
-# preaudit_backup = false   # off: faster staging, no `z` for the patches
-```
-
-`preaudit_target_perf` names a single performance slot and
-`preaudit_target_patches` a patch slot range (inclusive; a single slot is
-valid). Both must point at a writable bank (RAM 1-3 or the Card). It is the
-user's job to keep those slots free; the app still backs up whatever it
-overwrites there. A malformed value or a ROM bank silently turns the feature
-off. Before the dump the unit is switched to the configured pre-audit
-performance slot (Performance mode, Bank Select, Program Change), so it
-is on the slot the audition is meant for rather than whatever was current.
-`preaudit_backup` defaults to true: what the staging slots hold is read
-once per screen session and `z` puts it back. Setting it to false skips
-those reads (and the per-patch backup envelopes) -- the audition is
-quicker, but `z` no longer restores the staged patches. The staging bank
-itself is read when the import screen opens, so the whole-bank fallback
-does not wait for it during `t`; a unit that refuses the single-patch
-write is remembered for the session and later auditions skip straight to
-the bank dump.
-A staged audition writes each needed patch on its own (one 426-byte
-dump and an `EXECUTE_WRITE`, read back to prove it landed), so it costs a
-fraction of a second per patch instead of a whole bank. Only the target's
-sequence memory, when the plan needs wave sequences, is written as a whole
-bank -- and when a unit does not take the single-patch write, the staging
-falls back to one whole patch bank. Those whole-bank writes need **memory
-protect off**; with protect on the unit refuses the dump. The ordinary
-`ctrl+s` import needs no audition and is unaffected. A whole-bank import
-into `RAM 3` overwrites the same patch slots named by
-`preaudit_target_patches`; the import screen warns about them before it
-writes.
-
 ### Multisets and multi-card staging
 
 `m` reads the 32 Multisets; `e` edits the selected one's 16 channels. Silent
@@ -448,6 +436,26 @@ several cards at once. `a` then `w` writes the staged bank(s) *and* the Multi
 Mode Setup as one fenced bundle; `z` restores all of it. The budgets and the
 full staging rules are in [docs/BANK_BUILDER.md](docs/BANK_BUILDER.md).
 `kwscli multi --all` includes empty Multisets.
+
+### Effects (FX)
+
+A performance carries its effects, not its patches: a 21-byte block holding
+two processors, their routing and their parameters. `x` reads the selected
+performance, refuses a patch slot or a ROM bank, and opens the FX editor.
+The same key in the Multi editor edits the Multiset's own block, which also
+carries an FX control channel. Which pair is heard depends on the MIDI mode:
+in OMNI/POLY the performance's FX are heard, in MULTI/MONO the Multiset's FX
+are heard and override the performances'.
+
+The table is built from the type's parameter group, so a type change rebuilds
+it instead of hard-coding rows. `enter` edits the focused row, `+`/`-` nudges
+it, `a` arms and `w` writes. A write is one performance dump (or one Multiset
+record) through the same fence as every other write: read first, back up,
+write, verify, and `z` restores it. Nothing is sent while browsing the rows.
+The 56 types and their layouts are shared by the performance and Multiset
+blocks; `kwscli fx RAM1 12`, `kwscli fx --multi 3` and `kwscli fx types` read
+them without writing. The hardware confirmation of the layout is still open —
+see [docs/FX_PLAN.md](docs/FX_PLAN.md).
 
 ---
 
@@ -467,6 +475,7 @@ means the command works from the local archives/cache.
 | `dump BANK [KIND]` | read one bank's names — silent | yes | no |
 | `select BANK KIND N` | select a performance/Multiset (patches refused) | yes | no (sets mode) |
 | `multi [--all]` | the 32 Multisets and their 16 channels — silent | yes | no |
+| `fx BANK NUMBER`, `fx --multi N`, `fx types` | read an FX block, or list the 56 types — silent | yes (types: no) | no |
 | `deps BANK [KIND N]` | Performance → Patch → WaveSeq graph | no if cached | no |
 | `import FILE` | file/disk → local bank cache | no | no |
 | `copy-perf ...` | copy performances with dependencies | yes unless `--out` | with `--yes` |
@@ -484,6 +493,8 @@ kwscli find "glass"
 kwscli status
 kwscli dump CARD
 kwscli multi --all
+kwscli fx RAM1 12
+kwscli fx types
 kwscli select RAM1 performance 12
 kwscli deps RAM1 --source RAM1=dumps/ram1-*.syx
 kwscli copy-perf CARD/07:3 CARD/13:11 --to RAM3 --out staged
@@ -611,7 +622,6 @@ u / Backspace / Delete   unassign
 A / U        assign all unassigned / clear all
 p            toggle shared/fresh patches (fresh = the import gets its
              own patch copies, independent of the target bank)
-t            audition the focused row (see below)
 a            toggle auto audition: moving on a source row plays it
 s            choose a source bank already in the session, or add another file
 w            toggle the write gate
@@ -701,6 +711,46 @@ with `s`, adjust the map, arm the gate and write one batch. The target write
 is the same fenced bundle and one undo step. The CLI remains the scriptable
 path; the browser `I`/`y` use the same readers, planner and cache.
 
+### Pre-audit staging area
+
+Two hand-edited keys in `~/.config/kwsed/config.toml` reserve a staging area
+the import screen's audition uses:
+
+```toml
+preaudit_target_perf = "RAM3:49"
+preaudit_target_patches = "RAM3:27-34"
+# preaudit_backup = false   # off: faster staging, no `z` for the patches
+```
+
+`preaudit_target_perf` names a single performance slot and
+`preaudit_target_patches` a patch slot range (inclusive; a single slot is
+valid). Both must point at a writable bank (RAM 1-3 or the Card). It is the
+user's job to keep those slots free; the app still backs up whatever it
+overwrites there. A malformed value or a ROM bank silently turns the feature
+off. Before the dump the unit is switched to the configured pre-audit
+performance slot (Performance mode, Bank Select, Program Change), so it
+is on the slot the audition is meant for rather than whatever was current.
+`preaudit_backup` defaults to true: what the staging slots hold is read
+once per screen session and `z` puts it back. Setting it to false skips
+those reads (and the per-patch backup envelopes) -- the audition is
+quicker, but `z` no longer restores the staged patches. The staging bank
+itself is read when the import screen opens, so the whole-bank fallback
+does not wait for it during `t`; a unit that refuses the single-patch
+write is remembered for the session and later auditions skip straight to
+the bank dump.
+
+A staged audition writes each needed patch on its own (one 426-byte
+dump and an `EXECUTE_WRITE`, read back to prove it landed), so it costs a
+fraction of a second per patch instead of a whole bank. Only the target's
+sequence memory, when the plan needs wave sequences, is written as a whole
+bank -- and when a unit does not take the single-patch write, the staging
+falls back to one whole patch bank. Those whole-bank writes need **memory
+protect off**; with protect on the unit refuses the dump. The ordinary
+`ctrl+s` import needs no audition and is unaffected. A whole-bank import
+into `RAM 3` overwrites the same patch slots named by
+`preaudit_target_patches`; the import screen warns about them before it
+writes.
+
 ### What each source supplies
 
 | source | extensions | performances | patches | wave sequences | multisets | notes |
@@ -762,12 +812,11 @@ at.
 | `--yes` | `copy-perf`, `send`, `backup save`, `backup restore` | take the action; without it the fence/read stops first |
 | `--backup-dir DIR` | `copy-perf`, `send`, `backup list/save/restore` | where the backup envelopes live |
 
-`copy-perf` is the single-performance import. It puts the performance in the
-first free slot, copies its patches privately, packs them contiguously with no
-gap, and rewrites every part to the new patch slots. If the source is a
-container with several banks of the same scope, import the chosen one first
-with `--label` and then copy from the cache; `--from-file` keeps one source per
-scope.
+`copy-perf` is the single-performance import; the atomic copy it performs is
+described under [Dependencies and atomic copying](#dependencies-and-atomic-copying).
+If the source is a container with several banks of the same scope, import the
+chosen one first with `--label` and then copy from the cache; `--from-file`
+keeps one source per scope.
 
 A SoundDiver `.LIB` brings its own RAM1 wave-sequence bank, so its
 sequence-based performances copy too. A patch that points at a different
@@ -864,9 +913,6 @@ python3 tools/extract_catalog.py ~/path/to/*.syx
 That writes `kws/data/catalog.json`, which is gitignored. kwsed works
 without it, showing numbers only — and a connected unit can supply every
 name.
-
-Screenshots of the demo browser are captured with
-`python3 tools/capture_screenshots.py`.
 
 Where two files hold the same bank and kind, the **first wins** and the rest
 are reported. Silently keeping whichever was read last would produce a
