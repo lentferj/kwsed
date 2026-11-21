@@ -223,10 +223,17 @@ class TestConfigDirOnFirstRun:
     def test_main_creates_config_dir(self, tmp_path, monkeypatch):
         import os
 
+        # config_dir is per-platform (XDG on Linux, Application Support
+        # on macOS, LOCALAPPDATA on Windows), so point it at the tmp dir
+        # instead of relying on XDG_CONFIG_HOME, which only Linux reads.
+        target = str(tmp_path / "cfg" / "kwsed")
         monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+        from kws import config as cfgmod
+
+        monkeypatch.setattr(cfgmod, "config_dir", lambda tool: target)
         from kwsed import app as appmod
 
         monkeypatch.setattr(appmod.KwsedApp, "run", lambda self: None)
         rc = appmod.main(["--demo"])
         assert rc == 0
-        assert os.path.isdir(os.path.join(str(tmp_path / "cfg"), "kwsed"))
+        assert os.path.isdir(target)
