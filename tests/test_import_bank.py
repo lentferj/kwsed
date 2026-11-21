@@ -673,8 +673,6 @@ async def test_cards_only_choice_ignores_an_explicit_ram_target() -> None:
 @pytest.mark.asyncio
 async def test_cards_only_without_a_card_bank_refuses(monkeypatch: Any) -> None:
     """No resolvable card: the screen says so and never falls back to RAM."""
-    from kwsed import import_bank
-
     banks_list = _containment_banks()
     gate = EditGate(armed=True)
     screen = WholeBankImportScreen(

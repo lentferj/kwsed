@@ -2,8 +2,9 @@
 #
 # Everything here runs against .venv, which the README tells you to create
 # with --system-site-packages so the system python-rtmidi is visible. Every
-# target therefore goes through .venv/bin rather than PATH, because the tools
-# are installed there and nowhere else.
+# target therefore goes through $(VENV_BIN) rather than PATH, because the tools
+# are installed there and nowhere else (.venv/bin on POSIX, .venv/Scripts
+# on Windows).
 #
 #   make bootstrap   install the project and the pinned toolchain
 #   make lint        ruff check
@@ -14,13 +15,20 @@
 #   make check       all of the above, in order, stopping at the first failure
 
 VENV      := .venv
-PYTHON    := $(VENV)/bin/python
-PIP       := $(VENV)/bin/pip
-RUFF      := $(VENV)/bin/ruff
-MYPY      := $(VENV)/bin/mypy
-VULTURE   := $(VENV)/bin/vulture
-PIP_AUDIT := $(VENV)/bin/pip-audit
-DETECT    := $(VENV)/bin/detect-secrets
+ifeq ($(OS),Windows_NT)
+VENV_BIN  := $(VENV)/Scripts
+EXE       := .exe
+else
+VENV_BIN  := $(VENV)/bin
+EXE       :=
+endif
+PYTHON    := $(VENV_BIN)/python$(EXE)
+PIP       := $(VENV_BIN)/pip$(EXE)
+RUFF      := $(VENV_BIN)/ruff$(EXE)
+MYPY      := $(VENV_BIN)/mypy$(EXE)
+VULTURE   := $(VENV_BIN)/vulture$(EXE)
+PIP_AUDIT := $(VENV_BIN)/pip-audit$(EXE)
+DETECT    := $(VENV_BIN)/detect-secrets$(EXE)
 
 # Scanned source. kws/data is the generated name catalog and is excluded by
 # ruff's extend-exclude and by detect-secrets' own filters.
@@ -48,9 +56,9 @@ help:
 	@echo 'See docs/QUALITY_CHECKS.md for what is suppressed and why.'
 
 bootstrap:
-	$(PIP) install --upgrade pip
-	$(PIP) install -r requirements-dev.txt
-	$(PIP) install -e .
+	$(PYTHON) -m pip install --upgrade pip
+	$(PYTHON) -m pip install -r requirements-dev.txt
+	$(PYTHON) -m pip install -e .
 	@echo 'toolchain ready.'
 
 # --- linting and formatting --------------------------------------------------
@@ -114,14 +122,14 @@ coverage-floor:
 	@# --fail-under compares the *total* of whatever report it printed. One
 	@# call over all seven would pass while one of them sat at 60%.
 	@for mod in $(subst $(comma), ,$(LOGIC_MODULES)); do \
-	    $(VENV)/bin/python -m coverage report --include=$$mod \
+	    $(PYTHON) -m coverage report --include=$$mod \
 	        --fail-under=$(LOGIC_FLOOR) >/dev/null 2>&1 || { \
 	        echo "coverage floor: $$mod is below $(LOGIC_FLOOR)%"; \
-	        $(VENV)/bin/python -m coverage report --include=$$mod; \
+	        $(PYTHON) -m coverage report --include=$$mod; \
 	        exit 1; }; \
 	done
 	@echo 'coverage floor: every logic module at or above $(LOGIC_FLOOR)%'
-	@$(VENV)/bin/python -m coverage report --include=$(LOGIC_MODULES) \
+	@$(PYTHON) -m coverage report --include=$(LOGIC_MODULES) \
 	    --skip-covered | tail -n 9
 
 # --- audit -------------------------------------------------------------------
@@ -140,7 +148,7 @@ audit-dead:
 	$(VULTURE) --min-confidence 80 $(SRC)
 
 audit-deps:
-	$(VENV)/bin/deptry .
+	$(VENV_BIN)/deptry$(EXE) .
 
 audit-secrets:
 	$(DETECT) scan --baseline .secrets.baseline \

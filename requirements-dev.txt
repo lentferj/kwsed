@@ -32,7 +32,7 @@ PyYAML==6.0.3
 Pygments==2.21.0
 ast-serialize==0.12.0
 boolean.py==5.0
-certifi==2026.7.22
+certifi==2026.11.20
 cfgv==3.5.0
 charset-normalizer==3.5.2
 click==8.5.0
@@ -40,7 +40,7 @@ coverage==7.16.2
 cyclonedx-python-lib==11.12.0
 defusedxml==0.7.1
 distlib==0.4.3
-filelock==4.0.9
+filelock==4.2.12
 identify==2.6.20
 idna==3.20
 iniconfig==2.3.0
@@ -69,4 +69,4 @@ tomli==2.4.1
 tomli-w==1.2.0
 typing-extensions==4.16.0
 urllib3==2.8.0
-virtualenv==21.14.5
+virtualenv==21.15.11

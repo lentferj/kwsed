@@ -72,11 +72,7 @@ jobs:
 
       - name: Install kwsed and the checks
         shell: bash
-        run: |
-          if [ -x .venv/Scripts/python.exe ]; then PY=.venv/Scripts/python.exe; else PY=.venv/bin/python; fi
-          # `make bootstrap` is: pip install --upgrade pip, then the pinned
-          # toolchain from requirements-dev.txt, then the project editable.
-          make bootstrap
+        run: make bootstrap
 
       # The whole pipeline, exactly as a developer runs it locally:
       # lint, format-check, typecheck, test (with the 70% coverage gate and
